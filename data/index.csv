@@ -1,0 +1,7 @@
+type,name,file_path
+box,Caixa Petita,boxes/box_small.stp
+box,Caixa Mitjana,boxes/box_medium.stp
+box,Caixa Gran,boxes/box_large.stp
+object,Producte Petit,objects/product_small.stp
+object,Producte Mitjà,objects/product_medium.stp
+object,Producte Gran,objects/product_large.stp
