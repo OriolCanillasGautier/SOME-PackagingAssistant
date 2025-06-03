@@ -35,26 +35,25 @@ def optimize_packing(box_dims, obj_dims, max_attempts=100):
                 "error": "L'objecte és massa gran per la caixa"
             }
         
-        packer = Packer()
-
-        # Crear caixa (bin) - py3dbp usa (name, width, height, depth, max_weight)
+        packer = Packer()        # Crear caixa (bin) - py3dbp usa (partno, WHD, max_weight)
         box = Bin(
-            name="Container",
-            width=float(box_dims["width"]),
-            height=float(box_dims["height"]),
-            depth=float(box_dims["length"]),
+            partno="Container",
+            WHD=[float(box_dims["width"]), float(box_dims["height"]), float(box_dims["length"])],
             max_weight=99999.0  # Pes màxim arbitrari
         )
         packer.add_bin(box)
 
         # Afegir múltiples còpies de l'objecte
-        for i in range(max_attempts):
-            obj = Item(
-                name=f"Product_{i}",
-                width=float(obj_dims["width"]),
-                height=float(obj_dims["height"]),
-                depth=float(obj_dims["length"]),
-                weight=1.0  # Pes arbitrari
+        for i in range(max_attempts):            obj = Item(
+                partno=f"Product_{i}",  # Part number
+                name=f"Product_{i}",    # Name
+                typeof="cube",          # Type of object
+                WHD=[float(obj_dims["width"]), float(obj_dims["height"]), float(obj_dims["length"])],  # Dimensions
+                weight=1.0,             # Weight
+                level=1,                # Packing priority level (1-3)
+                loadbear=100.0,         # Load bearing capability
+                updown=True,            # Can be placed upside down
+                color="red"             # Color for visualization
             )
             packer.add_item(obj)
 
