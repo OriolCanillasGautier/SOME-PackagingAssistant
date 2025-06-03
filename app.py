@@ -173,22 +173,49 @@ class PackAssistGUI:
         ttk.Entry(box_frame, textvariable=self.box_height_var).grid(row=2, column=1, sticky=(tk.W, tk.E), padx=(5, 0), pady=(5, 0))
         
         box_frame.columnconfigure(1, weight=1)
-        
-        # Dimensions de l'objecte
+          # Dimensions de l'objecte
         obj_frame = ttk.LabelFrame(manual_frame, text="📋 Dimensions de l'objecte (mm)", padding="10")
         obj_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N), padx=(5, 0), pady=(0, 10))
         
-        ttk.Label(obj_frame, text="Longitud:").grid(row=0, column=0, sticky=tk.W)
+        # Opcions per introduir dimensions manualment o carregar-les des de fitxer
+        self.input_method_var = tk.StringVar(value="manual")
+        ttk.Radiobutton(obj_frame, text="Entrada manual", variable=self.input_method_var, 
+                       value="manual", command=self.toggle_input_method).grid(row=0, column=0, columnspan=2, sticky=tk.W)
+        ttk.Radiobutton(obj_frame, text="Carregar fitxer 3D", variable=self.input_method_var, 
+                       value="file", command=self.toggle_input_method).grid(row=0, column=1, columnspan=2, sticky=tk.W)
+        
+        # Frame per entrada manual
+        self.manual_input_frame = ttk.Frame(obj_frame)
+        self.manual_input_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 0))
+        
+        ttk.Label(self.manual_input_frame, text="Longitud:").grid(row=0, column=0, sticky=tk.W)
         self.obj_length_var = tk.DoubleVar(value=200.0)
-        ttk.Entry(obj_frame, textvariable=self.obj_length_var).grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 0))
+        ttk.Entry(self.manual_input_frame, textvariable=self.obj_length_var).grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 0))
         
-        ttk.Label(obj_frame, text="Amplada:").grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        ttk.Label(self.manual_input_frame, text="Amplada:").grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
         self.obj_width_var = tk.DoubleVar(value=150.0)
-        ttk.Entry(obj_frame, textvariable=self.obj_width_var).grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(5, 0), pady=(5, 0))
+        ttk.Entry(self.manual_input_frame, textvariable=self.obj_width_var).grid(row=1, column=1, sticky=(tk.W, tk.E), padx=(5, 0), pady=(5, 0))
         
-        ttk.Label(obj_frame, text="Altura:").grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
+        ttk.Label(self.manual_input_frame, text="Altura:").grid(row=2, column=0, sticky=tk.W, pady=(5, 0))
         self.obj_height_var = tk.DoubleVar(value=100.0)
-        ttk.Entry(obj_frame, textvariable=self.obj_height_var).grid(row=2, column=1, sticky=(tk.W, tk.E), padx=(5, 0), pady=(5, 0))
+        ttk.Entry(self.manual_input_frame, textvariable=self.obj_height_var).grid(row=2, column=1, sticky=(tk.W, tk.E), padx=(5, 0), pady=(5, 0))
+        
+        self.manual_input_frame.columnconfigure(1, weight=1)
+        
+        # Frame per entrada de fitxer
+        self.file_input_frame = ttk.Frame(obj_frame)
+        self.file_input_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 0))
+        
+        self.file_path_var = tk.StringVar()
+        ttk.Entry(self.file_input_frame, textvariable=self.file_path_var, width=30).grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
+        ttk.Button(self.file_input_frame, text="Explorar...", command=self.browse_3d_file).grid(row=0, column=1)
+        
+        # Informació de les dimensions del fitxer
+        self.file_info_var = tk.StringVar(value="Dimensions: - x - x - mm")
+        ttk.Label(self.file_input_frame, textvariable=self.file_info_var).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        
+        self.file_input_frame.columnconfigure(0, weight=1)
+        self.file_input_frame.grid_remove()  # Inicialment ocult
         
         obj_frame.columnconfigure(1, weight=1)
         
