@@ -22,8 +22,7 @@ def optimize_packing(box_dims, obj_dims, max_attempts=100):
             raise ValueError("box_dims ha de tenir les claus: width, height, length")
         if not all(key in obj_dims for key in ['width', 'height', 'length']):
             raise ValueError("obj_dims ha de tenir les claus: width, height, length")
-            
-        # Verificar que l'objecte cap a la caixa
+              # Verificar que l'objecte cap a la caixa
         if (obj_dims["width"] > box_dims["width"] or 
             obj_dims["height"] > box_dims["height"] or 
             obj_dims["length"] > box_dims["length"]):
@@ -32,45 +31,73 @@ def optimize_packing(box_dims, obj_dims, max_attempts=100):
                 "efficiency": 0.0,
                 "box_volume": box_dims["width"] * box_dims["height"] * box_dims["length"],
                 "used_volume": 0.0,
+                "bins": [],
                 "error": "L'objecte és massa gran per la caixa"
             }
         
-        packer = Packer()        # Crear caixa (bin) - py3dbp usa (partno, WHD, max_weight)
+        packer = Packer()
+          # Crear caixa (bin) - py3dbp usa (partno, WHD, max_weight)
         box = Bin(
             partno="Container",
             WHD=[float(box_dims["width"]), float(box_dims["height"]), float(box_dims["length"])],
             max_weight=99999.0  # Pes màxim arbitrari
         )
-        packer.add_bin(box)
-
+        packer.addBin(box)
+        
         # Afegir múltiples còpies de l'objecte
-        for i in range(max_attempts):            obj = Item(
+        for i in range(max_attempts):
+            obj = Item(
                 partno=f"Product_{i}",  # Part number
                 name=f"Product_{i}",    # Name
-                typeof="cube",          # Type of object
-                WHD=[float(obj_dims["width"]), float(obj_dims["height"]), float(obj_dims["length"])],  # Dimensions
+                typeof="cube",          # Type of object                WHD=[float(obj_dims["width"]), float(obj_dims["height"]), float(obj_dims["length"])],  # Dimensions
                 weight=1.0,             # Weight
                 level=1,                # Packing priority level (1-3)
                 loadbear=100.0,         # Load bearing capability
                 updown=True,            # Can be placed upside down
                 color="red"             # Color for visualization
             )
-            packer.add_item(obj)
+            packer.addItem(obj)
 
         packer.pack()
-        
-        # Calcular informació de l'empaquetament
+          # Calcular informació de l'empaquetament
         packed_items = len(box.items)
         box_volume = box_dims["width"] * box_dims["height"] * box_dims["length"]
         obj_volume = obj_dims["width"] * obj_dims["height"] * obj_dims["length"]
         used_volume = packed_items * obj_volume
         efficiency = (used_volume / box_volume) * 100 if box_volume > 0 else 0
         
+        # Crear informació detallada per la visualització
+        bins_info = []
+        items_info = []
+        
+        # Informació del contenidor
+        bin_data = {
+            "name": "Container",
+            "dimensions": [box_dims["width"], box_dims["height"], box_dims["length"]],
+            "volume": box_volume
+        }
+        
+        # Informació dels objectes empaquetats
+        for item in box.items:
+            item_data = {
+                "name": item.name,
+                "position": item.position,
+                "dimensions": item.getDimension(),
+                "rotation_type": item.rotation_type
+                    }
+            items_info.append(item_data)
+        
+        bins_info.append({
+            "bin": bin_data,
+            "items": items_info
+        })
+        
         return {
             "max_objects": packed_items,
             "efficiency": round(efficiency, 2),
             "box_volume": round(box_volume, 2),
             "used_volume": round(used_volume, 2),
+            "bins": bins_info,
             "error": None
         }
         
@@ -80,6 +107,7 @@ def optimize_packing(box_dims, obj_dims, max_attempts=100):
             "efficiency": 0.0,
             "box_volume": 0.0,
             "used_volume": 0.0,
+            "bins": [],
             "error": str(e)
         }
 

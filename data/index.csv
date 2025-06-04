@@ -1,7 +1,8 @@
 type,name,file_path
 box,Caixa Petita,boxes/box_small.stp
-box,Caixa Mitjana,boxes/box_medium.stp
 box,Caixa Gran,boxes/box_large.stp
-object,Producte Petit,objects/product_small.stp
-object,Producte Mitjà,objects/product_medium.stp
-object,Producte Gran,objects/product_large.stp
+object,Caixa Petita,objects/caixa_petita.stp
+object,Component Electrònic,objects/component_electronic.stp
+object,Llibre Gran,objects/llibre_gran.stp
+object,Llibre Petit,objects/llibre_petit.stp
+object,Paquet Amazon,objects/paquet_amazon.stp

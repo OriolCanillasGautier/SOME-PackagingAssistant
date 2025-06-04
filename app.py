@@ -10,7 +10,21 @@ import threading
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from pathlib import Path
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+import numpy as np
 from src.packassist import get_stp_dimensions, validate_stp_file, optimize_packing, calculate_theoretical_max
+try:
+    from src.packassist import get_stl_dimensions, validate_stl_file, STL_SUPPORT
+    if not STL_SUPPORT:
+        STL_SUPPORT = False
+except ImportError:
+    STL_SUPPORT = False
+    def get_stl_dimensions(filepath):
+        return None
+    def validate_stl_file(filepath):
+        return False
 
 # Constants
 CSV_PATH = "data/index.csv"
@@ -20,6 +34,7 @@ class PackAssistGUI:
     """Interfície gràfica principal per PackAssist 3D."""
     
     def __init__(self, root):
+        """Inicialitza la interfície gràfica."""
         self.root = root
         self.root.title("PackAssist 3D - Optimitzador de Bin Packing")
         self.root.geometry("1000x700")
@@ -62,21 +77,21 @@ class PackAssistGUI:
     def create_widgets(self):
         """Crea tots els widgets de la interfície."""
         # Frame principal
-        main_frame = ttk.Frame(self.root, padding="10")
-        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.main_frame = ttk.Frame(self.root, padding="10")
+        self.main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Configurar redimensionament
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
-        main_frame.columnconfigure(0, weight=1)
-        main_frame.rowconfigure(1, weight=1)
+        self.main_frame.columnconfigure(0, weight=1)
+        self.main_frame.rowconfigure(1, weight=1)
         
         # Títol
-        title_label = ttk.Label(main_frame, text="🎯 PackAssist 3D", style='Title.TLabel')
+        title_label = ttk.Label(self.main_frame, text="🎯 PackAssist 3D", style='Title.TLabel')
         title_label.grid(row=0, column=0, pady=(0, 10))
         
         # Notebook per pestanyes
-        self.notebook = ttk.Notebook(main_frame)
+        self.notebook = ttk.Notebook(self.main_frame)
         self.notebook.grid(row=1, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Crear pestanyes
@@ -85,7 +100,10 @@ class PackAssistGUI:
         self.create_results_tab()
         
         # Barra d'estat
-        self.create_status_bar(main_frame)
+        self.create_status_bar(self.main_frame)
+        
+        # Afegir botó de visualització 3D
+        self.create_visualization_section()
     
     def create_stp_tab(self):
         """Crea la pestanya de fitxers STP."""
@@ -520,7 +538,6 @@ class PackAssistGUI:
             self.manual_results.insert(tk.END, f"   Longitud: {obj_dims['length']:.1f} mm\n")
             self.manual_results.insert(tk.END, f"   Amplada: {obj_dims['width']:.1f} mm\n")
             self.manual_results.insert(tk.END, f"   Altura: {obj_dims['height']:.1f} mm\n\n")
-            
             theoretical_max = calculate_theoretical_max(box_dims, obj_dims)
             result = optimize_packing(box_dims, obj_dims)
             
@@ -529,14 +546,24 @@ class PackAssistGUI:
             
             if result["error"]:
                 self.manual_results.insert(tk.END, f"   ❌ Error: {result['error']}\n")
+                # Deshabilitar visualització si hi ha error
+                self.visualize_btn.config(state=tk.DISABLED)
             else:
                 self.manual_results.insert(tk.END, f"   ✅ Màxim real (3D packing): {result['max_objects']} unitats\n")
                 self.manual_results.insert(tk.END, f"   📈 Eficiència d'espai: {result['efficiency']:.1f}%\n")
                 self.manual_results.insert(tk.END, f"   📏 Volum contenidor: {result['box_volume']:.0f} mm³\n")
                 self.manual_results.insert(tk.END, f"   📦 Volum utilitzat: {result['used_volume']:.0f} mm³\n")
-            
+                
+                # Guardar resultats per visualització
+                self.optimization_results = result
+                
+                # Habilitar botó de visualització si hi ha objectes empaquetats
+                if result['max_objects'] > 0:
+                    self.visualize_btn.config(state=tk.NORMAL)
+                else:
+                    self.visualize_btn.config(state=tk.DISABLED)
+                    
             self.update_status("Càlcul manual completat")
-            
         except ValueError:
             messagebox.showerror("Error", "Introdueix valors numèrics vàlids")
         except Exception as e:
@@ -545,7 +572,6 @@ class PackAssistGUI:
     def export_results(self):
         """Exporta els resultats a un fitxer."""
         content = self.results_text.get(1.0, tk.END)
-        
         if not content.strip():
             messagebox.showwarning("Avís", "No hi ha resultats per exportar")
             return
@@ -571,7 +597,228 @@ class PackAssistGUI:
         """Neteja els resultats."""
         self.results_text.delete(1.0, tk.END)
         self.update_status("Resultats netejats")
-
+    
+    def toggle_input_method(self):
+        """Toggle entre entrada manual i selecció de fitxer 3D."""
+        method = self.input_method_var.get()
+        if method == "manual":
+            self.file_input_frame.grid_remove()
+            self.manual_input_frame.grid()
+        else:
+            self.manual_input_frame.grid_remove()
+            self.file_input_frame.grid()
+    
+    def browse_3d_file(self):
+        """Obre un diàleg per seleccionar un fitxer 3D (STP/STL)."""
+        filetypes = []
+        if STL_SUPPORT:
+            filetypes.append(("Fitxers 3D", "*.stp;*.step;*.stl"))
+            filetypes.append(("Fitxers STL", "*.stl"))
+        filetypes.append(("Fitxers STP", "*.stp;*.step"))
+        filetypes.append(("Tots els fitxers", "*.*"))
+        
+        filepath = filedialog.askopenfilename(
+            title="Selecciona un fitxer 3D",
+            filetypes=filetypes
+        )
+        
+        if not filepath:
+            return
+            
+        self.file_path_var.set(filepath)
+        self.update_file_info(filepath)
+    
+    def update_file_info(self, filepath):
+        """Actualitza la informació de dimensions del fitxer 3D seleccionat."""
+        if not filepath:
+            self.file_info_var.set("Dimensions: - x - x - mm")
+            return
+            
+        try:
+            # Determinar quin tipus de fitxer és
+            if filepath.lower().endswith(('.stp', '.step')):
+                dimensions = get_stp_dimensions(filepath)
+            elif filepath.lower().endswith('.stl') and STL_SUPPORT:
+                dimensions = get_stl_dimensions(filepath)
+            else:
+                self.file_info_var.set("Format de fitxer no suportat")
+                return
+                
+            if dimensions:
+                info = f"Dimensions: {dimensions['length']} x {dimensions['width']} x {dimensions['height']} mm"
+                self.file_info_var.set(info)
+                
+                # Actualitzar les variables per les dimensions
+                self.obj_length_var.set(dimensions['length'])
+                self.obj_width_var.set(dimensions['width'])
+                self.obj_height_var.set(dimensions['height'])
+            else:
+                self.file_info_var.set("Error llegint fitxer")
+        except Exception as e:
+            self.file_info_var.set(f"Error: {str(e)}")
+    
+    def create_visualization_section(self):
+        """Crea la secció de visualització 3D."""
+        self.viz_frame = ttk.LabelFrame(self.main_frame, text="🎯 Visualització 3D", padding="10")
+        self.viz_frame.grid(row=6, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        
+        # Botó de visualització
+        self.visualize_btn = ttk.Button(
+            self.viz_frame,
+            text="📊 Visualitzar Empaquetament",
+            command=self.visualize_packing,
+            state=tk.DISABLED
+        )
+        self.visualize_btn.grid(row=0, column=0, padx=5)
+        
+        # Frame per al canvas de matplotlib
+        self.canvas_frame = ttk.Frame(self.viz_frame)
+        self.canvas_frame.grid(row=1, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=5)
+    
+    def visualize_packing(self):
+        """Mostra la visualització 3D dels resultats d'empaquetament."""
+        if not hasattr(self, 'optimization_results') or not self.optimization_results:
+            messagebox.showwarning("Advertència", "No hi ha resultats d'optimització per visualitzar.")
+            return
+            
+        try:
+            # Neteja el canvas anterior si existeix
+            if hasattr(self, 'canvas'):
+                self.canvas.get_tk_widget().destroy()
+                
+            # Crear figura de matplotlib
+            fig = Figure(figsize=(12, 8), dpi=100)
+            
+            results = self.optimization_results
+            
+            # Crear subplots per cada bin utilitzat
+            num_bins = len(results['bins'])
+            cols = min(3, num_bins)  # Màxim 3 columnes
+            rows = (num_bins + cols - 1) // cols
+            
+            for i, bin_result in enumerate(results['bins']):
+                ax = fig.add_subplot(rows, cols, i+1, projection='3d')
+                
+                # Obtenir la informació del bin
+                bin_data = bin_result['bin']
+                items = bin_result['items']
+                
+                # Dibuixar el contenidor (bin)
+                self.draw_bin_wireframe(ax, bin_data)
+                
+                # Dibuixar els objectes
+                for j, item in enumerate(items):
+                    self.draw_item_3d(ax, item, j)
+                
+                # Configurar l'axes
+                ax.set_xlabel('Longitud (mm)')
+                ax.set_ylabel('Amplada (mm)')
+                ax.set_zlabel('Altura (mm)')
+                ax.set_title(f'Contenidor {i+1}: {bin_data["name"]}')
+                
+                # Fer els axes iguals
+                self.set_axes_equal_3d(ax)
+            
+            plt.tight_layout()
+            
+            # Integrar amb Tkinter
+            self.canvas = FigureCanvasTkAgg(fig, master=self.canvas_frame)
+            self.canvas.draw()
+            self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            
+            # Afegir barra d'eines
+            from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
+            toolbar = NavigationToolbar2Tk(self.canvas, self.canvas_frame)
+            toolbar.update()
+            
+            self.update_status("Visualització 3D generada correctament")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error generant visualització 3D: {e}")
+            print(f"Error detallat: {e}")
+    
+    def draw_bin_wireframe(self, ax, bin_data):
+        """Dibuixa el wireframe del contenidor."""
+        w, h, d = bin_data['dimensions']
+        
+        # Definir els vèrtexs del cub
+        vertices = [
+            [0, 0, 0], [w, 0, 0], [w, h, 0], [0, h, 0],  # base inferior
+            [0, 0, d], [w, 0, d], [w, h, d], [0, h, d]   # base superior
+        ]
+        
+        # Definir les arestes
+        edges = [
+            [0, 1], [1, 2], [2, 3], [3, 0],  # base inferior
+            [4, 5], [5, 6], [6, 7], [7, 4],  # base superior
+            [0, 4], [1, 5], [2, 6], [3, 7]   # arestes verticals
+        ]
+        
+        # Dibuixar les arestes
+        for edge in edges:
+            points = [vertices[edge[0]], vertices[edge[1]]]
+            ax.plot3D(*zip(*points), color='black', linewidth=2, alpha=0.8)
+    
+    def draw_item_3d(self, ax, item, index):
+        """Dibuixa un objecte en 3D."""
+        pos = item['position']
+        dims = item['dimensions']
+        
+        # Coordenades del cub
+        x, y, z = pos
+        w, h, d = dims
+        
+        # Crear els vèrtexs del cub
+        vertices = [
+            [x, y, z], [x+w, y, z], [x+w, y+h, z], [x, y+h, z],
+            [x, y, z+d], [x+w, y, z+d], [x+w, y+h, z+d], [x, y+h, z+d]
+        ]
+        
+        # Color basat en l'índex
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
+        color = colors[index % len(colors)]
+        
+        # Dibuixar les cares del cub
+        faces = [
+            [vertices[0], vertices[1], vertices[2], vertices[3]],  # base inferior
+            [vertices[4], vertices[5], vertices[6], vertices[7]],  # base superior
+            [vertices[0], vertices[1], vertices[5], vertices[4]],  # cara frontal            [vertices[2], vertices[3], vertices[7], vertices[6]],  # cara posterior
+            [vertices[1], vertices[2], vertices[6], vertices[5]],  # cara dreta
+            [vertices[4], vertices[7], vertices[3], vertices[0]]   # cara esquerra
+        ]
+        for face in faces:
+            # Crear polígon per la cara utilitzant Poly3DCollection
+            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+            poly = Poly3DCollection([face], alpha=0.7, facecolor=color, edgecolor='black')
+            ax.add_collection3d(poly)
+        
+        # Afegir etiqueta
+        label_x = x + w/2
+        label_y = y + h/2
+        label_z = z + d/2
+        ax.text(label_x, label_y, label_z, item['name'], fontsize=8, ha='center')
+    
+    def set_axes_equal_3d(self, ax):
+        """Fa que els eixos 3D tinguin la mateixa escala."""
+        # Obtenir els límits actuals
+        x_limits = ax.get_xlim3d()
+        y_limits = ax.get_ylim3d()
+        z_limits = ax.get_zlim3d()
+        
+        # Calcular els rangs
+        x_range = abs(x_limits[1] - x_limits[0])
+        x_middle = sum(x_limits) / 2
+        y_range = abs(y_limits[1] - y_limits[0])
+        y_middle = sum(y_limits) / 2
+        z_range = abs(z_limits[1] - z_limits[0])
+        z_middle = sum(z_limits) / 2
+        
+        # El radi del plot és la meitat del rang màxim
+        plot_radius = 0.5 * max([x_range, y_range, z_range])
+        
+        ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
+        ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
+        ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
 
 def main():
     """Funció principal."""
