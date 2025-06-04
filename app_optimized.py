@@ -623,47 +623,37 @@ class PackAssistGUI:
                 self.obj_vars[2].set(height_cm)
             else:
                 self.file_info_var.set("Error llegint fitxer STP")
-        except Exception as e:            self.file_info_var.set(f"Error: {str(e)}")
+        except Exception as e:
+            self.file_info_var.set(f"Error: {str(e)}")
 
     # === FUNCIONS DE CÀLCUL ===
+    
     def calculate_manual(self):
         """Calcula l'empaquetament manual."""
         try:
-            # Obtenir dimensions com a tuples (convertir de cm a mm per l'optimitzador)
-            box_tuple = (
-                self.box_vars[0].get() * 10,  # length
-                self.box_vars[1].get() * 10,  # width  
-                self.box_vars[2].get() * 10   # height
-            )
-            obj_tuple = (
-                self.obj_vars[0].get() * 10,  # length
-                self.obj_vars[1].get() * 10,  # width
-                self.obj_vars[2].get() * 10   # height
-            )
-            
-            # Validar dimensions
-            if any(v <= 0 for v in box_tuple) or any(v <= 0 for v in obj_tuple):
-                messagebox.showerror("Error", "Totes les dimensions han de ser positives")
-                return
-            
-            # Convertir a diccionaris per la visualització
+            # Obtenir dimensions (convertir de cm a mm per l'optimitzador)
             box_dims = {
-                "length": box_tuple[0],
-                "width": box_tuple[1], 
-                "height": box_tuple[2]
+                "length": self.box_vars[0].get() * 10,
+                "width": self.box_vars[1].get() * 10,
+                "height": self.box_vars[2].get() * 10
             }
             obj_dims = {
-                "length": obj_tuple[0],
-                "width": obj_tuple[1],
-                "height": obj_tuple[2]
+                "length": self.obj_vars[0].get() * 10,
+                "width": self.obj_vars[1].get() * 10,
+                "height": self.obj_vars[2].get() * 10
             }
+            
+            # Validar dimensions
+            if any(v <= 0 for v in box_dims.values()) or any(v <= 0 for v in obj_dims.values()):
+                messagebox.showerror("Error", "Totes les dimensions han de ser positives")
+                return
             
             # Calcular
             self.manual_results.delete(1.0, tk.END)
             results_content = self._build_manual_results_content(box_dims, obj_dims)
             
-            theoretical_max = calculate_theoretical_max(box_tuple, obj_tuple)
-            result = optimize_packing(box_tuple, obj_tuple)
+            theoretical_max = calculate_theoretical_max(box_dims, obj_dims)
+            result = optimize_packing(box_dims, obj_dims)
             
             results_content += self._build_optimization_results(result, theoretical_max)
             
@@ -775,16 +765,13 @@ class PackAssistGUI:
                     progress = (current / total_combinations) * 100
                     self.progress_var.set(progress)
                     self.update_status(f"Processant {current}/{total_combinations}: {box_info['name']} + {obj_info['name']}")
+                    
                     obj_dims = self._get_entry_dimensions(obj_info["file_path"])
                     if not obj_dims:
                         continue
                     
-                    # Convertir dimensions a tuples per l'optimitzador
-                    box_tuple = (box_dims['length'], box_dims['width'], box_dims['height'])
-                    obj_tuple = (obj_dims['length'], obj_dims['width'], obj_dims['height'])
-                    
-                    theoretical_max = calculate_theoretical_max(box_tuple, obj_tuple)
-                    result = optimize_packing(box_tuple, obj_tuple)
+                    theoretical_max = calculate_theoretical_max(box_dims, obj_dims)
+                    result = optimize_packing(box_dims, obj_dims)
                     
                     self.results_text.insert(tk.END, f"  ➕ Objecte: {obj_info['name']}\n")
                     self.results_text.insert(tk.END, f"     📏 Dimensions: {obj_dims}\n")

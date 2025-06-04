@@ -9,20 +9,28 @@ def optimize_packing(box_dims, obj_dims, max_attempts=100):
     Calcula el nombre màxim d'objectes que caben en una caixa.
     
     Args:
-        box_dims: Dict amb claus 'width', 'height', 'length'
-        obj_dims: Dict amb claus 'width', 'height', 'length' 
+        box_dims: Tuple (length, width, height) o Dict amb claus 'width', 'height', 'length'
+        obj_dims: Tuple (length, width, height) o Dict amb claus 'width', 'height', 'length' 
         max_attempts: Nombre màxim d'objectes a intentar empaquetar
         
     Returns:
         Dict amb informació del resultat de l'empaquetament
     """
     try:
+        # Convertir tuples a diccionaris si cal
+        if isinstance(box_dims, tuple):
+            box_dims = {"length": box_dims[0], "width": box_dims[1], "height": box_dims[2]}
+        if isinstance(obj_dims, tuple):
+            obj_dims = {"length": obj_dims[0], "width": obj_dims[1], "height": obj_dims[2]}
+            
         # Validar dimensions
         if not all(key in box_dims for key in ['width', 'height', 'length']):
             raise ValueError("box_dims ha de tenir les claus: width, height, length")
         if not all(key in obj_dims for key in ['width', 'height', 'length']):
             raise ValueError("obj_dims ha de tenir les claus: width, height, length")
-              # Verificar que l'objecte cap a la caixa
+            raise ValueError("box_dims ha de tenir les claus: width, height, length")
+        if not all(key in obj_dims for key in ['width', 'height', 'length']):
+            raise ValueError("obj_dims ha de tenir les claus: width, height, length")        # Verificar que l'objecte cap a la caixa
         if (obj_dims["width"] > box_dims["width"] or 
             obj_dims["height"] > box_dims["height"] or 
             obj_dims["length"] > box_dims["length"]):
@@ -46,15 +54,15 @@ def optimize_packing(box_dims, obj_dims, max_attempts=100):
           # Afegir múltiples còpies de l'objecte
         for i in range(max_attempts):
             obj = Item(
-                partno=f"Product_{i}",  # Part number
-                name=f"Product_{i}",    # Name
-                typeof="cube",          # Type of object
-                WHD=[float(obj_dims["width"]), float(obj_dims["height"]), float(obj_dims["length"])],  # Dimensions
-                weight=1.0,             # Weight
-                level=1,                # Packing priority level (1-3)
-                loadbear=100.0,         # Load bearing capability
-                updown=True,            # Can be placed upside down
-                color="red"             # Color for visualization
+                f"Product_{i}",  # partno
+                f"Product_{i}",  # name
+                "cube",          # typeof
+                [float(obj_dims["width"]), float(obj_dims["height"]), float(obj_dims["length"])],  # WHD
+                1.0,             # weight
+                1,               # level
+                100.0,           # loadbear
+                True,            # updown
+                "red"            # color
             )
             packer.addItem(obj)
 
@@ -117,6 +125,12 @@ def calculate_theoretical_max(box_dims, obj_dims):
     Això dóna una estimació optimista.
     """
     try:
+        # Convertir tuples a diccionaris si cal
+        if isinstance(box_dims, tuple):
+            box_dims = {"length": box_dims[0], "width": box_dims[1], "height": box_dims[2]}
+        if isinstance(obj_dims, tuple):
+            obj_dims = {"length": obj_dims[0], "width": obj_dims[1], "height": obj_dims[2]}
+            
         box_volume = box_dims["width"] * box_dims["height"] * box_dims["length"]
         obj_volume = obj_dims["width"] * obj_dims["height"] * obj_dims["length"]
         return math.floor(box_volume / obj_volume) if obj_volume > 0 else 0
