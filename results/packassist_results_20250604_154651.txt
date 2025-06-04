@@ -1,0 +1,55 @@
+🎯 PROCESSANT FITXERS STP
+==================================================
+
+📦 Contenidor: Caixa Petita
+   Dimensions: {'length': 200.0, 'width': 150.0, 'height': 100.0}
+
+  ➕ Objecte: Test-STP TONI
+     📏 Dimensions: {'length': 1092.0, 'width': 819.0, 'height': 546.0}
+     ❌ Error: L'objecte és massa gran per la caixa
+
+----------------------------------------
+
+✅ PROCESSAT COMPLETAT!
+
+[2025-06-04 15:46:39] 🧮 CÀLCUL D'EMPAQUETAMENT MANUAL
+========================================
+
+📦 Contenidor:
+   Longitud: 200.0 mm
+   Amplada: 150.0 mm
+   Altura: 100.0 mm
+
+📋 Objecte:
+   Longitud: 1092.0 mm
+   Amplada: 819.0 mm
+   Altura: 546.0 mm
+
+📊 RESULTATS:
+   ➕ Màxim teòric (per volum): 0 unitats
+   ❌ Error: L'objecte és massa gran per la caixa
+
+============================================================
+
+[2025-06-04 15:46:51] 🧮 CÀLCUL D'EMPAQUETAMENT MANUAL
+========================================
+
+📦 Contenidor:
+   Longitud: 2000.0 mm
+   Amplada: 1500.0 mm
+   Altura: 1000.0 mm
+
+📋 Objecte:
+   Longitud: 1092.0 mm
+   Amplada: 819.0 mm
+   Altura: 546.0 mm
+
+📊 RESULTATS:
+   ➕ Màxim teòric (per volum): 6 unitats
+   ✅ Màxim real (3D packing): 3 unitats
+   📈 Eficiència d'espai: 48.8%
+   📏 Volum contenidor: 3000000000.0 mm³
+   📦 Volum utilitzat: 1464942024.0 mm³
+
+============================================================
+
