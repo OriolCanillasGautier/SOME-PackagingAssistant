@@ -1,0 +1,61 @@
+
+[2025-06-04 12:21:42] 🧮 CÀLCUL D'EMPAQUETAMENT MANUAL
+========================================
+
+📦 Contenidor:
+   Longitud: 200.0 mm
+   Amplada: 150.0 mm
+   Altura: 100.0 mm
+
+📋 Objecte:
+   Longitud: 1092.0 mm
+   Amplada: 819.0 mm
+   Altura: 546.0 mm
+
+📊 RESULTATS:
+   ➕ Màxim teòric (per volum): 0 unitats
+   ❌ Error: L'objecte és massa gran per la caixa
+
+============================================================
+
+[2025-06-04 12:35:35] 🧮 CÀLCUL D'EMPAQUETAMENT MANUAL
+========================================
+
+📦 Contenidor:
+   Longitud: 200.0 mm
+   Amplada: 150.0 mm
+   Altura: 100.0 mm
+
+📋 Objecte:
+   Longitud: 250.0 mm
+   Amplada: 180.0 mm
+   Altura: 30.0 mm
+
+📊 RESULTATS:
+   ➕ Màxim teòric (per volum): 2 unitats
+   ❌ Error: L'objecte és massa gran per la caixa
+
+============================================================
+
+[2025-06-04 12:36:03] 🧮 CÀLCUL D'EMPAQUETAMENT MANUAL
+========================================
+
+📦 Contenidor:
+   Longitud: 800.0 mm
+   Amplada: 600.0 mm
+   Altura: 400.0 mm
+
+📋 Objecte:
+   Longitud: 250.0 mm
+   Amplada: 180.0 mm
+   Altura: 30.0 mm
+
+📊 RESULTATS:
+   ➕ Màxim teòric (per volum): 120 unitats
+   ✅ Màxim real (3D packing): 100 unitats
+   📈 Eficiència d'espai: 70.3%
+   📏 Volum contenidor: 192000000 mm³
+   📦 Volum utilitzat: 135000000 mm³
+
+============================================================
+

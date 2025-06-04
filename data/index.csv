@@ -6,3 +6,5 @@ object,Component Electrònic,objects/component_electronic.stp
 object,Llibre Gran,objects/llibre_gran.stp
 object,Llibre Petit,objects/llibre_petit.stp
 object,Paquet Amazon,objects/paquet_amazon.stp
+object,Test-STP TONI,C:/Users/ocanillas/Downloads/646812800A.stp
+box,Caixa,C:/Users/ocanillas/GitHub/PackAssist/SOME-PackagingAssistant/data/custom/custom_dimensions.json
