@@ -1,13 +1,12 @@
-import cadquery as cq
 import os
-import json
+import struct
+import numpy as np
 from pathlib import Path
-import hashlib
-from datetime import datetime
 
 def get_stl_dimensions(file_path):
     """
     Carrega un fitxer STL i retorna les dimensions de la caixa de límits.
+    Implementació simplificada que llegeix directament el fitxer STL.
     
     Args:
         file_path: Ruta al fitxer STL
@@ -24,24 +23,27 @@ def get_stl_dimensions(file_path):
         if not file_path.lower().endswith('.stl'):
             raise ValueError("El fitxer ha de ser un STL")
             
-        # Carregar el fitxer
-        shape = cq.importers.importStl(file_path)
+        # Llegir fitxer STL i calcular bounding box
+        vertices = read_stl_vertices(file_path)
         
-        # Verificar que s'ha carregat correctament
-        if shape is None:
-            raise ValueError("No s'ha pogut carregar la geometria del fitxer")
+        if len(vertices) == 0:
+            raise ValueError("No s'han trobat vèrtexs al fitxer STL")
             
-        bbox = shape.val().BoundingBox()
+        # Calcular bounding box
+        min_coords = np.min(vertices, axis=0)
+        max_coords = np.max(vertices, axis=0)
+        
+        dimensions = max_coords - min_coords
         
         # Verificar que les dimensions són vàlides
-        if bbox.xlen <= 0 or bbox.ylen <= 0 or bbox.zlen <= 0:
+        if any(d <= 0 for d in dimensions):
             raise ValueError("Les dimensions del model no són vàlides")
             
         return {
-            "length": round(bbox.xlen, 2),
-            "width": round(bbox.ylen, 2),
-            "height": round(bbox.zlen, 2),
-            "volume": round(bbox.xlen * bbox.ylen * bbox.zlen, 2)
+            "length": round(float(dimensions[0]), 2),
+            "width": round(float(dimensions[1]), 2),
+            "height": round(float(dimensions[2]), 2),
+            "volume": round(float(dimensions[0] * dimensions[1] * dimensions[2]), 2)
         }
         
     except FileNotFoundError as e:
@@ -69,9 +71,72 @@ def validate_stl_file(file_path):
             return False
         if not file_path.lower().endswith('.stl'):
             return False
-            
-        # Intentar carregar el fitxer
-        shape = cq.importers.importStl(file_path)
-        return shape is not None
+              # Intentar llegir el fitxer
+        vertices = read_stl_vertices(file_path)
+        return len(vertices) > 0
     except:
         return False
+
+def read_stl_vertices(file_path):
+    """
+    Llegeix els vèrtexs d'un fitxer STL binari o ASCII.
+    
+    Args:
+        file_path: Ruta al fitxer STL
+        
+    Returns:
+        Array numpy amb els vèrtexs
+    """
+    with open(file_path, 'rb') as f:
+        # Llegir els primers 80 bytes (header)
+        header = f.read(80)
+        
+        # Intentar llegir com STL binari
+        try:
+            # Llegir nombre de triangles
+            num_triangles = struct.unpack('<I', f.read(4))[0]
+            
+            vertices = []
+            for i in range(num_triangles):
+                # Saltar normal vector (12 bytes)
+                f.read(12)
+                
+                # Llegir 3 vèrtexs (cada un 3 floats de 4 bytes)
+                for j in range(3):
+                    vertex = struct.unpack('<fff', f.read(12))
+                    vertices.append(vertex)
+                
+                # Saltar attribute byte count (2 bytes)
+                f.read(2)
+            
+            return np.array(vertices)
+            
+        except:
+            # Si falla, intentar llegir com ASCII
+            return read_stl_ascii(file_path)
+
+def read_stl_ascii(file_path):
+    """
+    Llegeix un fitxer STL ASCII.
+    
+    Args:
+        file_path: Ruta al fitxer STL
+        
+    Returns:
+        Array numpy amb els vèrtexs
+    """
+    vertices = []
+    
+    with open(file_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('vertex'):
+                parts = line.split()
+                if len(parts) >= 4:
+                    try:
+                        x, y, z = float(parts[1]), float(parts[2]), float(parts[3])
+                        vertices.append([x, y, z])
+                    except ValueError:
+                        continue
+    
+    return np.array(vertices) if vertices else np.array([])

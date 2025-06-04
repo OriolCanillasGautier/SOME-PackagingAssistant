@@ -4,10 +4,10 @@ py3dbp
 multimethod>=1.8.0
 typish>=1.9.0
 ezdxf>=1.0.0
-nptyping>=2.0.0
+nptyping>=2.0.0,<3.0.0
 
 # Dependències GUI i sistema
-numpy>=1.21.0
+numpy>=1.21.0,<2.0.0  # Compatibilitat amb nptyping
 matplotlib>=3.5.0
 tk
 
