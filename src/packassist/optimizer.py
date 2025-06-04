@@ -43,13 +43,13 @@ def optimize_packing(box_dims, obj_dims, max_attempts=100):
             max_weight=99999.0  # Pes màxim arbitrari
         )
         packer.addBin(box)
-        
-        # Afegir múltiples còpies de l'objecte
+          # Afegir múltiples còpies de l'objecte
         for i in range(max_attempts):
             obj = Item(
                 partno=f"Product_{i}",  # Part number
                 name=f"Product_{i}",    # Name
-                typeof="cube",          # Type of object                WHD=[float(obj_dims["width"]), float(obj_dims["height"]), float(obj_dims["length"])],  # Dimensions
+                typeof="cube",          # Type of object
+                WHD=[float(obj_dims["width"]), float(obj_dims["height"]), float(obj_dims["length"])],  # Dimensions
                 weight=1.0,             # Weight
                 level=1,                # Packing priority level (1-3)
                 loadbear=100.0,         # Load bearing capability
