@@ -4,6 +4,12 @@ Aquest mòdul gestiona la importació de les funcions principals de PackAssist.
 Amb fallback per a funcions que necessiten CadQuery quan aquest no està disponible.
 """
 
+# Import dialog classes
+try:
+    from .dialog_creator import CreateBoxDialog, CreateObjectDialog, EditDimensionsDialog
+except ImportError as e:
+    print(f"❌ Error importing dialog creator: {e}")
+
 try:
     # Primer intentem importar des del mòdul complet
     from .stp_loader import get_stp_dimensions, validate_stp_file

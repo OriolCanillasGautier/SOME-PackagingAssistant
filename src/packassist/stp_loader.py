@@ -10,16 +10,74 @@ from pathlib import Path
 def get_stp_dimensions(file_path):
     """
     Simplified STP dimension reader.
-    Returns dimensions based on filename patterns and file size.
+    Returns dimensions based on filename patterns, file size, or embedded data.
     In a real implementation, this would parse STP files properly.
     """
     if not os.path.exists(file_path):
         return None
     
     try:
+        # Handle virtual and custom files
+        if file_path.startswith("custom://"):
+            # Check if dimensions are in the custom_dimensions.json file
+            custom_file = os.path.join("data", "custom", "custom_dimensions.json")
+            if os.path.exists(custom_file):
+                import json
+                with open(custom_file, "r", encoding="utf-8") as f:
+                    try:
+                        custom_data = json.load(f)
+                        if file_path in custom_data:
+                            return {
+                                "length": custom_data[file_path].get("length", 100.0),
+                                "width": custom_data[file_path].get("width", 100.0),
+                                "height": custom_data[file_path].get("height", 100.0)
+                            }
+                    except:
+                        pass
+            
+            # Parse dimensions from the file path itself
+            import re
+            match = re.search(r'(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)', file_path)
+            if match:
+                length, width, height = match.groups()
+                return {
+                    "length": float(length),
+                    "width": float(width),
+                    "height": float(height)
+                }
+            
+            return None
+        
         # Get filename for pattern matching
         filename = os.path.basename(file_path).lower()
         file_size = os.path.getsize(file_path)
+        
+        # Check if dimensions are encoded in the filename (e.g., box_100x80x60.stp)
+        import re
+        match = re.search(r'(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)', filename)
+        if match:
+            length, width, height = match.groups()
+            return {
+                "length": float(length),
+                "width": float(width),
+                "height": float(height)
+            }
+        
+        # Check if the file contains dimension information
+        if file_path.endswith('.stp') or file_path.endswith('.step'):
+            try:
+                with open(file_path, 'r', errors='ignore') as f:
+                    content = f.read()
+                    # Look for dimension information in the file
+                    dimension_match = re.search(r'/\* (?:Box|Object) dimensions: ([\d\.]+) x ([\d\.]+) x ([\d\.]+) mm \*/', content)
+                    if dimension_match:
+                        return {
+                            "length": float(dimension_match.group(1)),
+                            "width": float(dimension_match.group(2)),
+                            "height": float(dimension_match.group(3))
+                        }
+            except:
+                pass
         
         # Define dimension patterns based on common object names
         dimension_patterns = {
@@ -55,10 +113,28 @@ def get_stp_dimensions(file_path):
 def validate_stp_file(file_path):
     """
     Validate if a file is a valid STP file.
-    Currently only checks file extension and existence.
+    Checks file extension, existence, and custom formats.
     """
     if not file_path:
         return False
+    
+    # Handle virtual files
+    if file_path.startswith("custom://"):
+        # Check if dimensions are in the custom dimensions json
+        custom_file = os.path.join("data", "custom", "custom_dimensions.json")
+        if os.path.exists(custom_file):
+            import json
+            try:
+                with open(custom_file, "r", encoding="utf-8") as f:
+                    custom_data = json.load(f)
+                    return file_path in custom_data
+            except:
+                return False
+                
+        # Also check if we can extract dimensions from the path itself
+        import re
+        match = re.search(r'(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)', file_path)
+        return bool(match)
     
     path = Path(file_path)
     
