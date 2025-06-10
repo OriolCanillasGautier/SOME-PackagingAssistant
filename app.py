@@ -747,7 +747,7 @@ class PackAssistGUI:
         if filepath:
             self.file_path_var.set(filepath)
             self._update_file_info(filepath)
-            
+        
     def _update_file_info(self, filepath):
         """Actualitza la informació del fitxer STP."""
         if not filepath:
@@ -763,15 +763,21 @@ class PackAssistGUI:
                 height_mm = dimensions['height']
                 
                 info = f"Dimensions: {length_mm:.1f} x {width_mm:.1f} x {height_mm:.1f} mm"
+                
+                # Add shape information if available
+                shape_type = dimensions.get('shape_type', 'rectangular')
+                if shape_type != 'rectangular':
+                    volume_factor = dimensions.get('volume_factor', 1.0)
+                    info += f" | Forma: {shape_type} (factor volum: {volume_factor:.3f})"
+                
                 self.file_info_var.set(info)
-                  # Actualitzar variables (now using mm)
+                # Actualitzar variables (now using mm)
                 self.obj_vars[0].set(length_mm)
                 self.obj_vars[1].set(width_mm)
                 self.obj_vars[2].set(height_mm)
             else:
                 self.file_info_var.set("Error llegint fitxer STP")
-        except Exception as e:
-            self.file_info_var.set(f"Error: {str(e)}")
+        except Exception as e:            self.file_info_var.set(f"Error: {str(e)}")
 
     # === FUNCIONS DE CÀLCUL ===
     def calculate_manual(self):
@@ -794,24 +800,28 @@ class PackAssistGUI:
                 messagebox.showerror("Error", "Totes les dimensions han de ser positives")
                 return
             
-            # Convertir a diccionaris per la visualització
+            # Convertir a diccionaris amb informació de forma per l'optimització
             box_dims = {
                 "length": box_tuple[0],
                 "width": box_tuple[1], 
-                "height": box_tuple[2]
+                "height": box_tuple[2],
+                "shape_type": "rectangular",  # Manual input assumes rectangular
+                "volume_factor": 1.0
             }
             obj_dims = {
                 "length": obj_tuple[0],
                 "width": obj_tuple[1],
-                "height": obj_tuple[2]
+                "height": obj_tuple[2],
+                "shape_type": "rectangular",  # Manual input assumes rectangular
+                "volume_factor": 1.0
             }
             
             # Calcular
             self.manual_results.delete(1.0, tk.END)
             results_content = self._build_manual_results_content(box_dims, obj_dims)
             
-            theoretical_max = calculate_theoretical_max(box_tuple, obj_tuple)
-            result = optimize_packing(box_tuple, obj_tuple)
+            theoretical_max = calculate_theoretical_max(box_dims, obj_dims)
+            result = optimize_packing(box_dims, obj_dims)
             
             results_content += self._build_optimization_results(result, theoretical_max)
             
@@ -823,13 +833,13 @@ class PackAssistGUI:
                 self.visualize_btn.config(state=tk.NORMAL if result['max_objects'] > 0 else tk.DISABLED)
             else:
                 self.visualize_btn.config(state=tk.DISABLED)
-            
-            # Afegir a la pestanya de resultats
+              # Afegir a la pestanya de resultats
             self._add_to_results_tab(results_content)
             self._save_results_automatically()
             self.update_status("Càlcul manual completat")
             
-        except ValueError:            messagebox.showerror("Error", "Introdueix valors numèrics vàlids")
+        except ValueError:
+            messagebox.showerror("Error", "Introdueix valors numèrics vàlids")
         except Exception as e:
             messagebox.showerror("Error", f"Error durant el càlcul: {e}")
             
@@ -840,11 +850,22 @@ class PackAssistGUI:
         content += f"📦 Contenidor:\n"
         content += f"   Longitud: {box_dims['length']:.1f} mm\n"
         content += f"   Amplada: {box_dims['width']:.1f} mm\n"
-        content += f"   Altura: {box_dims['height']:.1f} mm\n\n"
-        content += f"📋 Objecte:\n"
+        content += f"   Altura: {box_dims['height']:.1f} mm\n"
+        
+        # Show container shape if not standard rectangular
+        if box_dims.get('shape_type', 'rectangular') != 'rectangular':
+            content += f"   Forma: {box_dims['shape_type']} (factor volum: {box_dims.get('volume_factor', 1.0):.3f})\n"
+        
+        content += "\n📋 Objecte:\n"
         content += f"   Longitud: {obj_dims['length']:.1f} mm\n"
         content += f"   Amplada: {obj_dims['width']:.1f} mm\n"
-        content += f"   Altura: {obj_dims['height']:.1f} mm\n\n"
+        content += f"   Altura: {obj_dims['height']:.1f} mm\n"
+        
+        # Show object shape if not standard rectangular
+        if obj_dims.get('shape_type', 'rectangular') != 'rectangular':
+            content += f"   Forma: {obj_dims['shape_type']} (factor volum: {obj_dims.get('volume_factor', 1.0):.3f})\n"
+        
+        content += "\n"
         return content
 
     def _build_optimization_results(self, result, theoretical_max):
@@ -912,7 +933,12 @@ class PackAssistGUI:
                     continue
                 
                 self.results_text.insert(tk.END, f"📦 Contenidor: {box_info['name']}\n")
-                self.results_text.insert(tk.END, f"   Dimensions: {box_dims}\n\n")
+                self.results_text.insert(tk.END, f"   📏 Dimensions: {box_dims['length']:.1f} x {box_dims['width']:.1f} x {box_dims['height']:.1f} mm\n")
+                  # Show container shape information if available
+                if 'shape_type' in box_dims and box_dims['shape_type'] != 'rectangular':
+                    self.results_text.insert(tk.END, f"   🔷 Forma: {box_dims['shape_type']} (factor volum: {box_dims.get('volume_factor', 1.0):.3f})\n")
+                
+                self.results_text.insert(tk.END, "\n")
                 
                 for obj_info in objects:
                     if not self.is_processing:
@@ -925,16 +951,16 @@ class PackAssistGUI:
                     obj_dims = self._get_entry_dimensions(obj_info["file_path"])
                     if not obj_dims:
                         continue
-                    
-                    # Convertir dimensions a tuples per l'optimitzador
-                    box_tuple = (box_dims['length'], box_dims['width'], box_dims['height'])
-                    obj_tuple = (obj_dims['length'], obj_dims['width'], obj_dims['height'])
-                    
-                    theoretical_max = calculate_theoretical_max(box_tuple, obj_tuple)
-                    result = optimize_packing(box_tuple, obj_tuple)
+                      # Now both box_dims and obj_dims contain full shape information
+                    theoretical_max = calculate_theoretical_max(box_dims, obj_dims)
+                    result = optimize_packing(box_dims, obj_dims)
                     
                     self.results_text.insert(tk.END, f"  ➕ Objecte: {obj_info['name']}\n")
-                    self.results_text.insert(tk.END, f"     📏 Dimensions: {obj_dims}\n")
+                    self.results_text.insert(tk.END, f"     📏 Dimensions: {obj_dims['length']:.1f} x {obj_dims['width']:.1f} x {obj_dims['height']:.1f} mm\n")
+                    
+                    # Show shape information if available
+                    if 'shape_type' in obj_dims and obj_dims['shape_type'] != 'rectangular':
+                        self.results_text.insert(tk.END, f"     🔷 Forma: {obj_dims['shape_type']} (factor volum: {obj_dims.get('volume_factor', 1.0):.3f})\n")
                     
                     if result["error"]:
                         self.results_text.insert(tk.END, f"     ❌ Error: {result['error']}\n")
