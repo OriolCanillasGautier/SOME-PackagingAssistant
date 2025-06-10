@@ -1,3 +1,6 @@
 type,name,file_path
 box,Caixa Petita,boxes/box_small.stp
-object,Test-STP TONI,C:/Users/ocanillas/Downloads/646812800A.stp
+box,Caixa Gran,boxes/box_large.stp
+object,Caixa Petita STP,objects/caixa_petita.stp
+object,Test STP,objects/stptest.stp
+object,STP proves,objects\STP proves.stp

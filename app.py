@@ -1,15 +1,9 @@
-#!/usr/bin/env python3
-"""
-PackAssist 3D - Optimitzador de 3D Bin Packing amb GUI moderna
-Sistema integrat per l'optimització d'empaquetament 3D amb interfície gràfica.
-Versió optimitzada i reduïda.
-"""
-import csv
-import os
-import sys
-import threading
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import tkinter as tk
+import threading
+import traceback
 from pathlib import Path
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -17,7 +11,10 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolb
 from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
-from src.packassist import get_stp_dimensions, validate_stp_file, optimize_packing, calculate_theoretical_max
+import sys
+import os
+import csv
+from src.packassist import get_stp_dimensions, validate_stp_file, optimize_packing, calculate_theoretical_max, calculate_grid_packing
 
 # Constants
 CSV_PATH = "data/index.csv"
@@ -172,7 +169,7 @@ class PackAssistGUI:
         self.manual_box_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 0))
         self.manual_box_frame.columnconfigure(1, weight=1)
         labels = ["Longitud (mm):", "Amplada (mm):", "Altura (mm):"]
-        defaults = [1000.0, 800.0, 600.0]  # Converted from cm to mm (multiplied by 10)
+        defaults = [2500.0, 1500.0, 1000.0]  
         self.box_vars = []
         
         for i, (label, default) in enumerate(zip(labels, defaults)):
@@ -209,7 +206,7 @@ class PackAssistGUI:
         self.manual_input_frame.columnconfigure(1, weight=1)
         
         labels = ["Longitud (mm):", "Amplada (mm):", "Altura (mm):"]
-        defaults = [200.0, 150.0, 100.0]  # Converted from cm to mm (multiplied by 10)
+        defaults = [200.0, 150.0, 100.0]
         self.obj_vars = []
         
         for i, (label, default) in enumerate(zip(labels, defaults)):
@@ -424,9 +421,7 @@ class PackAssistGUI:
         )
         if filename:
             self.csv_path_var.set(filename)
-            self.reload_metadata()
-
-    # === FUNCIONS CSV EDITOR ===
+            self.reload_metadata()    # === FUNCIONS CSV EDITOR ===
     
     def reload_csv_data(self):
         """Recarrega les dades del CSV per l'editor."""
@@ -447,29 +442,47 @@ class PackAssistGUI:
 
     def create_new_box(self):
         """Creates a new box and adds it to the CSV index."""
-        from src.packassist.dialog_creator import CreateBoxDialog
-        
-        # Callback for when a box is created
-        def on_box_created(box_data):
-            self.metadata.append(box_data)
-            self._update_csv_tree()
-            self.reload_metadata()
-        
-        # Show the dialog
-        CreateBoxDialog(self.root, callback=on_box_created)
+        try:
+            from src.packassist.dialog_creator import CreateBoxDialog
+            
+            # Callback for when a box is created
+            def on_box_created(box_data):
+                print(f"Debug - Box created: {box_data}")
+                self.metadata.append(box_data)
+                self._update_csv_tree()
+                self.update_file_tree()  # Update main file tree as well
+                self.save_csv_data()  # Auto-save after creation
+                self.update_status(f"Caixa '{box_data.get('name', '')}' creada i guardada")
+            
+            # Show the dialog
+            CreateBoxDialog(self.root, callback=on_box_created)
+            
+        except Exception as e:
+            error_msg = f"Error creant nova caixa: {e}"
+            messagebox.showerror("Error", error_msg)
+            print(f"Debug - Error create_new_box: {e}")
 
     def create_new_object(self):
         """Creates a new object and adds it to the CSV index."""
-        from src.packassist.dialog_creator import CreateObjectDialog
-        
-        # Callback for when an object is created
-        def on_object_created(object_data):
-            self.metadata.append(object_data)
-            self._update_csv_tree()
-            self.reload_metadata()
-        
-        # Show the dialog
-        CreateObjectDialog(self.root, callback=on_object_created)
+        try:
+            from src.packassist.dialog_creator import CreateObjectDialog
+            
+            # Callback for when an object is created
+            def on_object_created(object_data):
+                print(f"Debug - Object created: {object_data}")
+                self.metadata.append(object_data)
+                self._update_csv_tree()
+                self.update_file_tree()  # Update main file tree as well
+                self.save_csv_data()  # Auto-save after creation
+                self.update_status(f"Objecte '{object_data.get('name', '')}' creat i guardat")
+            
+            # Show the dialog
+            CreateObjectDialog(self.root, callback=on_object_created)
+            
+        except Exception as e:
+            error_msg = f"Error creant nou objecte: {e}"
+            messagebox.showerror("Error", error_msg)
+            print(f"Debug - Error create_new_object: {e}")
 
     def edit_selected_item(self):
         """Edit dimensions of the selected item."""
@@ -504,12 +517,33 @@ class PackAssistGUI:
         dimensions = self._get_entry_dimensions(entry.get("file_path"))
         if not dimensions:
             messagebox.showerror("Error", "Could not read dimensions for the selected item")
-            return
-        
-        # Callback for when dimensions are updated
-        def on_dimensions_updated(entry, new_dimensions):
-            # Refresh metadata and UI
-            self.reload_metadata()
+            return        # Callback for when dimensions are updated
+        def on_dimensions_updated(updated_entry, new_dimensions):
+            print(f"Debug - Dimensions updated for {updated_entry.get('name', '')}: {new_dimensions}")
+            
+            # Find and update the corresponding entry in self.metadata
+            # Try to match by original name first, then by modified name
+            original_name = entry.get("name", "")
+            updated_name = updated_entry.get("name", "")
+            
+            for i, meta_entry in enumerate(self.metadata):
+                # Check if this is the entry we're looking for
+                name_match = (meta_entry.get("name") == original_name or 
+                             meta_entry.get("name") == updated_name)
+                type_match = meta_entry.get("type") == entry.get("type")
+                
+                if name_match and type_match:
+                    # Update the metadata entry with the new information
+                    self.metadata[i] = updated_entry.copy()
+                    print(f"Debug - Updated metadata entry: {self.metadata[i]}")
+                    break
+            
+            # Refresh UI and save
+            self._update_csv_tree()
+            self.update_file_tree()
+            self.save_csv_data()  # Auto-save after edit
+            self.update_status(f"Dimensions actualitzades per '{updated_entry.get('name', '')}'")
+            print(f"Debug - CSV saved and UI refreshed")
         
         # Show the dialog
         EditDimensionsDialog(self.root, entry, dimensions, callback=on_dimensions_updated)
@@ -542,15 +576,16 @@ class PackAssistGUI:
         path_frame.columnconfigure(0, weight=1)
         
         ttk.Entry(path_frame, textvariable=path_var).grid(row=0, column=0, sticky=(tk.W, tk.E))
-        ttk.Button(path_frame, text="...", command=lambda: self._browse_file_for_entry(path_var)).grid(row=0, column=1, padx=(5, 0))
+        ttk.Button(path_frame, text="Explorar...", command=lambda: self._browse_file_for_entry(path_var)).grid(row=0, column=1, padx=(5, 0))
         
-        # Botons
+        # Buttons
         button_frame = ttk.Frame(dialog)
         button_frame.grid(row=3, column=0, columnspan=2, pady=10)
         
         ttk.Button(button_frame, text="Guardar", command=lambda: self._save_new_entry(dialog, type_var, name_var, path_var)).grid(row=0, column=0, padx=5)
         ttk.Button(button_frame, text="Cancel·lar", command=dialog.destroy).grid(row=0, column=1, padx=5)
         
+        # Configure dialog
         dialog.columnconfigure(1, weight=1)
 
     def _browse_file_for_entry(self, path_var):
@@ -564,31 +599,71 @@ class PackAssistGUI:
 
     def _save_new_entry(self, dialog, type_var, name_var, path_var):
         """Guarda la nova entrada."""
-        if not name_var.get() or not path_var.get():
-            messagebox.showwarning("Avís", "Tots els camps són obligatoris")
-            return
-        
-        new_entry = {
-            "type": type_var.get(),
-            "name": name_var.get(),
-            "file_path": path_var.get()
-        }
-        self.metadata.append(new_entry)
-        self._update_csv_tree()
-        dialog.destroy()
+        try:
+            if not name_var.get() or not path_var.get():
+                messagebox.showwarning("Avís", "Tots els camps són obligatoris")
+                return
+            
+            new_entry = {
+                "type": type_var.get(),
+                "name": name_var.get(),
+                "file_path": path_var.get()
+            }
+            
+            print(f"Debug - Adding new entry: {new_entry}")
+            self.metadata.append(new_entry)
+            self._update_csv_tree()
+            self.update_file_tree()
+            self.save_csv_data()  # Auto-save after adding
+            self.update_status(f"Nova entrada '{new_entry['name']}' afegida i guardada")
+            dialog.destroy()
+            
+        except Exception as e:
+            error_msg = f"Error guardant nova entrada: {e}"
+            messagebox.showerror("Error", error_msg)
+            print(f"Debug - Error _save_new_entry: {e}")
 
     def save_csv_data(self):
         """Guarda les dades del CSV."""
         try:
-            with open(self.csv_path_var.get(), "w", newline='', encoding='utf-8') as f:
+            csv_path = self.csv_path_var.get()
+            if not csv_path:
+                messagebox.showwarning("Avís", "No s'ha especificat un fitxer CSV")
+                return
+                
+            # Crear el directori si no existeix
+            os.makedirs(os.path.dirname(csv_path), exist_ok=True)
+            
+            with open(csv_path, "w", newline='', encoding='utf-8') as f:
                 if self.metadata:
-                    writer = csv.DictWriter(f, fieldnames=self.metadata[0].keys())
+                    # Utilitzar els camps estàndard
+                    fieldnames = ["type", "name", "file_path"]
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
                     writer.writeheader()
-                    writer.writerows(self.metadata)
-            messagebox.showinfo("Èxit", "Dades guardades correctament")
+                    
+                    # Escriure cada entrada assegurant-nos que té els camps necessaris
+                    for entry in self.metadata:
+                        row = {
+                            "type": entry.get("type", ""),
+                            "name": entry.get("name", ""),
+                            "file_path": entry.get("file_path", "")
+                        }
+                        writer.writerow(row)
+                else:
+                    # Si no hi ha metadades, crear un fitxer amb capçaleres
+                    fieldnames = ["type", "name", "file_path"]
+                    writer = csv.DictWriter(f, fieldnames=fieldnames)
+                    writer.writeheader()
+                    
+            messagebox.showinfo("Èxit", f"Dades guardades correctament a:\n{csv_path}")
             self.update_status("CSV guardat")
+            
         except Exception as e:
-            messagebox.showerror("Error", f"Error guardant CSV: {e}")
+            error_msg = f"Error guardant CSV: {e}"
+            messagebox.showerror("Error", error_msg)
+            print(f"Debug - Error save_csv_data: {e}")
+            import traceback
+            traceback.print_exc()
 
     # === FUNCIONS D'ENTRADA MANUAL ===
     
@@ -949,264 +1024,220 @@ class PackAssistGUI:
             self.update_status(f"Resultats guardats automàticament a {filename}")
         except Exception as e:
             print(f"Error guardant resultats automàticament: {e}")
-
-    # === FUNCIONS DE VISUALITZACIÓ 3D ===
+      # === FUNCIONS DE VISUALITZACIÓ 3D ===
     
     def visualize_packing(self):
-        """Mostra la visualització 3D dels resultats d'empaquetament."""
+        """Mostra la visualització 3D integrada amb matplotlib."""
         if not hasattr(self, 'optimization_results') or not self.optimization_results:
             messagebox.showwarning("Advertència", "No hi ha resultats d'optimització per visualitzar.")
             return
+            
         try:
-            # Import matplotlib for 3D visualization
-            import matplotlib.pyplot as plt
-            from mpl_toolkits.mplot3d import Axes3D
-            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-            from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+            self.update_status("Generant visualització 3D integrada...")
             
-            # Clear previous visualization
-            for widget in self.canvas_frame.winfo_children():
-                widget.destroy()
+            # Crear una nueva ventana para la visualización
+            viz_window = tk.Toplevel(self.root)
+            viz_window.title("Visualització 3D - PackAssist")
+            viz_window.geometry("900x700")
+            viz_window.transient(self.root)
             
-            # Get container and object dimensions from current values
-            box_dims = (
-                self.box_vars[0].get(),  # length
-                self.box_vars[1].get(),  # width
-                self.box_vars[2].get()   # height
-            )
-            obj_dims = (
-                self.obj_vars[0].get(),  # length
-                self.obj_vars[1].get(),  # width
-                self.obj_vars[2].get()   # height
-            )
+            # Crear el marco principal
+            main_frame = ttk.Frame(viz_window)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
             
-            # Create 3D plot
-            fig = plt.figure(figsize=(10, 8))
+            # Crear la figura de matplotlib
+            fig = Figure(figsize=(10, 8), dpi=100)
             ax = fig.add_subplot(111, projection='3d')
             
-            # Draw container wireframe
-            self._draw_container_wireframe(ax, box_dims)
+            # Obtener datos de la optimización
+            bins_data = self.optimization_results.get('bins', [])
+            if not bins_data:
+                messagebox.showerror("Error", "No hi ha dades de contenidors per visualitzar.")
+                viz_window.destroy()
+                return
             
-            # Calculate and draw packed objects
-            max_objects = self.optimization_results.get('max_objects', 0)
-            if max_objects > 0:
-                self._draw_packed_objects(ax, box_dims, obj_dims, max_objects)
+            bin_data = bins_data[0]  # Usar el primer contenedor
+            bin_info = bin_data['bin']
+            items_info = bin_data['items']
+              # Dimensiones del contenedor - convertir a float para evitar problemas con Decimal
+            container_dims = bin_info['dimensions']
+            container_length = float(container_dims[0])
+            container_width = float(container_dims[1])
+            container_height = float(container_dims[2])
             
-            # Set labels and title
+            # Dibujar el contenedor (contorno)
+            self._draw_container_outline(ax, container_length, container_width, container_height)
+            
+            # Dibujar los objetos
+            colors = ['lightblue', 'lightgreen', 'lightyellow', 'lightpink', 'lightcyan', 'orange', 'purple', 'brown']
+            for i, item in enumerate(items_info):
+                # Convertir posición y dimensiones a float para evitar problemas con Decimal
+                position = [float(x) for x in item['position']]
+                dimensions = [float(x) for x in item['dimensions']]
+                color = colors[i % len(colors)]
+                
+                self._draw_3d_box(ax, position, dimensions, color, alpha=0.7)
+            
+            # Configurar el gráfico
             ax.set_xlabel('Longitud (mm)')
             ax.set_ylabel('Amplada (mm)')
             ax.set_zlabel('Altura (mm)')
-            ax.set_title(f'Visualització 3D - {max_objects} objectes empaquetats\n'
-                        f'Eficiència: {self.optimization_results.get("efficiency", 0):.1f}%')
+            ax.set_title(f'Empaquetament 3D - {len(items_info)} objectes en contenidor')
             
-            # Make axes equal
+            # Hacer que los ejes tengan la misma escala
             self._set_axes_equal_3d(ax)
             
-            # Create canvas
-            self.canvas = FigureCanvasTkAgg(fig, self.canvas_frame)
-            self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            # Crear el canvas de matplotlib
+            canvas = FigureCanvasTkAgg(fig, main_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
             
-            # Add toolbar
-            self.toolbar = NavigationToolbar2Tk(self.canvas, self.canvas_frame)
-            self.toolbar.update()
+            # Agregar toolbar de navegación
+            toolbar = NavigationToolbar2Tk(canvas, main_frame)
+            toolbar.update()
             
-            self.close_viz_btn.config(state=tk.NORMAL)
-            self.update_status("Visualització 3D generada correctament")
+            # Frame para información y controles
+            info_frame = ttk.LabelFrame(main_frame, text="Informació", padding="5")
+            info_frame.pack(fill=tk.X, pady=(5, 0))
+            
+            info_text = f"Contenidor: {container_length} × {container_width} × {container_height} mm\n"
+            info_text += f"Objectes empaquetats: {len(items_info)}\n"
+            info_text += f"Eficiència: {self.optimization_results.get('efficiency', 0)}%"
+            
+            ttk.Label(info_frame, text=info_text).pack(anchor=tk.W)
+            
+            # Botones de control
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(5, 0))
+            
+            ttk.Button(button_frame, text="💾 Guardar Imatge", 
+                      command=lambda: self._save_3d_image(fig)).pack(side=tk.LEFT, padx=(0, 5))
+            ttk.Button(button_frame, text="❌ Tancar", 
+                      command=viz_window.destroy).pack(side=tk.RIGHT)
+            
+            self.update_status("Visualització 3D integrada oberta")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Error generant visualització 3D: {e}")
-            self.update_status("Error en la visualització 3D")
-            
-            self.toolbar = NavigationToolbar2Tk(self.canvas, self.canvas_frame)
-            self.toolbar.update()
-            
-            self.close_viz_btn.config(state=tk.NORMAL)
-            self.update_status("Visualització 3D generada correctament")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Error generant visualització 3D: {e}")
-
-    def _draw_container_wireframe(self, ax, box_dims):
-        """Dibuixa el wireframe del contenidor."""
-        w, h, d = box_dims
-        
-        # Vèrtexs del contenidor
-        vertices = [
-            [0, 0, 0], [w, 0, 0], [w, h, 0], [0, h, 0],
-            [0, 0, d], [w, 0, d], [w, h, d], [0, h, d]
-        ]
-        
-        # Arestes del contenidor
-        edges = [
-            [0, 1], [1, 2], [2, 3], [3, 0],  # base inferior
-            [4, 5], [5, 6], [6, 7], [7, 4],  # base superior
-            [0, 4], [1, 5], [2, 6], [3, 7]   # arestes verticals
-        ]
-        
-        for edge in edges:
-            points = [vertices[edge[0]], vertices[edge[1]]]
-            ax.plot3D([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], 
-                     color='black', linewidth=2, alpha=0.8)
-
-    def _draw_packed_objects(self, ax, box_dims, obj_dims, max_objects):
-        """Dibuixa els objectes empaquetats de forma optimitzada."""
-        box_w, box_h, box_d = box_dims
-        obj_w, obj_h, obj_d = obj_dims
-        
-        # Calcular quants objectes caben en cada dimensió
-        objects_x = int(box_w // obj_w)
-        objects_y = int(box_h // obj_h) 
-        objects_z = int(box_d // obj_d)
-        
-        # Calcular posicions dels objectes
-        placed = 0
-        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
-        
-        for z in range(objects_z):
-            if placed >= max_objects:
-                break
-            for y in range(objects_y):
-                if placed >= max_objects:
-                    break
-                for x in range(objects_x):
-                    if placed >= max_objects:
-                        break
-                    
-                    # Posició de l'objecte
-                    pos_x = x * obj_w
-                    pos_y = y * obj_h
-                    pos_z = z * obj_d
-                    
-                    # Dibuixar l'objecte
-                    self._draw_3d_box(ax, (pos_x, pos_y, pos_z), obj_dims, colors[placed % len(colors)])
-                    placed += 1
-
-    def _draw_3d_box(self, ax, position, dimensions, color):
-        """Dibuixa una caixa 3D en una posició determinada."""
-        x, y, z = position
-        w, h, d = dimensions
-        
-        # Vèrtexs de la caixa
-        vertices = [
-            [x, y, z], [x+w, y, z], [x+w, y+h, z], [x, y+h, z],
-            [x, y, z+d], [x+w, y, z+d], [x+w, y+h, z+d], [x, y+h, z+d]
-        ]
-        
-        # Cares de la caixa
-        faces = [
-            [vertices[0], vertices[1], vertices[2], vertices[3]],  # base inferior
-            [vertices[4], vertices[5], vertices[6], vertices[7]],  # base superior
-            [vertices[0], vertices[1], vertices[5], vertices[4]],  # cara frontal
-            [vertices[2], vertices[3], vertices[7], vertices[6]],  # cara posterior
-            [vertices[1], vertices[2], vertices[6], vertices[5]],  # cara dreta
-            [vertices[4], vertices[7], vertices[3], vertices[0]]   # cara esquerra
-        ]
-        
-        for face in faces:
-            poly = Poly3DCollection([face], alpha=0.7, facecolor=color, edgecolor='black', linewidth=0.5)
-            ax.add_collection3d(poly)
-
-    def _draw_bin_wireframe(self, ax, bin_data):
-        """Dibuixa el wireframe del contenidor."""
-        w, h, d = [float(dim) for dim in bin_data['dimensions']]
-        
-        # Vèrtexs del cub
-        vertices = [
-            [0, 0, 0], [w, 0, 0], [w, h, 0], [0, h, 0],
-            [0, 0, d], [w, 0, d], [w, h, d], [0, h, d]
-        ]
-        
-        # Arestes
-        edges = [
-            [0, 1], [1, 2], [2, 3], [3, 0],  # base inferior
-            [4, 5], [5, 6], [6, 7], [7, 4],  # base superior
-            [0, 4], [1, 5], [2, 6], [3, 7]   # arestes verticals
-        ]
-        
-        for edge in edges:
-            points = [vertices[edge[0]], vertices[edge[1]]]
-            ax.plot3D([p[0] for p in points], [p[1] for p in points], [p[2] for p in points], 
-                     color='black', linewidth=2, alpha=0.8)
-
-    def _draw_item_3d(self, ax, item, index):
-        """Dibuixa un objecte en 3D."""
-        pos = item['position']
-        dims = item['dimensions']
-        
-        x, y, z = [float(p) for p in pos]
-        w, h, d = [float(dim) for dim in dims]
-        
-        # Vèrtexs del cub
-        vertices = [
-            [x, y, z], [x+w, y, z], [x+w, y+h, z], [x, y+h, z],
-            [x, y, z+d], [x+w, y, z+d], [x+w, y+h, z+d], [x, y+h, z+d]
-        ]
-        
-        # Colors
-        colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
-        color = colors[index % len(colors)]
-        
-        # Cares del cub
-        faces = [
-            [vertices[0], vertices[1], vertices[2], vertices[3]],  # base inferior
-            [vertices[4], vertices[5], vertices[6], vertices[7]],  # base superior
-            [vertices[0], vertices[1], vertices[5], vertices[4]],  # cara frontal
-            [vertices[2], vertices[3], vertices[7], vertices[6]],  # cara posterior
-            [vertices[1], vertices[2], vertices[6], vertices[5]],  # cara dreta
-            [vertices[4], vertices[7], vertices[3], vertices[0]]   # cara esquerra
-        ]
-        
-        for face in faces:
-            poly = Poly3DCollection([face], alpha=0.7, facecolor=color, edgecolor='black')
-            ax.add_collection3d(poly)
-
-    def _set_axes_equal_3d(self, ax):
-        """Fa que els eixos 3D tinguin la mateixa escala."""
-        limits = [ax.get_xlim3d(), ax.get_ylim3d(), ax.get_zlim3d()]
-        ranges = [abs(lim[1] - lim[0]) for lim in limits]
-        middles = [sum(lim) / 2 for lim in limits]
-        
-        plot_radius = max(ranges) * 0.5
-        
-        ax.set_xlim3d([middles[0] - plot_radius, middles[0] + plot_radius])
-        ax.set_ylim3d([middles[1] - plot_radius, middles[1] + plot_radius])
-        ax.set_zlim3d([middles[2] - plot_radius, middles[2] + plot_radius])
+            error_msg = f"Error obrint visualització 3D: {str(e)}"
+            self.update_status("Error en la visualització")
+            messagebox.showerror("Error", error_msg)
+            print(f"Debug - Error en visualize_packing: {e}")
+            import traceback
+            traceback.print_exc()
 
     def close_visualization(self):
-        """Tanca la visualització 3D."""
-        try:
-            if hasattr(self, 'canvas') and self.canvas:
-                self.canvas.get_tk_widget().destroy()
-                self.canvas = None
-            
-            if hasattr(self, 'toolbar') and self.toolbar:
-                self.toolbar.destroy()
-                self.toolbar = None
-            
-            for widget in self.canvas_frame.winfo_children():
-                widget.destroy()
-            
-            self.close_viz_btn.config(state=tk.DISABLED)
-            self.update_status("Visualització 3D tancada")
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Error tancant visualització: {e}")
+        """Funció mantinguda per compatibilitat - el nou sistema gestiona les finestres de forma independent."""
+        self.update_status("Sistema de visualització independent activat")
 
-    # === FUNCIONS AUXILIARS ===
+    # === FUNCIONES AUXILIARES PARA VISUALIZACIÓN 3D ===
+    
+    def _draw_container_outline(self, ax, length, width, height):
+        """Dibuja el contorno del contenedor."""
+        # Convertir a float para evitar problemas con Decimal
+        length, width, height = float(length), float(width), float(height)
+        
+        # Definir los vértices del contenedor
+        vertices = [
+            [0, 0, 0], [length, 0, 0], [length, width, 0], [0, width, 0],  # Base inferior
+            [0, 0, height], [length, 0, height], [length, width, height], [0, width, height]  # Base superior
+        ]
+        
+        # Definir las aristas del contenedor
+        edges = [
+            [0, 1], [1, 2], [2, 3], [3, 0],  # Base inferior
+            [4, 5], [5, 6], [6, 7], [7, 4],  # Base superior
+            [0, 4], [1, 5], [2, 6], [3, 7]   # Aristas verticales
+        ]
+        
+        # Dibujar las aristas
+        for edge in edges:
+            points = np.array([vertices[edge[0]], vertices[edge[1]]])
+            ax.plot3D(points[:, 0], points[:, 1], points[:, 2], 'k-', linewidth=2, alpha=0.8)
+    
+    def _draw_3d_box(self, ax, position, dimensions, color, alpha=0.7):
+        """Dibuja una caja 3D en la posición especificada."""
+        # Convertir a float para evitar problemas con Decimal
+        x, y, z = float(position[0]), float(position[1]), float(position[2])
+        dx, dy, dz = float(dimensions[0]), float(dimensions[1]), float(dimensions[2])
+        
+        # Definir los vértices de la caja
+        vertices = np.array([
+            [x, y, z], [x+dx, y, z], [x+dx, y+dy, z], [x, y+dy, z],  # Base inferior
+            [x, y, z+dz], [x+dx, y, z+dz], [x+dx, y+dy, z+dz], [x, y+dy, z+dz]  # Base superior
+        ])
+        
+        # Definir las caras de la caja
+        faces = [
+            [vertices[0], vertices[1], vertices[2], vertices[3]],  # Base inferior
+            [vertices[4], vertices[5], vertices[6], vertices[7]],  # Base superior
+            [vertices[0], vertices[1], vertices[5], vertices[4]],  # Cara frontal
+            [vertices[2], vertices[3], vertices[7], vertices[6]],  # Cara trasera
+            [vertices[1], vertices[2], vertices[6], vertices[5]],  # Cara derecha
+            [vertices[4], vertices[7], vertices[3], vertices[0]]   # Cara izquierda
+        ]
+        
+        # Crear y agregar las caras
+        poly3d = [[tuple(vertex) for vertex in face] for face in faces]
+        ax.add_collection3d(Poly3DCollection(poly3d, alpha=alpha, facecolor=color, edgecolor='black', linewidth=0.5))
+    
+    def _set_axes_equal_3d(self, ax):
+        """Hace que los ejes 3D tengan la misma escala."""
+        # Obtener los límites actuales
+        x_limits = ax.get_xlim3d()
+        y_limits = ax.get_ylim3d()
+        z_limits = ax.get_zlim3d()
+        
+        # Calcular rangos
+        x_range = abs(x_limits[1] - x_limits[0])
+        x_middle = np.mean(x_limits)
+        y_range = abs(y_limits[1] - y_limits[0])
+        y_middle = np.mean(y_limits)
+        z_range = abs(z_limits[1] - z_limits[0])
+        z_middle = np.mean(z_limits)
+        
+        # El radio del plot es la mitad del rango máximo
+        plot_radius = 0.5 * max([x_range, y_range, z_range])
+        
+        # Establecer límites iguales
+        ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
+        ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
+        ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
+    
+    def _save_3d_image(self, fig):
+        """Guarda la imagen 3D como archivo."""
+        try:
+            filename = filedialog.asksaveasfilename(
+                title="Guardar visualització 3D",
+                defaultextension=".png",
+                filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), ("SVG files", "*.svg"), ("All files", "*.*")]
+            )
+            
+            if filename:
+                fig.savefig(filename, dpi=300, bbox_inches='tight')
+                messagebox.showinfo("Èxit", f"Imatge guardada a:\n{filename}")
+                self.update_status("Imatge 3D guardada")
+        except Exception as e:            messagebox.showerror("Error", f"Error guardant la imatge: {e}")
+
+    # === FUNCIONES AUXILIARES ===
     
     def _validate_entry_file(self, file_path):
-        """Valida si un fitxer STP és vàlid."""
+        """Valida si un fitxer d'entrada existeix."""
         if not file_path:
             return False
-        return validate_stp_file(file_path)
+            
+        # For regular file paths, check if they exist
+        return os.path.exists(file_path)
 
     def _get_entry_dimensions(self, file_path):
         """Obté les dimensions d'un fitxer STP."""
-        if not file_path:
+        if not self._validate_entry_file(file_path):
             return None
-        return get_stp_dimensions(file_path)
+        try:
+            return get_stp_dimensions(file_path)
+        except Exception:
+            return None
 
-
+# ...existing code...
 def main():
     """Funció principal."""
     try:

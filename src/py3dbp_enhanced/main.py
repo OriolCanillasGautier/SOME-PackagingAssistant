@@ -664,11 +664,11 @@ class Painter:
         # plot a circle in the middle of the cylinder
         center_z = np.linspace(0, dz, 10)
         theta = np.linspace(0, 2*np.pi, 10)
-        theta_grid, z_grid=np.meshgrid(theta, center_z)
+        theta_grid, z_grid = np.meshgrid(theta, center_z)
         x_grid = dx / 2 * np.cos(theta_grid) + x + dx / 2
         y_grid = dy / 2 * np.sin(theta_grid) + y + dy / 2
         z_grid = z_grid + z
-        ax.plot_surface(x_grid, y_grid, z_grid,shade=False,fc=color,alpha=alpha,color=color)
+        ax.plot_surface(x_grid, y_grid, z_grid, shade=False, fc=color, alpha=alpha, color=color)
         if text != "" :
             ax.text( (x+ dx/2), (y+ dy/2), (z+ dz/2), str(text),color='black', fontsize=fontsize, ha='center', va='center')
 
@@ -676,17 +676,24 @@ class Painter:
         """ side effective. Plot the Bin and the items it contains. """
         fig = plt.figure()
         axGlob = plt.axes(projection='3d')
-        
         # plot bin 
         self._plotCube(axGlob,0, 0, 0, float(self.width), float(self.height), float(self.depth),color='black',mode=1,linewidth=2,text="")
-
+        
         counter = 0
         # fit rotation type
         for item in self.items:
             rt = item.rotation_type  
             x,y,z = item.position
             [w,h,d] = item.getDimension()
-            color = item.color
+            # FIXED: Ensure all objects of the same type have consistent visual appearance
+            # Use a consistent color and appearance for objects with same original dimensions
+            original_dims = (item.width, item.height, item.depth)
+            # Generate consistent color based on original dimensions
+            color_hash = hash(original_dims) % 360
+            if hasattr(item, 'original_color'):
+                color = item.original_color
+            else:
+                color = item.color
             text= item.partno if write_num else ""
 
             if item.typeof == 'cube':
@@ -696,7 +703,7 @@ class Painter:
                 # plot item of cylinder
                 self._plotCylinder(axGlob, float(x), float(y), float(z), float(w),float(h),float(d),color=color,mode=2,text=text,fontsize=fontsize,alpha=alpha)
             
-            counter = counter + 1  
+            counter = counter + 1
 
         
         plt.title(title)

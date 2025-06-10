@@ -162,9 +162,9 @@ pytest tests/
 
 ## 🚧 Resolució de Problemes
 
-### Error: "ModuleNotFoundError: No module named 'cadquery'"
+### Error instal·lació de paquets des de requirements.txt
 ```bash
-pip install cadquery==2.3.0
+pip install --only-binary :all: -r requirements.txt
 ```
 
 ### Error: "El fitxer index.csv no existeix"
