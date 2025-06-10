@@ -68,3 +68,5 @@ scratch_*.py
 # Jupyter Notebooks
 *.ipynb
 .ipynb_checkpoints/
+src/packassist/__pycache__/dialog_creator.cpython-313.pyc
+src/packassist/__pycache__/stp_loader.cpython-313.pyc
