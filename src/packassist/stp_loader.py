@@ -304,7 +304,7 @@ def _estimate_dimensions_by_shape(shape_type, filename, file_size):
 def _analyze_stp_geometry(content, filename, file_size):
     """
     Analyze STP file content to detect complex geometries.
-    Returns bounding box dimensions for complex shapes.
+    Returns bounding box dimensions AND real volume information for complex shapes.
     """
     try:
         # Look for CARTESIAN_POINT entries to determine bounding box
@@ -326,11 +326,20 @@ def _analyze_stp_geometry(content, filename, file_size):
                 width = max(width, 1.0)
                 height = max(height, 1.0)
                 
-                return {
+                # Detect detailed geometry from the point cloud
+                shape_details = _analyze_point_cloud_geometry(x_coords, y_coords, z_coords, content)
+                
+                result = {
                     "length": length,
                     "width": width,
                     "height": height
                 }
+                
+                # Add shape-specific information if detected
+                if shape_details:
+                    result.update(shape_details)
+                
+                return result
         
         # Look for geometric entities that might indicate shape complexity
         shape_indicators = {
@@ -530,6 +539,205 @@ def get_shape_packing_efficiency(shape_type):
     }
     
     return efficiency_factors.get(shape_type, 0.75)
+
+def _analyze_point_cloud_geometry(x_coords, y_coords, z_coords, content):
+    """
+    Analyze point cloud to detect specific geometric shapes and calculate real volume factors.
+    Returns dictionary with shape-specific information.
+    """
+    try:
+        # Calculate point distribution to detect shape patterns
+        unique_x = sorted(set(round(x, 2) for x in x_coords))
+        unique_y = sorted(set(round(y, 2) for y in y_coords))
+        unique_z = sorted(set(round(z, 2) for z in z_coords))
+        
+        # Analyze 2D cross-sections at different heights to detect polygon shapes
+        cross_sections = {}
+        for z_level in unique_z[::max(1, len(unique_z)//5)]:  # Sample up to 5 levels
+            z_tolerance = 0.1
+            level_points = [(x, y) for x, y, z in zip(x_coords, y_coords, z_coords) 
+                           if abs(z - z_level) < z_tolerance]
+            if len(level_points) > 5:
+                cross_sections[z_level] = level_points
+        
+        # Detect shape from the largest cross-section
+        if cross_sections:
+            largest_section = max(cross_sections.values(), key=len)
+            shape_type, volume_factor = _detect_polygon_from_points(largest_section)
+            
+            if shape_type != 'rectangular':
+                return {
+                    'detected_shape': shape_type,
+                    'volume_factor': volume_factor,
+                    'cross_section_points': len(largest_section),
+                    'is_complex_geometry': True
+                }
+        
+        # Check for circular/cylindrical patterns
+        if _detect_circular_pattern(x_coords, y_coords, content):
+            return {
+                'detected_shape': 'cylindrical',
+                'volume_factor': 0.785,  # π/4
+                'is_complex_geometry': True
+            }
+        
+        # Check for spherical patterns
+        if _detect_spherical_pattern(x_coords, y_coords, z_coords, content):
+            return {
+                'detected_shape': 'spherical',
+                'volume_factor': 0.524,  # π/6
+                'is_complex_geometry': True
+            }
+        
+        # Default to rectangular if no specific pattern detected
+        return {
+            'detected_shape': 'rectangular',
+            'volume_factor': 1.0,
+            'is_complex_geometry': False
+        }
+        
+    except Exception as e:
+        print(f"Warning: Error analyzing point cloud geometry: {e}")
+        return {
+            'detected_shape': 'rectangular',
+            'volume_factor': 1.0,
+            'is_complex_geometry': False
+        }
+
+def _detect_polygon_from_points(points):
+    """
+    Detect polygon type from a set of 2D points.
+    Returns (shape_type, volume_factor).
+    """
+    if len(points) < 6:
+        return 'rectangular', 1.0
+    
+    # Find convex hull to get the outer boundary
+    hull_points = _compute_convex_hull(points)
+    num_vertices = len(hull_points)
+    
+    # Classify based on number of vertices
+    if num_vertices <= 4:
+        return 'rectangular', 1.0
+    elif num_vertices == 5:
+        return 'pentagonal', 0.688
+    elif num_vertices == 6:
+        return 'hexagonal', 0.866
+    elif num_vertices == 8:
+        return 'octagonal', 0.828
+    elif num_vertices >= 12:
+        # Many vertices might indicate a circle approximation
+        return 'circular', 0.785
+    else:
+        # General polygon
+        return 'polygonal', 0.75
+
+def _compute_convex_hull(points):
+    """
+    Simple convex hull computation using Graham scan algorithm.
+    Returns list of hull points.
+    """
+    if len(points) < 3:
+        return points
+    
+    def cross_product(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    
+    # Sort points lexicographically
+    points = sorted(set(points))
+    if len(points) <= 1:
+        return points
+    
+    # Build lower hull
+    lower = []
+    for p in points:
+        while len(lower) >= 2 and cross_product(lower[-2], lower[-1], p) <= 0:
+            lower.pop()
+        lower.append(p)
+    
+    # Build upper hull
+    upper = []
+    for p in reversed(points):
+        while len(upper) >= 2 and cross_product(upper[-2], upper[-1], p) <= 0:
+            upper.pop()
+        upper.append(p)
+    
+    # Remove last point of each half because it's repeated
+    return lower[:-1] + upper[:-1]
+
+def _detect_circular_pattern(x_coords, y_coords, content):
+    """
+    Detect if the point pattern suggests a circular/cylindrical shape.
+    """
+    try:
+        # Check STP content for circular entities
+        content_upper = content.upper()
+        circular_indicators = ['CIRCLE', 'CYLINDRICAL_SURFACE', 'ARC']
+        
+        if any(indicator in content_upper for indicator in circular_indicators):
+            return True
+        
+        # Analyze point distribution for circular pattern
+        if len(x_coords) < 8 or len(y_coords) < 8:
+            return False
+        
+        # Find center point
+        center_x = (max(x_coords) + min(x_coords)) / 2
+        center_y = (max(y_coords) + min(y_coords)) / 2
+        
+        # Calculate distances from center
+        distances = [math.sqrt((x - center_x)**2 + (y - center_y)**2) 
+                    for x, y in zip(x_coords, y_coords)]
+        
+        if not distances:
+            return False
+        
+        # Check if points form concentric circles (multiple radii)
+        unique_distances = sorted(set(round(d, 1) for d in distances if d > 0))
+        
+        # If we have multiple distinct radii, it might be a circular shape
+        if len(unique_distances) >= 3:
+            # Check if the radii are reasonably distributed
+            max_radius = max(unique_distances)
+            if max_radius > 0:
+                # Look for points at different radial distances
+                radius_groups = {}
+                for d in unique_distances:
+                    radius_groups[d] = sum(1 for dist in distances if abs(dist - d) < 1.0)
+                
+                # If we have significant points at different radii, likely circular
+                return len([r for r, count in radius_groups.items() if count >= 4]) >= 2
+        
+        return False
+        
+    except Exception:
+        return False
+
+def _detect_spherical_pattern(x_coords, y_coords, z_coords, content):
+    """
+    Detect if the point pattern suggests a spherical shape.
+    """
+    try:
+        # Check STP content for spherical entities
+        content_upper = content.upper()
+        if 'SPHERICAL_SURFACE' in content_upper:
+            return True
+        
+        # Simple spherical detection: check if all dimensions are similar
+        # and points are distributed in a sphere-like pattern
+        x_range = max(x_coords) - min(x_coords)
+        y_range = max(y_coords) - min(y_coords)
+        z_range = max(z_coords) - min(z_coords)
+        
+        # All dimensions should be similar for a sphere
+        avg_range = (x_range + y_range + z_range) / 3
+        dimension_variance = max(abs(x_range - avg_range), abs(y_range - avg_range), abs(z_range - avg_range))
+        
+        # If variance is less than 20% of average, might be spherical
+        return dimension_variance < 0.2 * avg_range and len(x_coords) > 20
+        
+    except Exception:
+        return False
 
 # Legacy functions for compatibility
 def create_object_index(objects_dir="objects"):

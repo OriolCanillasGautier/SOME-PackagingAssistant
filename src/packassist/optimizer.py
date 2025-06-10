@@ -17,11 +17,25 @@ def optimize_packing(box_dims, obj_dims, max_attempts=None):
         if isinstance(obj_dims, tuple):
             obj_dims = {'length': obj_dims[0], 'width': obj_dims[1], 'height': obj_dims[2]}
         
+        # Extract shape information if available
+        obj_shape_type = obj_dims.get('shape_type', 'rectangular')
+        obj_volume_factor = obj_dims.get('volume_factor', 1.0)
+        box_shape_type = box_dims.get('shape_type', 'rectangular')
+        box_volume_factor = box_dims.get('volume_factor', 1.0)
+        
         # Mostrem info de les dimensions    
-        print("\n🧮 CÀLCUL D'EMPAQUETAMENT")
+        print("\n🧮 CÀLCUL D'EMPAQUETAMENT AVANÇAT")
         print("========================================")
         print(f"📦 Contenidor: {box_dims['length']} × {box_dims['width']} × {box_dims['height']} mm")
+        print(f"   Forma: {box_shape_type}, Factor volum: {box_volume_factor:.3f}")
         print(f"📋 Objecte: {obj_dims['length']} × {obj_dims['width']} × {obj_dims['height']} mm")
+        print(f"   Forma: {obj_shape_type}, Factor volum: {obj_volume_factor:.3f}")
+        
+        # Show real vs bounding box volume difference
+        if obj_volume_factor != 1.0:
+            efficiency_gain = (1.0 - obj_volume_factor) * 100
+            print(f"🎯 Guany d'eficiència per forma complexa: +{efficiency_gain:.1f}%")
+        
         print("========================================\n")
             
         # Per a contenidors grans i objectes petits, necessitem més intents
@@ -272,31 +286,72 @@ def optimize_packing(box_dims, obj_dims, max_attempts=None):
 
 def calculate_theoretical_max(box_dims, obj_dims):
     """
-    Calcula el nombre teòric màxim d'objectes basant-se només en volums.
-    Això dóna una estimació optimista.
+    Calcula el nombre teòric màxim d'objectes basant-se en volums reals.
+    Té en compte els factors de volum per a formes complexes.
     """
     try:
         if isinstance(box_dims, tuple):
             box_dims = {'length': box_dims[0], 'width': box_dims[1], 'height': box_dims[2]}
         if isinstance(obj_dims, tuple):
             obj_dims = {'length': obj_dims[0], 'width': obj_dims[1], 'height': obj_dims[2]}
-            
+        
+        # Calculate bounding box volumes
         box_volume = box_dims['width'] * box_dims['height'] * box_dims['length']
-        obj_volume = obj_dims['width'] * obj_dims['height'] * obj_dims['length']
-        return math.floor(box_volume / obj_volume) if obj_volume > 0 else 0
-    except:
+        obj_bounding_volume = obj_dims['width'] * obj_dims['height'] * obj_dims['length']
+        
+        # Apply volume factors for real shape volumes
+        box_volume_factor = box_dims.get('volume_factor', 1.0)
+        obj_volume_factor = obj_dims.get('volume_factor', 1.0)
+        
+        # Real volumes considering shape complexity
+        real_box_volume = box_volume * box_volume_factor
+        real_obj_volume = obj_bounding_volume * obj_volume_factor
+        
+        theoretical_max = math.floor(real_box_volume / real_obj_volume) if real_obj_volume > 0 else 0
+        
+        # Show volume factor impact if applicable
+        if obj_volume_factor != 1.0 or box_volume_factor != 1.0:
+            bounding_max = math.floor(box_volume / obj_bounding_volume) if obj_bounding_volume > 0 else 0
+            print(f"📊 Màxim teòric (bounding box): {bounding_max} objectes")
+            print(f"🎯 Màxim teòric (volum real): {theoretical_max} objectes")
+            improvement = theoretical_max - bounding_max
+            if improvement > 0:
+                print(f"✨ Millora per formes complexes: +{improvement} objectes ({improvement/bounding_max*100:.1f}%)")
+        
+        return theoretical_max
+    except Exception as e:
+        print(f"Error calculating theoretical max: {e}")
         return 0
 
 def calculate_grid_packing(box_dims, obj_dims):
     """
     Calcula empaquetament basat en una graella perfecta (sense rotacions).
-    Més ràpid per casos simples de caixes regulars.
+    Té en compte els factors de volum real per formes complexes.
     """
     try:
         if isinstance(box_dims, tuple):
             box_dims = {'length': box_dims[0], 'width': box_dims[1], 'height': box_dims[2]}
         if isinstance(obj_dims, tuple):
             obj_dims = {'length': obj_dims[0], 'width': obj_dims[1], 'height': obj_dims[2]}
+        
+        # Extract shape information if available
+        obj_shape_type = obj_dims.get('shape_type', 'rectangular')
+        obj_volume_factor = obj_dims.get('volume_factor', 1.0)
+        box_shape_type = box_dims.get('shape_type', 'rectangular')
+        box_volume_factor = box_dims.get('volume_factor', 1.0)
+        
+        # Get shape-specific packing efficiency
+        from .stp_loader import get_shape_packing_efficiency
+        obj_packing_efficiency = get_shape_packing_efficiency(obj_shape_type)
+        box_packing_efficiency = get_shape_packing_efficiency(box_shape_type)
+        
+        # Combined packing efficiency (how well these shapes pack together)
+        combined_efficiency = (obj_packing_efficiency + box_packing_efficiency) / 2
+        
+        print(f"\n== Anàlisi d'empaquetament en graella per formes complexes ==")
+        print(f"📦 Contenidor: {box_shape_type} (factor packing: {box_packing_efficiency:.3f})")
+        print(f"📋 Objecte: {obj_shape_type} (factor packing: {obj_packing_efficiency:.3f})")
+        print(f"🔗 Eficiència combinada: {combined_efficiency:.3f}")
         
         # Provar totes les orientacions possibles de l'objecte
         orientations = [
@@ -314,41 +369,59 @@ def calculate_grid_packing(box_dims, obj_dims):
         print("\n== Provant orientacions en graella ==")
         
         for obj_l, obj_w, obj_h in orientations:
-            # Calcular quants objectes caben en cada dimensió
+            # Calcular quants objectes caben en cada dimensió (bounding box)
             fit_length = math.floor(box_dims['length'] / obj_l) if obj_l > 0 else 0
             fit_width = math.floor(box_dims['width'] / obj_w) if obj_w > 0 else 0
             fit_height = math.floor(box_dims['height'] / obj_h) if obj_h > 0 else 0
             
-            total_fit = fit_length * fit_width * fit_height
+            # Grid count for bounding boxes
+            grid_count = fit_length * fit_width * fit_height
             
-            # Mostrar informació detallada per aquesta orientació
-            print(f"Orientació ({obj_l} × {obj_w} × {obj_h}): {fit_length} × {fit_width} × {fit_height} = {total_fit} objectes")
+            # Apply packing efficiency for complex shapes
+            adjusted_count = math.floor(grid_count * combined_efficiency)
             
-            if total_fit > max_count:
-                max_count = total_fit
+            # Show detailed information for this orientation
+            print(f"Orientació ({obj_l:.1f} × {obj_w:.1f} × {obj_h:.1f}): {fit_length} × {fit_width} × {fit_height} = {grid_count} (teòric) → {adjusted_count} (real)")
+            
+            if adjusted_count > max_count:
+                max_count = adjusted_count
                 best_orientation = (obj_l, obj_w, obj_h)
-                print(f"✓ Nova millor orientació trobada: {total_fit} objectes")
+                print(f"✓ Nova millor orientació trobada: {adjusted_count} objectes")
         
         # Calculem el volum del millor objecte amb la seva orientació
         if best_orientation:
-            obj_vol = best_orientation[0] * best_orientation[1] * best_orientation[2]
+            obj_bounding_vol = best_orientation[0] * best_orientation[1] * best_orientation[2]
+            obj_real_vol = obj_bounding_vol * obj_volume_factor
         else:
-            obj_vol = obj_dims['length'] * obj_dims['width'] * obj_dims['height']
+            obj_bounding_vol = obj_dims['length'] * obj_dims['width'] * obj_dims['height']
+            obj_real_vol = obj_bounding_vol * obj_volume_factor
             
-        box_vol = box_dims['length'] * box_dims['width'] * box_dims['height']
-        used_vol = max_count * obj_vol
-        efficiency = (used_vol / box_vol) * 100 if box_vol > 0 else 0
+        box_bounding_vol = box_dims['length'] * box_dims['width'] * box_dims['height']
+        box_real_vol = box_bounding_vol * box_volume_factor
+        
+        # Use real volume for calculations
+        used_vol = max_count * obj_real_vol
+        efficiency = (used_vol / box_real_vol) * 100 if box_real_vol > 0 else 0
         
         print(f"\n📊 Resum empaquetament en graella:")
         print(f"   ➕ Objectes: {max_count}")
-        print(f"   📏 Volum caixa: {round(box_vol, 2)} mm³")
-        print(f"   📦 Volum utilitzat: {round(used_vol, 2)} mm³")
-        print(f"   📈 Eficiència: {round(efficiency, 2)}%")
+        print(f"   📏 Volum caixa real: {round(box_real_vol, 2)} mm³")
+        print(f"   📦 Volum utilitzat real: {round(used_vol, 2)} mm³")
+        print(f"   📈 Eficiència real: {round(efficiency, 2)}%")
+        
+        # Show improvement from shape awareness if applicable
+        if obj_volume_factor != 1.0 or combined_efficiency != 1.0:
+            basic_count = math.floor(box_bounding_vol / obj_bounding_vol)
+            improvement = max_count - basic_count if basic_count > 0 else 0
+            if improvement > 0:
+                print(f"   ✨ Millora per geometria complexa: +{improvement} objectes ({improvement/basic_count*100:.1f}%)")
         
         return {
             'max_objects': max_count,
             'best_orientation': best_orientation,
-            'efficiency': efficiency
+            'efficiency': efficiency,
+            'shape_aware': True,
+            'packing_efficiency': combined_efficiency
         }
     except Exception as e:
         print(f"❌ Error en càlcul d'empaquetament en graella: {e}")
