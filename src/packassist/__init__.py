@@ -48,7 +48,8 @@ except ImportError:
     print("⚠️ Mòdul 'cadquery' no disponible: utilitzant funcions de fallback")
 
 # Exportem altres mòduls i funcions necessàries
-try:
-    from .optimizer import optimize_packing, calculate_theoretical_max
-except ImportError as e:
-    print(f"❌ Error important mòdul 'optimizer': {e}")
+# Import optimization functions
+from .optimizer import optimize_packing, calculate_theoretical_max, calculate_grid_packing
+
+# La visualización 3D ahora se maneja directamente desde app.py
+# No necesitamos importar visualizadores externos

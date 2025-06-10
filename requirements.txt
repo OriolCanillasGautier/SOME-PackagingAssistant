@@ -1,15 +1,19 @@
-# PackAssist 3D - Dependències principals
-cadquery==2.3.0
+# Dependències principals
+cadquery
 py3dbp
 multimethod>=1.8.0
 typish>=1.9.0
 ezdxf>=1.0.0
 nptyping>=2.0.0,<3.0.0
 
-# Dependències GUI i sistema
-numpy>=1.21.0,<2.0.0  # Compatibilitat amb nptyping
-matplotlib>=3.5.0
+# GUI i sistema
+numpy
+matplotlib
 tk
+
+# Visualització 3D
+plotly>=5.0.0
+kaleido>=0.2.0
 
 # Gestió de fitxers
 pathlib2>=2.3.0
@@ -17,6 +21,6 @@ pathlib2>=2.3.0
 # Construcció de l'executable
 pyinstaller>=5.0.0
 
-# Per desenvolupament i testing (opcional)
-pytest>=7.0.0
-black>=22.0.0
+# Desenvolupament i testing
+pytest
+black

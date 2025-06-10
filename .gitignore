@@ -26,6 +26,7 @@ packassist_env/
 venv/
 env/
 ENV/
+.env
 
 # IDE
 .vscode/
@@ -49,6 +50,16 @@ packassist_results_*.txt
 *.bak
 *.backup
 *_backup*
+*_backup.py
+
+# Test files (if any)
+test_*.py
+*_test.py
+tests/temp/
+
+# Debug and development files
+debug_*.py
+scratch_*.py
 *.old
 
 # Text duplicates
