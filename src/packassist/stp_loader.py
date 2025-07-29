@@ -4,16 +4,19 @@ Provides comprehensive geometric analysis for complex 3D shapes including:
 - Hexagonal prisms, triangular prisms, cylinders, spheres
 - Complex curved objects, B-spline surfaces
 - Real volume calculations and shape type detection
+- Advanced real geometry analysis for complex multi-sided shapes
 """
 
 import os
 import re
 import math
 from pathlib import Path
+from .advanced_geometry import analyze_stp_real_geometry, ComplexGeometry
 
 def get_stp_dimensions(file_path):
     """
     Advanced STP dimension reader with comprehensive shape detection.
+    Now includes REAL GEOMETRY ANALYSIS for complex multi-sided shapes.
     Returns accurate dimensions and shape information for complex geometries.
     """
     
@@ -26,6 +29,51 @@ def get_stp_dimensions(file_path):
         filename = os.path.basename(file_path).lower()
         file_size = os.path.getsize(file_path)
         
+        print(f"\n🔍 ANALITZANT GEOMETRIA REAL: {filename}")
+        print("=" * 50)
+        
+        # PRIMERA PROVA: Anàlisi de geometria real avançada
+        real_geometry_analysis = analyze_stp_real_geometry(file_path)
+        
+        if real_geometry_analysis and real_geometry_analysis.get('total_faces', 0) > 6:
+            print(f"✨ GEOMETRIA COMPLEXA DETECTADA!")
+            print(f"   📊 Cares: {real_geometry_analysis['total_faces']}")
+            print(f"   📐 Vèrtexs: {real_geometry_analysis['total_vertices']}")
+            print(f"   🔗 Cares paral·leles: {real_geometry_analysis['parallel_face_pairs']}")
+            print(f"   📦 Volum real: {real_geometry_analysis['real_volume']:.2f} mm³")
+            print(f"   📏 Volum bounding box: {real_geometry_analysis['bbox_volume']:.2f} mm³")
+            print(f"   📈 Eficiència volumètrica: {real_geometry_analysis['volume_efficiency']:.3f}")
+            print(f"   🧮 Score complexitat: {real_geometry_analysis['complexity_score']:.2f}")
+            
+            # Retornar dades de geometria real AMB TOTA LA INFORMACIÓ
+            bbox = real_geometry_analysis['bounding_box']
+            return {
+                "length": max(bbox['length'], 1.0),
+                "width": max(bbox['width'], 1.0), 
+                "height": max(bbox['height'], 1.0),
+                
+                # INFORMACIÓ DE FORMA COMPLEXA (no rectangular!)
+                "shape_type": "advanced_complex",  # Tipus especial
+                "volume_factor": real_geometry_analysis['volume_efficiency'],
+                
+                # GEOMETRIA AVANÇADA COMPLETA
+                "advanced_geometry": True,
+                "total_faces": real_geometry_analysis['total_faces'],
+                "total_vertices": real_geometry_analysis['total_vertices'],
+                "parallel_face_pairs": real_geometry_analysis['parallel_face_pairs'],
+                "interlocking_features": real_geometry_analysis['interlocking_features'],
+                "real_volume": real_geometry_analysis['real_volume'],
+                "bbox_volume": real_geometry_analysis['bbox_volume'],
+                "complexity_score": real_geometry_analysis['complexity_score'],
+                
+                # OBJECTE DE GEOMETRIA PER PROCESSAR DESPRÉS
+                "geometry_object": real_geometry_analysis.get('geometry_object'),
+                "supports_simplification": True,
+                "analysis_type": "advanced_real_geometry"
+            }
+        
+        print("📋 Geometria simple detectada, usant mètode estàndard...")
+        
         # Check if dimensions are encoded in the filename (e.g., box_100x80x60.stp)
         match = re.search(r'(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)', filename)
         if match:
@@ -35,7 +83,8 @@ def get_stp_dimensions(file_path):
                 "width": float(width),
                 "height": float(height),
                 "shape_type": "rectangular",
-                "volume_factor": 1.0
+                "volume_factor": 1.0,
+                "analysis_type": "filename_pattern"
             }
         
         # Enhanced STP file analysis

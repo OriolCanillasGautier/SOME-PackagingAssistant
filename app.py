@@ -222,7 +222,21 @@ class PackAssistGUI:
         
         self.file_path_var = tk.StringVar()
         ttk.Entry(self.file_input_frame, textvariable=self.file_path_var, width=30).grid(row=0, column=0, sticky=(tk.W, tk.E), padx=(0, 5))
-        ttk.Button(self.file_input_frame, text="Explorar...", command=self._browse_stp_file).grid(row=0, column=1)
+        
+        # Frame per botons
+        button_frame = ttk.Frame(self.file_input_frame)
+        button_frame.grid(row=0, column=1, sticky=tk.W)
+        
+        ttk.Button(button_frame, text="Explorar...", command=self._browse_stp_file).grid(row=0, column=0, padx=(0, 5))
+        
+        # Botó per editar geometria (inicialment deshabilitat)
+        self.geometry_editor_button = ttk.Button(
+            button_frame, 
+            text="🎛️ Editar", 
+            command=self._open_geometry_editor,
+            state=tk.DISABLED
+        )
+        self.geometry_editor_button.grid(row=0, column=1)
         
         self.file_info_var = tk.StringVar(value="Dimensions: - x - x - cm")
         ttk.Label(self.file_input_frame, textvariable=self.file_info_var).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
@@ -752,6 +766,7 @@ class PackAssistGUI:
         """Actualitza la informació del fitxer STP."""
         if not filepath:
             self.file_info_var.set("Dimensions: - x - x - mm")
+            self.geometry_editor_button.config(state=tk.DISABLED)
             return
         
         try:
@@ -770,6 +785,22 @@ class PackAssistGUI:
                     volume_factor = dimensions.get('volume_factor', 1.0)
                     info += f" | Forma: {shape_type} (factor volum: {volume_factor:.3f})"
                 
+                # Detectar geometria complexa per habilitar editor
+                if dimensions.get('advanced_geometry', False):
+                    total_faces = dimensions.get('total_faces', 0)
+                    if total_faces > 20:  # Geometria complexa
+                        info += f" | {total_faces} cares - Geometria complexa 🎛️"
+                        self.geometry_editor_button.config(state=tk.NORMAL)
+                        self.current_complex_geometry = dimensions  # Guardar per l'editor
+                        
+                        # Auto-obrir editor si és molt complexa
+                        self._auto_open_geometry_editor_on_import(dimensions)
+                    else:
+                        info += f" | {total_faces} cares"
+                        self.geometry_editor_button.config(state=tk.DISABLED)
+                else:
+                    self.geometry_editor_button.config(state=tk.DISABLED)
+                
                 self.file_info_var.set(info)
                 # Actualitzar variables (now using mm)
                 self.obj_vars[0].set(length_mm)
@@ -777,7 +808,59 @@ class PackAssistGUI:
                 self.obj_vars[2].set(height_mm)
             else:
                 self.file_info_var.set("Error llegint fitxer STP")
-        except Exception as e:            self.file_info_var.set(f"Error: {str(e)}")
+                self.geometry_editor_button.config(state=tk.DISABLED)
+        except Exception as e:
+            self.file_info_var.set(f"Error: {str(e)}")
+            self.geometry_editor_button.config(state=tk.DISABLED)
+    
+    def _open_geometry_editor(self):
+        """Obre l'editor de geometria en temps real OPTIMITZAT"""
+        if not hasattr(self, 'current_complex_geometry') or not self.current_complex_geometry:
+            messagebox.showerror("Error", "No hi ha geometria complexa carregada")
+            return
+        
+        try:
+            # Obtenir l'objecte de geometria
+            geometry_object = self.current_complex_geometry.get('geometry_object')
+            if not geometry_object:
+                messagebox.showwarning("Avís", "No es pot accedir a l'objecte de geometria")
+                return
+            
+            # Crear simplificador NOMÉS quan l'usuari ho demana
+            from src.packassist.advanced_geometry import GeometrySimplifier, RealTimeGeometryViewer
+            
+            print(f"🔧 Creant simplificador per {len(geometry_object.faces)} cares...")
+            simplifier = GeometrySimplifier(geometry_object)
+            
+            # Crear i mostrar l'editor optimitzat
+            geometry_viewer = RealTimeGeometryViewer(simplifier)
+            editor_window = geometry_viewer.create_interactive_viewer()
+            
+            print(f"🎛️ Editor obert - Geometria amb {len(geometry_object.faces)} cares")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error obrint l'editor de geometria: {str(e)}")
+            print(f"❌ Error obrint editor: {e}")
+    
+    def _auto_open_geometry_editor_on_import(self, dimensions):
+        """Obre automàticament l'editor si la geometria és molt complexa"""
+        if not dimensions or not dimensions.get('advanced_geometry', False):
+            return
+            
+        total_faces = dimensions.get('total_faces', 0)
+        
+        # Si té moltes cares, preguntar si vol obrir l'editor
+        if total_faces > 100:
+            response = messagebox.askyesno(
+                "Geometria Complexa Detectada",
+                f"S'ha detectat una geometria amb {total_faces:,} cares.\n\n"
+                f"Vols obrir l'editor de simplificació per optimitzar el rendiment?",
+                icon='question'
+            )
+            
+            if response:
+                # Esperar un moment perquè la interfície es carregui
+                self.root.after(500, self._open_geometry_editor)
 
     # === FUNCIONS DE CÀLCUL ===
     def calculate_manual(self):
@@ -1259,8 +1342,25 @@ class PackAssistGUI:
         if not self._validate_entry_file(file_path):
             return None
         try:
-            return get_stp_dimensions(file_path)
-        except Exception:
+            result = get_stp_dimensions(file_path)
+            
+            # DEBUG: Veure què retorna get_stp_dimensions
+            print(f"🔍 DEBUG APP - get_stp_dimensions retorna:")
+            if result:
+                print(f"   📋 shape_type: {result.get('shape_type', 'N/A')}")
+                print(f"   🔧 advanced_geometry: {result.get('advanced_geometry', False)}")
+                print(f"   📊 total_faces: {result.get('total_faces', 'N/A')}")
+                print(f"   🗂️ Claus: {list(result.keys()) if result else 'None'}")
+                if result.get('advanced_geometry'):
+                    print(f"   ✅ GEOMETRIA COMPLEXA DETECTADA EN APP!")
+                else:
+                    print(f"   ❌ No geometria complexa detectada en app")
+            else:
+                print(f"   ❌ result és None")
+            
+            return result
+        except Exception as e:
+            print(f"❌ Error en _get_entry_dimensions: {e}")
             return None
 
 # ...existing code...
