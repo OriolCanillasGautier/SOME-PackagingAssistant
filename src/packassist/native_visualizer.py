@@ -215,12 +215,15 @@ class NativePackingVisualizer:
                       color='#e74c3c', s=30, alpha=0.8)
                       
     def _draw_packed_objects(self, ax, items):
-        """Dibuixa els objectes empaquetats amb colors moderns"""
+        """Dibuixa els objectes empaquetats amb colors moderns i suport per geometria complexa"""
         # Paleta de colors moderna
         modern_colors = [
             '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7',
-            '#DDA0DD', '#98D8C8', '#F7DC6F', '#BB8FCE', '#85C1E9',
-            '#F8BBD9', '#D5A6BD', '#F4A460', '#87CEEB', '#DDA0DD'
+            '#A8E6CF', '#FFD93D', '#6BCF7F', '#4D96FF', '#FF9FF3',
+            '#F368E0', '#FF8E53', '#54A0FF', '#5F27CD', '#00D2D3',
+            '#FF3838', '#2ED573', '#FFA502', '#3742FA', '#FF6348',
+            '#7BED9F', '#70A1FF', '#5352ED', '#FF4757', '#2F3542',
+            '#57606F', '#FFC048', '#FF5722', '#8E44AD', '#E91E63'
         ]
         
         for index, item in enumerate(items):
@@ -234,8 +237,17 @@ class NativePackingVisualizer:
             # Color modern per l'objecte
             color = modern_colors[index % len(modern_colors)]
             
-            # Dibuixar objecte 3D amb estil modern
-            self._draw_modern_3d_box(ax, (x, y, z), (w, h, d), color, index)
+            # Comprovar si l'objecte té geometria complexa
+            has_complex_geometry = (hasattr(item, 'real_geometry') or 
+                                  (hasattr(item, 'shape_type') and 
+                                   'complex' in str(item.get('shape_type', ''))))
+            
+            if has_complex_geometry:
+                print(f"🎨 Dibuixant objecte complex {index+1}")
+                self._draw_complex_geometry_object(ax, (x, y, z), (w, h, d), color, index, item)
+            else:
+                # Dibuixar objecte 3D amb estil modern tradicional
+                self._draw_modern_3d_box(ax, (x, y, z), (w, h, d), color, index)
             
     def _draw_modern_3d_box(self, ax, position, dimensions, color, index):
         """Dibuixa una caixa 3D amb estil modern"""
@@ -268,6 +280,162 @@ class NativePackingVisualizer:
         center_x, center_y, center_z = x + w/2, y + h/2, z + d/2
         ax.text(center_x, center_y, center_z, str(index + 1), 
                fontsize=8, ha='center', va='center', weight='bold', color='white')
+    
+    def _draw_complex_geometry_object(self, ax, position, dimensions, color, index, item_data):
+        """Dibuixa un objecte amb geometria complexa real"""
+        try:
+            x, y, z = position
+            w, h, d = dimensions
+            
+            # Detectar si tenim geometria avançada
+            has_advanced_geometry = item_data.get('advanced_geometry', False)
+            geometry_obj = item_data.get('geometry_object')
+            
+            if has_advanced_geometry and geometry_obj:
+                print(f"🎯 Dibuixant geometria complexa amb {item_data.get('total_faces', 0)} cares")
+                
+                # Intentar dibuixar geometria complexa real
+                try:
+                    if hasattr(geometry_obj, 'faces') and len(geometry_obj.faces) > 0:
+                        # Seleccionar només un subconjunt de cares per rendiment
+                        max_faces_to_draw = min(50, len(geometry_obj.faces))
+                        selected_faces = geometry_obj.faces[:max_faces_to_draw]
+                        
+                        for face in selected_faces:
+                            if hasattr(face, 'vertices') and len(face.vertices) >= 3:
+                                # Escalar vèrtexs dins del bounding box
+                                scaled_vertices = []
+                                for vertex in face.vertices:
+                                    scaled_v = (
+                                        x + vertex[0] * w / 100,  # Assumir escala normalitzada
+                                        y + vertex[1] * h / 100,
+                                        z + vertex[2] * d / 100
+                                    )
+                                    scaled_vertices.append(scaled_v)
+                                
+                                # Crear polígon 3D
+                                poly = Poly3DCollection([scaled_vertices], 
+                                                      alpha=0.6, 
+                                                      facecolor=color,
+                                                      edgecolor='black', 
+                                                      linewidth=0.5)
+                                ax.add_collection3d(poly)
+                        
+                        print(f"✅ Dibuixades {max_faces_to_draw} de {len(geometry_obj.faces)} cares")
+                        return  # Geometria complexa dibuixada amb èxit
+                    
+                except Exception as e:
+                    print(f"⚠️  Error renderitzant geometria complexa: {e}")
+                
+                # Fallback: forma aproximada basada en complexitat
+                complexity = item_data.get('complexity_score', 1.0)
+                if complexity > 10:
+                    self._draw_high_complexity_shape(ax, position, dimensions, color, complexity)
+                    return
+            
+            # Fallback: dibuixar com a forma aproximada basada en el tipus
+            shape_type = str(item_data.get('shape_type', 'rectangular'))
+            
+            if 'complex' in shape_type:
+                # Dibuixar com un polígon aproximat
+                faces_count = item_data.get('faces_count', 8)
+                self._draw_complex_approximated_shape(ax, position, dimensions, color, faces_count)
+            else:
+                # Dibuixar com a caixa tradicional
+                self._draw_modern_3d_box(ax, position, dimensions, color, index)
+                
+        except Exception as e:
+            print(f"⚠️  Error dibuixant geometria complexa: {e}")
+            # Fallback a caixa simple
+            self._draw_modern_3d_box(ax, position, dimensions, color, index)
+    
+    def _draw_high_complexity_shape(self, ax, position, dimensions, color, complexity):
+        """Dibuixa una forma que indica alta complexitat visual"""
+        x, y, z = position
+        w, h, d = dimensions
+        
+        # Crear una forma facetada que suggereix complexitat
+        num_facets = min(int(complexity / 2), 12)  # Màxim 12 facetes
+        
+        # Base octogonal o similar
+        angles = np.linspace(0, 2*np.pi, num_facets, endpoint=False)
+        radius_x, radius_y = w/3, h/3
+        center_x, center_y = x + w/2, y + h/2
+        
+        # Crear vèrtexs de la base
+        base_vertices = []
+        for angle in angles:
+            vx = center_x + radius_x * np.cos(angle)
+            vy = center_y + radius_y * np.sin(angle)
+            base_vertices.append([vx, vy, z])
+        
+        # Crear vèrtexs del sostre
+        top_vertices = []
+        for angle in angles:
+            vx = center_x + radius_x * 0.8 * np.cos(angle)  # Lleugerament més petit
+            vy = center_y + radius_y * 0.8 * np.sin(angle)
+            top_vertices.append([vx, vy, z + d])
+        
+        # Dibuixar cares laterals
+        for i in range(num_facets):
+            next_i = (i + 1) % num_facets
+            face_vertices = [
+                base_vertices[i],
+                base_vertices[next_i],
+                top_vertices[next_i],
+                top_vertices[i]
+            ]
+            
+            poly = Poly3DCollection([face_vertices], 
+                                  alpha=0.7, 
+                                  facecolor=color,
+                                  edgecolor='darkred', 
+                                  linewidth=1)
+            ax.add_collection3d(poly)
+        
+        # Dibuixar base i sostre
+        base_poly = Poly3DCollection([base_vertices], alpha=0.8, facecolor=color, edgecolor='darkred')
+        top_poly = Poly3DCollection([top_vertices], alpha=0.8, facecolor=color, edgecolor='darkred')
+        ax.add_collection3d(base_poly)
+        ax.add_collection3d(top_poly)
+    
+    def _draw_complex_approximated_shape(self, ax, position, dimensions, color, faces_count):
+        """Dibuixa una forma poligonal aproximada basada en el nombre de cares"""
+        x, y, z = position
+        w, h, d = dimensions
+        
+        # Crear un polígon regular en la base
+        angles = np.linspace(0, 2*np.pi, faces_count, endpoint=False)
+        radius_x, radius_y = w/2, h/2
+        center_x, center_y = x + w/2, y + h/2
+        
+        # Vèrtexs de la base
+        base_vertices = []
+        top_vertices = []
+        
+        for angle in angles:
+            base_x = center_x + radius_x * np.cos(angle)
+            base_y = center_y + radius_y * np.sin(angle)
+            base_vertices.append([base_x, base_y, z])
+            top_vertices.append([base_x, base_y, z + d])
+        
+        # Dibuixar base i top
+        base_poly = Poly3DCollection([base_vertices], alpha=0.7, facecolor=color, edgecolor='white')
+        top_poly = Poly3DCollection([top_vertices], alpha=0.7, facecolor=color, edgecolor='white')
+        ax.add_collection3d(base_poly)
+        ax.add_collection3d(top_poly)
+        
+        # Dibuixar cares laterals
+        for i in range(len(base_vertices)):
+            next_i = (i + 1) % len(base_vertices)
+            side_face = [
+                base_vertices[i],
+                base_vertices[next_i],
+                top_vertices[next_i],
+                top_vertices[i]
+            ]
+            side_poly = Poly3DCollection([side_face], alpha=0.7, facecolor=color, edgecolor='white')
+            ax.add_collection3d(side_poly)
     
     def _set_axes_equal_3d(self, ax):
         """Fa que els eixos 3D tinguin la mateixa escala"""
