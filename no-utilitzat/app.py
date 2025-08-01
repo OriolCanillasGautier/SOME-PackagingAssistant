@@ -1,20 +1,20 @@
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-from datetime import datetime
+import tkinter as tk
 import threading
+import traceback
+from pathlib import Path
+import matplotlib.pyplot as plt
+from datetime import datetime
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.figure import Figure
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+import numpy as np
+import sys
 import os
 import csv
-import sys
-import traceback
-import numpy as np
-from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import pyvista as pv
-from pyvistaqt import BackgroundPlotter
-import trimesh
-
 from src.packassist import get_stp_dimensions, validate_stp_file, optimize_packing, calculate_theoretical_max, calculate_grid_packing
-from src.packassist.smart_envelope import create_non_destructive_optimizer_dialog
 
 # Constants
 CSV_PATH = "data/index.csv"
@@ -62,7 +62,7 @@ class PackAssistGUI:
         self.main_frame.rowconfigure(1, weight=1)
         
         # Títol
-        ttk.Label(self.main_frame, text="PackAssist 3D", style='Title.TLabel').grid(row=0, column=0, pady=(0, 10))
+        ttk.Label(self.main_frame, text="🎯 PackAssist 3D", style='Title.TLabel').grid(row=0, column=0, pady=(0, 10))
         
         # Notebook per pestanyes
         self.notebook = ttk.Notebook(self.main_frame)
@@ -82,7 +82,7 @@ class PackAssistGUI:
     def _create_stp_tab(self):
         """Crea la pestanya de fitxers STP."""
         stp_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(stp_frame, text="Fitxers STP")
+        self.notebook.add(stp_frame, text="📁 Fitxers STP")
         stp_frame.columnconfigure(0, weight=1)
         stp_frame.rowconfigure(2, weight=1)
         
@@ -94,7 +94,7 @@ class PackAssistGUI:
         ttk.Button(file_frame, text="📂 Carregar CSV", command=self.load_csv_file).grid(row=0, column=0, padx=(0, 5))
         self.csv_path_var = tk.StringVar(value=CSV_PATH)
         ttk.Entry(file_frame, textvariable=self.csv_path_var, state='readonly').grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 5))
-        ttk.Button(file_frame, text="Recarregar", command=self.reload_metadata).grid(row=0, column=2, padx=(5, 0))
+        ttk.Button(file_frame, text="🔄 Recarregar", command=self.reload_metadata).grid(row=0, column=2, padx=(5, 0))
         
         # Control de processat
         control_frame = ttk.LabelFrame(stp_frame, text="Control de processat", padding="10")
@@ -145,7 +145,7 @@ class PackAssistGUI:
 
     def _create_box_input_section(self, parent):
         """Crea la secció d'entrada de dimensions del contenidor."""
-        box_frame = ttk.LabelFrame(parent, text="Dimensions del contenidor (mm)", padding="10")
+        box_frame = ttk.LabelFrame(parent, text="📦 Dimensions del contenidor (mm)", padding="10")
         box_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N), padx=(0, 5), pady=(0, 10))
         box_frame.columnconfigure(1, weight=1)
         
@@ -180,7 +180,7 @@ class PackAssistGUI:
 
     def _create_object_input_section(self, parent):
         """Crea la secció d'entrada de dimensions de l'objecte."""
-        obj_frame = ttk.LabelFrame(parent, text="Dimensions de l'objecte (mm)", padding="10")
+        obj_frame = ttk.LabelFrame(parent, text="📋 Dimensions de l'objecte (mm)", padding="10")
         obj_frame.grid(row=0, column=1, sticky=(tk.W, tk.E, tk.N), padx=(5, 0), pady=(0, 10))
         obj_frame.columnconfigure(1, weight=1)
         
@@ -236,16 +236,7 @@ class PackAssistGUI:
             command=self._open_geometry_editor,
             state=tk.DISABLED
         )
-        self.geometry_editor_button.grid(row=0, column=1, padx=(0, 5))
-        
-        # NOU: Botó per optimitzador no destructiu
-        self.smart_optimizer_button = ttk.Button(
-            button_frame,
-            text="Optimitzar",
-            command=self._open_smart_optimizer,
-            state=tk.DISABLED
-        )
-        self.smart_optimizer_button.grid(row=0, column=2)
+        self.geometry_editor_button.grid(row=0, column=1)
         
         self.file_info_var = tk.StringVar(value="Dimensions: - x - x - cm")
         ttk.Label(self.file_input_frame, textvariable=self.file_info_var).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
@@ -253,7 +244,7 @@ class PackAssistGUI:
 
     def _create_manual_results_section(self, parent):
         """Crea la secció de resultats manuals."""
-        results_frame = ttk.LabelFrame(parent, text="Resultats", padding="10")
+        results_frame = ttk.LabelFrame(parent, text="📊 Resultats", padding="10")
         results_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(10, 0))
         results_frame.columnconfigure(0, weight=1)
         results_frame.rowconfigure(0, weight=1)
@@ -275,12 +266,12 @@ class PackAssistGUI:
         controls_frame = ttk.Frame(csv_frame)
         controls_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        ttk.Button(controls_frame, text="Recarregar CSV", command=self.reload_csv_data).grid(row=0, column=0, padx=(0, 5))
-        ttk.Button(controls_frame, text="Afegir Entrada", command=self.add_csv_entry).grid(row=0, column=1, padx=5)
-        ttk.Button(controls_frame, text="Nova Caixa", command=self.create_new_box).grid(row=0, column=2, padx=5)
-        ttk.Button(controls_frame, text="Nou Objecte", command=self.create_new_object).grid(row=0, column=3, padx=5)
-        ttk.Button(controls_frame, text="Editar", command=self.edit_selected_item).grid(row=0, column=4, padx=5)
-        ttk.Button(controls_frame, text="Guardar CSV", command=self.save_csv_data).grid(row=0, column=5, padx=(5, 0))
+        ttk.Button(controls_frame, text="🔄 Recarregar CSV", command=self.reload_csv_data).grid(row=0, column=0, padx=(0, 5))
+        ttk.Button(controls_frame, text="➕ Afegir Entrada", command=self.add_csv_entry).grid(row=0, column=1, padx=5)
+        ttk.Button(controls_frame, text="📦 Nova Caixa", command=self.create_new_box).grid(row=0, column=2, padx=5)
+        ttk.Button(controls_frame, text="🧩 Nou Objecte", command=self.create_new_object).grid(row=0, column=3, padx=5)
+        ttk.Button(controls_frame, text="✏️ Editar", command=self.edit_selected_item).grid(row=0, column=4, padx=5)
+        ttk.Button(controls_frame, text="💾 Guardar CSV", command=self.save_csv_data).grid(row=0, column=5, padx=(5, 0))
         
         # Taula d'edició
         table_frame = ttk.Frame(csv_frame)
@@ -310,7 +301,7 @@ class PackAssistGUI:
     def _create_results_tab(self):
         """Crea la pestanya de resultats."""
         results_frame = ttk.Frame(self.notebook, padding="10")
-        self.notebook.add(results_frame, text="Resultats")
+        self.notebook.add(results_frame, text="📊 Resultats")
         results_frame.columnconfigure(0, weight=1)
         results_frame.rowconfigure(1, weight=1)
         
@@ -318,7 +309,7 @@ class PackAssistGUI:
         controls_frame = ttk.Frame(results_frame)
         controls_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 10))
         
-        ttk.Button(controls_frame, text="Exportar Resultats", command=self.export_results).grid(row=0, column=0, padx=(0, 10))
+        ttk.Button(controls_frame, text="💾 Exportar Resultats", command=self.export_results).grid(row=0, column=0, padx=(0, 10))
         ttk.Button(controls_frame, text="🗑️ Netejar Resultats", command=self.clear_results).grid(row=0, column=1)
         
         # Àrea de resultats
@@ -335,16 +326,16 @@ class PackAssistGUI:
 
     def _create_visualization_section(self):
         """Crea la secció de visualització 3D."""
-        self.viz_frame = ttk.LabelFrame(self.main_frame, text="Visualització 3D", padding="10")
+        self.viz_frame = ttk.LabelFrame(self.main_frame, text="🎯 Visualització 3D", padding="10")
         self.viz_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=5)
         
         viz_buttons_frame = ttk.Frame(self.viz_frame)
         viz_buttons_frame.grid(row=0, column=0, sticky=(tk.W, tk.E))
         
-        self.visualize_btn = ttk.Button(viz_buttons_frame, text="Visualitzar Empaquetament", command=self.visualize_packing, state=tk.DISABLED)
+        self.visualize_btn = ttk.Button(viz_buttons_frame, text="📊 Visualitzar Empaquetament", command=self.visualize_packing, state=tk.DISABLED)
         self.visualize_btn.grid(row=0, column=0, padx=5)
         
-        self.close_viz_btn = ttk.Button(viz_buttons_frame, text="Tancar Visualització", command=self.close_visualization, state=tk.DISABLED)
+        self.close_viz_btn = ttk.Button(viz_buttons_frame, text="❌ Tancar Visualització", command=self.close_visualization, state=tk.DISABLED)
         self.close_viz_btn.grid(row=0, column=1, padx=5)
         
         self.canvas_frame = ttk.Frame(self.viz_frame)
@@ -400,7 +391,7 @@ class PackAssistGUI:
         
         for entry in self.metadata:
             file_path = entry.get("file_path", "")
-            status = "Valid" if self._validate_entry_file(file_path) else "No valid"
+            status = "✅ Vàlid" if self._validate_entry_file(file_path) else "❌ No vàlid"
             self.file_tree.insert("", tk.END, values=(
                 entry.get("type", ""),
                 entry.get("name", ""),
@@ -761,73 +752,6 @@ class PackAssistGUI:
             self.obj_vars[1].set(dimensions['width'])
             self.obj_vars[2].set(dimensions['height'])
 
-    def _get_entry_dimensions(self, file_path):
-        """Obté les dimensions d'una entrada del CSV amb suport per geometria complexa."""
-        if not hasattr(self, 'metadata') or not self.metadata:
-            return None
-        
-        for entry in self.metadata:
-            if entry.get('file_path', '') == file_path:
-                # Si hi ha dimensions al CSV, usar-les
-                if all(key in entry for key in ['length', 'width', 'height']):
-                    try:
-                        base_dims = {
-                            'length': float(entry['length']),
-                            'width': float(entry['width']),
-                            'height': float(entry['height']),
-                            'shape_type': 'rectangular',  # Per defecte
-                            'volume_factor': 1.0
-                        }
-                        
-                        # Intentar carregar geometria avançada si és un fitxer STP
-                        if file_path.lower().endswith('.stp') and os.path.exists(file_path):
-                            try:
-                                from src.packassist.advanced_geometry import analyze_stp_real_geometry
-                                advanced_analysis = analyze_stp_real_geometry(file_path)
-                                
-                                if advanced_analysis and advanced_analysis.get('total_faces', 0) > 6:
-                                    print(f"GEOMETRIA COMPLEXA detectada: {advanced_analysis['total_faces']} cares")
-                                    base_dims.update({
-                                        'shape_type': 'complex',
-                                        'advanced_geometry': True,
-                                        'geometry_analysis': advanced_analysis,
-                                        'total_faces': advanced_analysis['total_faces'],
-                                        'volume_factor': advanced_analysis.get('volume_efficiency', 1.0),
-                                        'complexity_score': advanced_analysis.get('complexity_score', 0.0)
-                                    })
-                                    # Guardar la geometria complexa per visualització posterior
-                                    self.current_complex_geometry = advanced_analysis
-                                else:
-                                    print(f"GEOMETRIA SIMPLE detectada per {file_path}")
-                            except Exception as e:
-                                print(f"Error analitzant geometria avançada de {file_path}: {e}")
-                                
-                        return base_dims
-                        
-                    except (ValueError, TypeError):
-                        pass
-                
-                # Si no hi ha dimensions al CSV, intentar carregar del fitxer STP
-                if os.path.exists(file_path):
-                    try:
-                        from src.packassist.stp_loader import load_stp_file
-                        stp_result = load_stp_file(file_path)
-                        if stp_result and 'bounding_box' in stp_result:
-                            bbox = stp_result['bounding_box']
-                            return {
-                                'length': bbox.get('length', 0),
-                                'width': bbox.get('width', 0),
-                                'height': bbox.get('height', 0),
-                                'shape_type': 'rectangular',
-                                'volume_factor': 1.0
-                            }
-                    except Exception as e:
-                        print(f"Error carregant dimensions de {file_path}: {e}")
-                
-                break
-        
-        return None
-
     def _browse_stp_file(self):
         """Explora fitxers STP."""
         filepath = filedialog.askopenfilename(
@@ -843,7 +767,6 @@ class PackAssistGUI:
         if not filepath:
             self.file_info_var.set("Dimensions: - x - x - mm")
             self.geometry_editor_button.config(state=tk.DISABLED)
-            self.smart_optimizer_button.config(state=tk.DISABLED)
             return
         
         try:
@@ -868,7 +791,6 @@ class PackAssistGUI:
                     if total_faces > 20:  # Geometria complexa
                         info += f" | {total_faces} cares - Geometria complexa 🎛️"
                         self.geometry_editor_button.config(state=tk.NORMAL)
-                        self.smart_optimizer_button.config(state=tk.NORMAL)  # NOU: Habilitar optimitzador
                         self.current_complex_geometry = dimensions  # Guardar per l'editor
                         
                         # Auto-obrir editor si és molt complexa
@@ -876,10 +798,8 @@ class PackAssistGUI:
                     else:
                         info += f" | {total_faces} cares"
                         self.geometry_editor_button.config(state=tk.DISABLED)
-                        self.smart_optimizer_button.config(state=tk.DISABLED)
                 else:
                     self.geometry_editor_button.config(state=tk.DISABLED)
-                    self.smart_optimizer_button.config(state=tk.DISABLED)
                 
                 self.file_info_var.set(info)
                 # Actualitzar variables (now using mm)
@@ -889,11 +809,9 @@ class PackAssistGUI:
             else:
                 self.file_info_var.set("Error llegint fitxer STP")
                 self.geometry_editor_button.config(state=tk.DISABLED)
-                self.smart_optimizer_button.config(state=tk.DISABLED)
         except Exception as e:
             self.file_info_var.set(f"Error: {str(e)}")
             self.geometry_editor_button.config(state=tk.DISABLED)
-            self.smart_optimizer_button.config(state=tk.DISABLED)
     
     def _open_geometry_editor(self):
         """Obre l'editor de geometria en temps real OPTIMITZAT"""
@@ -911,7 +829,7 @@ class PackAssistGUI:
             # Crear simplificador NOMÉS quan l'usuari ho demana
             from src.packassist.advanced_geometry import GeometrySimplifier, RealTimeGeometryViewer
             
-            print(f"Creating simplifier for {len(geometry_object.faces)} faces...")
+            print(f"🔧 Creant simplificador per {len(geometry_object.faces)} cares...")
             simplifier = GeometrySimplifier(geometry_object)
             
             # Crear i mostrar l'editor optimitzat
@@ -922,7 +840,7 @@ class PackAssistGUI:
             
         except Exception as e:
             messagebox.showerror("Error", f"Error obrint l'editor de geometria: {str(e)}")
-            print(f"ERROR: Error opening editor: {e}")
+            print(f"❌ Error obrint editor: {e}")
     
     def _auto_open_geometry_editor_on_import(self, dimensions):
         """Obre automàticament l'editor si la geometria és molt complexa"""
@@ -943,110 +861,10 @@ class PackAssistGUI:
             if response:
                 # Esperar un moment perquè la interfície es carregui
                 self.root.after(500, self._open_geometry_editor)
-    
-    def _open_smart_optimizer(self):
-        """Obre el Generador Intel·ligent de Caixes Personalitzades."""
-        if not hasattr(self, 'current_complex_geometry') or not self.current_complex_geometry:
-            messagebox.showwarning("Avís", "No hi ha geometria complexa carregada per optimitzar")
-            return
-        
-        try:
-            # Obtenir l'objecte de geometria
-            geometry_object = self.current_complex_geometry.get('geometry_object')
-            if not geometry_object:
-                messagebox.showwarning("Avís", "No es pot accedir a l'objecte de geometria")
-                return
-            
-            print(f"Opening Intelligent Box Generator for {len(geometry_object.faces)} faces...")
-            
-            # Callback per quan es generi la caixa
-            def on_box_generated(result):
-                print(f"SUCCESS: Intelligent box generated: {result.face_count} faces, {result.efficiency:.1f}% efficiency")
-                
-                # Actualitzar la UI amb els resultats
-                self.update_status(f"Caixa generada: {result.face_count} cares, {result.efficiency:.1f}% eficiència")
-                
-                # Actualitzar les dimensions de l'objecte amb la nova caixa
-                self._update_dimensions_from_intelligent_box(result)
-                
-                # Mostrar informació detallada
-                info_message = (
-                    f"🎯 Caixa Intel·ligent Generada\n\n"
-                    f"📊 Cares: {result.face_count}\n"
-                    f"📏 Volum: {result.box_volume:.2f} mm³\n"
-                    f"📈 Eficiència: {result.efficiency:.1f}%\n"
-                    f"📐 Àrea: {result.surface_area:.2f} mm²\n\n"
-                    f"Les dimensions s'han actualitzat automàticament."
-                )
-                messagebox.showinfo("Caixa Generada", info_message)
-            
-            # Importar i crear el generador intel·ligent
-            from src.packassist.intelligent_box_ui import create_intelligent_box_dialog
-            
-            # Crear el diàleg del generador intel·ligent
-            intelligent_box_ui = create_intelligent_box_dialog(
-                self.root, 
-                geometry_object, 
-                callback=on_box_generated
-            )
-            
-            if intelligent_box_ui:
-                print("🎯 Generador Intel·ligent de Caixes obert correctament")
-            else:
-                messagebox.showerror("Error", "No s'ha pogut crear el generador intel·ligent")
-                
-        except ImportError as e:
-            messagebox.showerror(
-                "Error d'Importació", 
-                f"No s'han pogut carregar els mòduls necessaris:\n{e}\n\n"
-                f"Assegura't que tens instal·lades les dependències:\n"
-                f"• scikit-learn\n• scipy\n• numpy"
-            )
-            print(f"❌ Error d'importació: {e}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Error obrint generador intel·ligent: {str(e)}")
-            print(f"❌ Error obrint generador intel·ligent: {e}")
-            traceback.print_exc()
-    
-    def _update_dimensions_from_intelligent_box(self, result):
-        """
-        Actualitza les dimensions de l'objecte amb la caixa generada.
-        
-        Args:
-            result: BoxGenerationResult amb la informació de la caixa
-        """
-        try:
-            # Calcular bounding box de la caixa generada
-            vertices = result.vertices
-            min_coords = np.min(vertices, axis=0)
-            max_coords = np.max(vertices, axis=0)
-            
-            # Calcular dimensions
-            length = max_coords[0] - min_coords[0]
-            width = max_coords[1] - min_coords[1]
-            height = max_coords[2] - min_coords[2]
-            
-            # Actualitzar variables de l'entrada manual
-            self.obj_vars[0].set(length)  # Longitud
-            self.obj_vars[1].set(width)   # Amplada
-            self.obj_vars[2].set(height)  # Altura
-            
-            # Actualitzar informació del fitxer
-            info_text = (
-                f"Caixa Intel·ligent: {length:.1f} x {width:.1f} x {height:.1f} mm | "
-                f"{result.face_count} cares, {result.efficiency:.1f}% eficiència 🎯"
-            )
-            self.file_info_var.set(info_text)
-            
-            print(f"🔄 Dimensions actualitzades: {length:.1f} x {width:.1f} x {height:.1f} mm")
-            
-        except Exception as e:
-            print(f"❌ Error actualitzant dimensions: {e}")
-            self.update_status("Error actualitzant dimensions de la caixa generada")
 
     # === FUNCIONS DE CÀLCUL ===
     def calculate_manual(self):
-        """Calcula l'empaquetament manual."""
+        """Calcula l'empaquetament manual amb opcions avançades."""
         try:
             # Obtenir dimensions com a tuples (ara ja estem utilitzant mm directament)
             box_tuple = (
@@ -1081,12 +899,101 @@ class PackAssistGUI:
                 "volume_factor": 1.0
             }
             
+            # Si estem usant un fitxer STP, obtenir les dimensions reals
+            if (self.input_method_var.get() == "file" and 
+                self.file_path_var.get() and 
+                hasattr(self, 'current_complex_geometry')):
+                
+                real_dims = self.current_complex_geometry
+                if real_dims:
+                    obj_dims.update({
+                        "shape_type": real_dims.get('shape_type', 'rectangular'),
+                        "volume_factor": real_dims.get('volume_factor', 1.0),
+                        "advanced_geometry": real_dims.get('advanced_geometry', False),
+                        "total_faces": real_dims.get('total_faces', 0),
+                        "total_vertices": real_dims.get('total_vertices', 0),
+                        "geometry_object": real_dims.get('geometry_object'),
+                        "real_volume": real_dims.get('real_volume', 0),
+                        "complexity_score": real_dims.get('complexity_score', 0)
+                    })
+            
             # Calcular
             self.manual_results.delete(1.0, tk.END)
             results_content = self._build_manual_results_content(box_dims, obj_dims)
             
             theoretical_max = calculate_theoretical_max(box_dims, obj_dims)
-            result = optimize_packing(box_dims, obj_dims)
+            
+            # NOVA FUNCIONALITAT: Decidir quin algoritme usar
+            use_advanced_meshing = (obj_dims.get('advanced_geometry', False) or 
+                                   obj_dims.get('shape_type') != 'rectangular')
+            
+            if use_advanced_meshing:
+                # Preguntar quin algoritme avançat usar
+                choice = messagebox.askyesnocancel(
+                    "Algoritme d'Empaquetament", 
+                    "Detectada geometria complexa. Selecciona algoritme:\n\n" +
+                    "✅ SÍ = Envoltant Intel·ligent (Ràpid, eficient)\n" +
+                    "❌ NO = Mesh Collision Detection (Lent, precís)\n" +
+                    "🚫 CANCEL = Algoritme Estàndard (Més ràpid)"
+                )
+                
+                if choice is None:  # Cancel - usar algoritme estàndard
+                    self.update_status("Calculant amb algoritme estàndard...")
+                    result = optimize_packing(box_dims, obj_dims)
+                    results_content += "🧮 ALGORITME ESTÀNDARD\n"
+                elif choice:  # Sí - usar envoltant intel·ligent
+                    try:
+                        from src.packassist.smart_envelope import ComplexityBasedOptimizer, create_complexity_dialog
+                        
+                        complexity_result = {'selected': False}
+                        
+                        def on_complexity_selected(complexity_level):
+                            complexity_result['selected'] = True
+                            complexity_result['level'] = complexity_level
+                            
+                            try:
+                                optimizer = ComplexityBasedOptimizer(box_dims, obj_dims)
+                                result = optimizer.optimize_with_envelope(complexity_level)
+                                complexity_result['result'] = result
+                            except Exception as e:
+                                complexity_result['error'] = str(e)
+                        
+                        # Mostrar diàleg de selecció de complexitat
+                        create_complexity_dialog(self.root, on_complexity_selected)
+                        
+                        # Esperar que l'usuari seleccioni
+                        self.root.wait_window()
+                        
+                        if complexity_result.get('selected') and 'result' in complexity_result:
+                            result = complexity_result['result']
+                            results_content += f"🎯 ENVOLTANT INTEL·LIGENT ({complexity_result['level']} cares)\n"
+                        elif complexity_result.get('error'):
+                            messagebox.showerror("Error", f"Error en envoltant intel·ligent: {complexity_result['error']}")
+                            # Fallback a algoritme estàndard
+                            result = optimize_packing(box_dims, obj_dims)
+                            results_content += "🧮 ALGORITME ESTÀNDARD (fallback)\n"
+                        else:
+                            # No es va seleccionar res, usar estàndard
+                            result = optimize_packing(box_dims, obj_dims)
+                            results_content += "🧮 ALGORITME ESTÀNDARD\n"
+                    except ImportError:
+                        messagebox.showwarning("Avís", "Envoltant intel·ligent no disponible. Usant algoritme estàndard.")
+                        result = optimize_packing(box_dims, obj_dims)
+                        results_content += "🧮 ALGORITME ESTÀNDARD\n"
+                else:  # No - usar mesh collision detection
+                    try:
+                        from src.packassist.mesh_optimizer import optimize_packing_with_meshes
+                        self.update_status("Calculant amb algoritme avançat de meshes...")
+                        result = optimize_packing_with_meshes(box_dims, obj_dims, max_items=100)
+                        results_content += "🔧 ALGORITME AVANÇAT AMB MESHES I COLLISION DETECTION\n"
+                    except ImportError as e:
+                        messagebox.showwarning("Avís", "L'algoritme de meshes no està disponible. Usant algoritme estàndard.")
+                        result = optimize_packing(box_dims, obj_dims)
+                        results_content += "🧮 ALGORITME ESTÀNDARD\n"
+            else:
+                self.update_status("Calculant amb algoritme estàndard...")
+                result = optimize_packing(box_dims, obj_dims)
+                results_content += "🧮 ALGORITME ESTÀNDARD\n"
             
             results_content += self._build_optimization_results(result, theoretical_max)
             
@@ -1098,7 +1005,8 @@ class PackAssistGUI:
                 self.visualize_btn.config(state=tk.NORMAL if result['max_objects'] > 0 else tk.DISABLED)
             else:
                 self.visualize_btn.config(state=tk.DISABLED)
-              # Afegir a la pestanya de resultats
+                
+            # Afegir a la pestanya de resultats
             self._add_to_results_tab(results_content)
             self._save_results_automatically()
             self.update_status("Càlcul manual completat")
@@ -1107,6 +1015,8 @@ class PackAssistGUI:
             messagebox.showerror("Error", "Introdueix valors numèrics vàlids")
         except Exception as e:
             messagebox.showerror("Error", f"Error durant el càlcul: {e}")
+            import traceback
+            traceback.print_exc()
             
     def _build_manual_results_content(self, box_dims, obj_dims):
         """Construeix el contingut dels resultats manuals."""
@@ -1140,11 +1050,58 @@ class PackAssistGUI:
         
         if result.get("error"):
             content += f"   ❌ Error: {result['error']}\n"
+            return content
+        
+        content += f"   🎯 Objectes empaquetats: {result['max_objects']} unitats\n"
+        content += f"   📈 Eficiència d'espai: {result['efficiency']:.1f}%\n"
+        
+        # Informació específica de l'envoltant intel·ligent
+        if result.get('envelope_shape'):
+            content += f"\n🎯 INFORMACIÓ D'ENVOLTANT INTEL·LIGENT:\n"
+            content += f"   🔺 Forma: {result['envelope_shape']}\n"
+            content += f"   ⚙️ Complexitat: {result.get('envelope_complexity', 0)} cares\n"
+            content += f"   📊 Eficiència envoltant: {result.get('envelope_efficiency', 0):.1%}\n"
+            if result.get('envelope_extra_volume', 0) > 0:
+                content += f"   ➕ Volum extra: {result['envelope_extra_volume']:.1f} mm³\n"
+        
+        # Informació de distribució
+        if result.get('distributions'):
+            content += f"\n🗂️ DISTRIBUCIÓ ÒPTIMA:\n"
+            for dist in result['distributions']:
+                content += f"   {dist['x']}x{dist['y']}x{dist['z']} = {dist['total']} objectes\n"
+        
+        # Informació de rotacions si està disponible
+        if result.get('rotations_tested'):
+            content += f"\n🔄 PROCESSAMENT:\n"
+            content += f"   Rotacions testades: {result['rotations_tested']}\n"
+            if result.get('collisions_avoided'):
+                content += f"   Col·lisions evitades: {result['collisions_avoided']}\n"
+            if result.get('processing_time'):
+                content += f"   Temps: {result['processing_time']:.2f}s\n"
+        
+        return content
+        
+        if result["error"]:
+            content += f"   ❌ Error: {result['error']}\n"
         else:
-            content += f"   ✅ Màxim real (3D packing): {result.get('max_objects', 0)} unitats\n"
-            content += f"   📈 Eficiència d'espai: {result.get('efficiency', 0):.1f}%\n"
-            content += f"   📏 Volum contenidor: {result.get('box_volume', 0):.1f} mm³\n"
-            content += f"   📦 Volum utilitzat: {result.get('used_volume', 0):.1f} mm³\n"
+            content += f"   ✅ Màxim real (3D packing): {result['max_objects']} unitats\n"
+            content += f"   📈 Eficiència d'espai: {result['efficiency']:.1f}%\n"
+            content += f"   📏 Volum contenidor: {result['box_volume']:.1f} mm³\n"
+            content += f"   📦 Volum utilitzat: {result['used_volume']:.1f} mm³\n"
+            
+            # Afegir informació de l'algoritme si està disponible
+            if 'algorithm' in result:
+                algorithm_names = {
+                    'mesh_collision_detection': '🎯 Meshes amb Collision Detection',
+                    'grid_recursive': '🧮 Graella Recursiva Estàndard',
+                    'py3dbp_enhanced': '📦 Bin Packing Millorat'
+                }
+                algorithm_display = algorithm_names.get(result['algorithm'], result['algorithm'])
+                content += f"   🔧 Algoritme: {algorithm_display}\n"
+            
+            # Afegir temps de càlcul si està disponible
+            if 'packing_time' in result:
+                content += f"   ⏱️ Temps de càlcul: {result['packing_time']:.2f}s\n"
         
         return content
 
@@ -1315,191 +1272,235 @@ class PackAssistGUI:
             self.update_status(f"Resultats guardats automàticament a {filename}")
         except Exception as e:
             print(f"Error guardant resultats automàticament: {e}")
-      
-    # === FUNCIONS DE VISUALITZACIÓ 3D (NOVA VERSIÓ AMB PYVISTA) ===
+      # === FUNCIONS DE VISUALITZACIÓ 3D ===
     
     def visualize_packing(self):
-        """Mostra la visualització 3D amb PyVista, renderitzant malles reals."""
+        """Mostra la visualització 3D integrada amb matplotlib."""
         if not hasattr(self, 'optimization_results') or not self.optimization_results:
             messagebox.showwarning("Advertència", "No hi ha resultats d'optimització per visualitzar.")
             return
-
-        if self.optimization_results.get("error"):
-            messagebox.showerror("Error", f"No es pot visualitzar un resultat amb error: {self.optimization_results['error']}")
-            return
-
+            
         try:
-            self.update_status("Generant visualització 3D amb PyVista...")
-
-            # Crear plotter PyVista normal (sense integració Tkinter)
-            plotter = pv.Plotter(title="Visualització 3D de l'Empaquetament - PackAssist")
-            plotter.background_color = 'white'
+            self.update_status("Generant visualització 3D integrada...")
             
-            # --- 1. Dibuixar el contenidor ---
-            bin_data = self.optimization_results.get('bins', [{}])[0].get('bin', {})
-            if not bin_data:
-                messagebox.showerror("Error", "No s'han trobat dades del contenidor en els resultats.")
-                plotter.close()
+            # Crear una nueva ventana para la visualización
+            viz_window = tk.Toplevel(self.root)
+            viz_window.title("Visualització 3D - PackAssist")
+            viz_window.geometry("900x700")
+            viz_window.transient(self.root)
+            
+            # Crear el marco principal
+            main_frame = ttk.Frame(viz_window)
+            main_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            
+            # Crear la figura de matplotlib
+            fig = Figure(figsize=(10, 8), dpi=100)
+            ax = fig.add_subplot(111, projection='3d')
+            
+            # Obtener datos de la optimización
+            bins_data = self.optimization_results.get('bins', [])
+            if not bins_data:
+                messagebox.showerror("Error", "No hi ha dades de contenidors per visualitzar.")
+                viz_window.destroy()
                 return
             
-            container_dims = bin_data.get('dimensions')
-            if not container_dims:
-                 messagebox.showerror("Error", "No s'han trobat les dimensions del contenidor.")
-                 plotter.close()
-                 return
-
-            container_mesh = pv.Cube(bounds=(0, container_dims[0], 0, container_dims[1], 0, container_dims[2]))
-            plotter.add_mesh(container_mesh, style='wireframe', color='gray', line_width=5, label='Contenidor')
-
-            # --- 2. Dibuixar els objectes empaquetats ---
-            items_info = self.optimization_results.get('bins', [{}])[0].get('items', [])
-            if not items_info:
-                messagebox.showwarning("Avís", "No s'han trobat objectes empaquetats per visualitzar.")
-                # Encara mostrem el contenidor buit
-                plotter.camera_position = 'iso'
-                plotter.show_grid()
-                plotter.add_axes()
-                plotter.add_legend()
-                plotter.set_background('white')
-                plotter.show(interactive=True)
-                return
-
-            # Obtenir la malla de l'objecte original
-            obj_mesh = None
-            obj_dims = self.optimization_results.get('obj_dims', {})
+            bin_data = bins_data[0]  # Usar el primer contenedor
+            bin_info = bin_data['bin']
+            items_info = bin_data['items']
+              # Dimensiones del contenedor - convertir a float para evitar problemas con Decimal
+            container_dims = bin_info['dimensions']
+            container_length = float(container_dims[0])
+            container_width = float(container_dims[1])
+            container_height = float(container_dims[2])
             
-            # Primer, intentar usar la geometria complexa si està disponible
-            if hasattr(self, 'current_complex_geometry') and self.current_complex_geometry:
-                try:
-                    geom_obj = self.current_complex_geometry.get('geometry_object')
-                    if geom_obj:
-                        # Convertir ComplexGeometry a PyVista mesh
-                        vertices = []
-                        faces = []
-                        face_count = 0
-                        
-                        for face in geom_obj.faces:
-                            if len(face.vertices) >= 3:
-                                # Afegir vèrtexs de la cara
-                                face_vertices = []
-                                for vertex in face.vertices:
-                                    vertices.append(vertex)
-                                    face_vertices.append(len(vertices) - 1)
-                                
-                                # Crear triangles per la cara (triangulació simple)
-                                for i in range(1, len(face_vertices) - 1):
-                                    faces.extend([3, face_vertices[0], face_vertices[i], face_vertices[i+1]])
-                        
-                        if vertices and faces:
-                            import numpy as np
-                            vertices_array = np.array(vertices)
-                            faces_array = np.array(faces)
-                            obj_mesh = pv.PolyData(vertices_array, faces_array)
-                            print(f"DEBUG: Usant geometria complexa amb {len(geom_obj.faces)} cares")
-                        else:
-                            print("DEBUG: No s'han pogut extreure cares vàlides de la geometria complexa")
-                except Exception as e:
-                    print(f"DEBUG: Error processant geometria complexa: {e}")
+            # Dibujar el contenedor (contorno)
+            self._draw_container_outline(ax, container_length, container_width, container_height)
             
-            # Si no tenim geometria complexa, crear un cub amb les dimensions correctes
-            if obj_mesh is None and obj_dims and all(k in obj_dims for k in ['length', 'width', 'height']):
-                # Crear cub amb les dimensions reals
-                obj_length = obj_dims['length']
-                obj_width = obj_dims['width'] 
-                obj_height = obj_dims['height']
-                obj_mesh = pv.Cube(bounds=(
-                    -obj_length/2, obj_length/2,
-                    -obj_width/2, obj_width/2, 
-                    -obj_height/2, obj_height/2
-                ))
-                print(f"DEBUG: Cub creat amb dimensions: {obj_length} x {obj_width} x {obj_height}")
-            elif obj_mesh is None:
-                # Fallback amb dimensions per defecte
-                obj_mesh = pv.Cube(bounds=(-0.5, 0.5, -0.5, 0.5, -0.5, 0.5))
-                print("DEBUG: Usant cub per defecte")
-
-            colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
-            
-            print(f"DEBUG: Visualitzant {len(items_info)} objectes")
-            
+            # Dibujar los objetos
+            colors = ['lightblue', 'lightgreen', 'lightyellow', 'lightpink', 'lightcyan', 'orange', 'purple', 'brown']
             for i, item in enumerate(items_info):
-                pos = item.get('position', [0, 0, 0])
-                dims = item.get('dimensions', [1, 1, 1]) # Bounding box de l'item
-                
-                print(f"DEBUG: Objecte {i+1} - Posició: {pos}, Dimensions: {dims}")
-                
-                if not pos or len(pos) != 3:
-                    print(f"WARNING: Posició invalida per objecte {i+1}: {pos}")
-                    continue
-                    
-                if not dims or len(dims) != 3:
-                    print(f"WARNING: Dimensions invalides per objecte {i+1}: {dims}")
-                    continue
-
-                # Crear una còpia de la malla per aquest objecte
-                item_mesh = obj_mesh.copy()
-
-                # Posicionar l'objecte: la posició és la cantonada inferior esquerra
-                # Ajustem al centre de l'objecte per a la visualització
-                center_pos = [
-                    pos[0] + dims[0]/2, 
-                    pos[1] + dims[1]/2, 
-                    pos[2] + dims[2]/2
-                ]
-                
-                item_mesh.translate(center_pos, inplace=True)
-                
-                # Afegir l'objecte al plotter amb color
+                # Convertir posición y dimensiones a float para evitar problemas con Decimal
+                position = [float(x) for x in item['position']]
+                dimensions = [float(x) for x in item['dimensions']]
                 color = colors[i % len(colors)]
-                plotter.add_mesh(item_mesh, color=color, opacity=0.8, show_edges=True, label=f'Objecte {i+1}')
                 
-                print(f"DEBUG: Objecte {i+1} col·locat al centre: {center_pos}")
-
-            # --- 3. Configuració final del plotter ---
-            plotter.camera_position = 'iso'
-            plotter.show_grid()
-            plotter.add_axes()
-            plotter.add_legend()
-            plotter.set_background('white')
+                self._draw_3d_box(ax, position, dimensions, color, alpha=0.7)
             
-            # Mostrar la visualització
-            plotter.show(interactive=True)
+            # Configurar el gráfico
+            ax.set_xlabel('Longitud (mm)')
+            ax.set_ylabel('Amplada (mm)')
+            ax.set_zlabel('Altura (mm)')
+            ax.set_title(f'Empaquetament 3D - {len(items_info)} objectes en contenidor')
             
-            self.update_status(f"Visualització 3D generada per a {len(items_info)} objectes.")
-            self.close_viz_btn.config(state=tk.NORMAL)
-            self.current_plotter = plotter # Guardem referència per tancar-lo
-
+            # Hacer que los ejes tengan la misma escala
+            self._set_axes_equal_3d(ax)
+            
+            # Crear el canvas de matplotlib
+            canvas = FigureCanvasTkAgg(fig, main_frame)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            
+            # Agregar toolbar de navegación
+            toolbar = NavigationToolbar2Tk(canvas, main_frame)
+            toolbar.update()
+            
+            # Frame para información y controles
+            info_frame = ttk.LabelFrame(main_frame, text="Informació", padding="5")
+            info_frame.pack(fill=tk.X, pady=(5, 0))
+            
+            info_text = f"Contenidor: {container_length} × {container_width} × {container_height} mm\n"
+            info_text += f"Objectes empaquetats: {len(items_info)}\n"
+            info_text += f"Eficiència: {self.optimization_results.get('efficiency', 0)}%"
+            
+            ttk.Label(info_frame, text=info_text).pack(anchor=tk.W)
+            
+            # Botones de control
+            button_frame = ttk.Frame(main_frame)
+            button_frame.pack(fill=tk.X, pady=(5, 0))
+            
+            ttk.Button(button_frame, text="💾 Guardar Imatge", 
+                      command=lambda: self._save_3d_image(fig)).pack(side=tk.LEFT, padx=(0, 5))
+            ttk.Button(button_frame, text="❌ Tancar", 
+                      command=viz_window.destroy).pack(side=tk.RIGHT)
+            
+            self.update_status("Visualització 3D integrada oberta")
+            
         except Exception as e:
-            messagebox.showerror("Error de Visualització", f"No s'ha pogut generar la visualització 3D:\n{e}")
-            print(f"❌ Error en visualize_packing: {e}")
+            error_msg = f"Error obrint visualització 3D: {str(e)}"
+            self.update_status("Error en la visualització")
+            messagebox.showerror("Error", error_msg)
+            print(f"Debug - Error en visualize_packing: {e}")
+            import traceback
             traceback.print_exc()
-            self.update_status("Error generant visualització")
 
     def close_visualization(self):
-        """Tanca la finestra de visualització de PyVista."""
-        if hasattr(self, 'current_plotter') and self.current_plotter:
-            try:
-                # Tanca la finestra del plotter i neteja recursos
-                self.current_plotter.close()
-                self.current_plotter = None
-                self.update_status("Visualització tancada")
-                self.close_viz_btn.config(state=tk.DISABLED)
-                print("✅ Finestra de PyVista tancada correctament.")
-            except Exception as e:
-                print(f"❌ Error tancant la visualització de PyVista: {e}")
-        else:
-            self.update_status("No hi ha cap visualització activa per tancar")
+        """Funció mantinguda per compatibilitat - el nou sistema gestiona les finestres de forma independent."""
+        self.update_status("Sistema de visualització independent activat")
 
     # === FUNCIONES AUXILIARES PARA VISUALIZACIÓN 3D ===
     
     def _draw_container_outline(self, ax, length, width, height):
-        # Aquesta funció ja no és necessària amb PyVista, però la mantenim per si de cas
-        # ... (codi original)
-        pass
+        """Dibuja el contorno del contenedor."""
+        # Convertir a float para evitar problemas con Decimal
+        length, width, height = float(length), float(width), float(height)
+        
+        # Definir los vértices del contenedor
+        vertices = [
+            [0, 0, 0], [length, 0, 0], [length, width, 0], [0, width, 0],  # Base inferior
+            [0, 0, height], [length, 0, height], [length, width, height], [0, width, height]  # Base superior
+        ]
+        
+        # Definir las aristas del contenedor
+        edges = [
+            [0, 1], [1, 2], [2, 3], [3, 0],  # Base inferior
+            [4, 5], [5, 6], [6, 7], [7, 4],  # Base superior
+            [0, 4], [1, 5], [2, 6], [3, 7]   # Aristas verticales
+        ]
+        
+        # Dibujar las aristas
+        for edge in edges:
+            points = np.array([vertices[edge[0]], vertices[edge[1]]])
+            ax.plot3D(points[:, 0], points[:, 1], points[:, 2], 'k-', linewidth=2, alpha=0.8)
     
     def _draw_3d_box(self, ax, position, dimensions, color, alpha=0.7):
-        # Aquesta funció ja no és necessària amb PyVista
-        pass
+        """Dibuja una caja 3D en la posición especificada."""
+        # Convertir a float para evitar problemas con Decimal
+        x, y, z = float(position[0]), float(position[1]), float(position[2])
+        dx, dy, dz = float(dimensions[0]), float(dimensions[1]), float(dimensions[2])
+        
+        # Definir los vértices de la caja
+        vertices = np.array([
+            [x, y, z], [x+dx, y, z], [x+dx, y+dy, z], [x, y+dy, z],  # Base inferior
+            [x, y, z+dz], [x+dx, y, z+dz], [x+dx, y+dy, z+dz], [x, y+dy, z+dz]  # Base superior
+        ])
+        
+        # Definir las caras de la caja
+        faces = [
+            [vertices[0], vertices[1], vertices[2], vertices[3]],  # Base inferior
+            [vertices[4], vertices[5], vertices[6], vertices[7]],  # Base superior
+            [vertices[0], vertices[1], vertices[5], vertices[4]],  # Cara frontal
+            [vertices[2], vertices[3], vertices[7], vertices[6]],  # Cara trasera
+            [vertices[1], vertices[2], vertices[6], vertices[5]],  # Cara derecha
+            [vertices[4], vertices[7], vertices[3], vertices[0]]   # Cara izquierda
+        ]
+        
+        # Crear y agregar las caras
+        poly3d = [[tuple(vertex) for vertex in face] for face in faces]
+        ax.add_collection3d(Poly3DCollection(poly3d, alpha=alpha, facecolor=color, edgecolor='black', linewidth=0.5))
+    
+    def _set_axes_equal_3d(self, ax):
+        """Hace que los ejes 3D tengan la misma escala."""
+        # Obtener los límites actuales
+        x_limits = ax.get_xlim3d()
+        y_limits = ax.get_ylim3d()
+        z_limits = ax.get_zlim3d()
+        
+        # Calcular rangos
+        x_range = abs(x_limits[1] - x_limits[0])
+        x_middle = np.mean(x_limits)
+        y_range = abs(y_limits[1] - y_limits[0])
+        y_middle = np.mean(y_limits)
+        z_range = abs(z_limits[1] - z_limits[0])
+        z_middle = np.mean(z_limits)
+        
+        # El radio del plot es la mitad del rango máximo
+        plot_radius = 0.5 * max([x_range, y_range, z_range])
+        
+        # Establecer límites iguales
+        ax.set_xlim3d([x_middle - plot_radius, x_middle + plot_radius])
+        ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
+        ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
+    
+    def _save_3d_image(self, fig):
+        """Guarda la imagen 3D como archivo."""
+        try:
+            filename = filedialog.asksaveasfilename(
+                title="Guardar visualització 3D",
+                defaultextension=".png",
+                filetypes=[("PNG files", "*.png"), ("PDF files", "*.pdf"), ("SVG files", "*.svg"), ("All files", "*.*")]
+            )
+            
+            if filename:
+                fig.savefig(filename, dpi=300, bbox_inches='tight')
+                messagebox.showinfo("Èxit", f"Imatge guardada a:\n{filename}")
+                self.update_status("Imatge 3D guardada")
+        except Exception as e:            messagebox.showerror("Error", f"Error guardant la imatge: {e}")
+
+    # === FUNCIONES AUXILIARES ===
+    
+    def _validate_entry_file(self, file_path):
+        """Valida si un fitxer d'entrada existeix."""
+        if not file_path:
+            return False
+            
+        # For regular file paths, check if they exist
+        return os.path.exists(file_path)
+
+    def _get_entry_dimensions(self, file_path):
+        """Obté les dimensions d'un fitxer STP."""
+        if not self._validate_entry_file(file_path):
+            return None
+        try:
+            result = get_stp_dimensions(file_path)
+            
+            # DEBUG: Veure què retorna get_stp_dimensions
+            print(f"🔍 DEBUG APP - get_stp_dimensions retorna:")
+            if result:
+                print(f"   📋 shape_type: {result.get('shape_type', 'N/A')}")
+                print(f"   🔧 advanced_geometry: {result.get('advanced_geometry', False)}")
+                print(f"   📊 total_faces: {result.get('total_faces', 'N/A')}")
+                print(f"   🗂️ Claus: {list(result.keys()) if result else 'None'}")
+                if result.get('advanced_geometry'):
+                    print(f"   ✅ GEOMETRIA COMPLEXA DETECTADA EN APP!")
+                else:
+                    print(f"   ❌ No geometria complexa detectada en app")
+            else:
+                print(f"   ❌ result és None")
+            
+            return result
+        except Exception as e:
+            print(f"❌ Error en _get_entry_dimensions: {e}")
+            return None
 
 # ...existing code...
 def main():
@@ -1508,7 +1509,6 @@ def main():
         from src.packassist import get_stp_dimensions, validate_stp_file, optimize_packing, calculate_theoretical_max
     except ImportError as e:
         print(f"❌ Error important mòduls: {e}")
-
         print("Assegura't que els mòduls de packassist estiguin disponibles")
         return
     

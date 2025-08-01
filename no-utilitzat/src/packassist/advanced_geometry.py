@@ -10,28 +10,6 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import List, Dict, Tuple, Optional
 
-# Import del nou sistema de simplificació
-try:
-    from .adaptive_mesh_simplifier import (
-        AdaptiveMeshSimplifier, 
-        MeshVisualizationWindow,
-        create_mesh_simplification_interface,
-        SimplifiedMesh
-    )
-    MESH_SIMPLIFICATION_AVAILABLE = True
-    print("✅ Sistema de simplificació de malla disponible")
-except ImportError as e:
-    MESH_SIMPLIFICATION_AVAILABLE = False
-    print(f"⚠️ Sistema de simplificació no disponible: {e}")
-
-# Flag per controlar debug output
-DEBUG_MODE = False
-
-def debug_print(message):
-    """Print només si DEBUG_MODE està activat."""
-    if DEBUG_MODE:
-        print(message)
-
 class Face3D:
     """Representa una cara 3D amb normal i vèrtexs"""
     def __init__(self, vertices: List[Tuple[float, float, float]], normal: Tuple[float, float, float] = None):
@@ -92,11 +70,6 @@ class ComplexGeometry:
         self.bounding_box: Dict[str, float] = {}
         self.complexity_score: float = 0.0
         
-        # Nou: Sistema de simplificació adaptatiu
-        self.mesh_simplifier: Optional['AdaptiveMeshSimplifier'] = None
-        self.current_simplified_mesh: Optional['SimplifiedMesh'] = None
-        self.simplification_levels: Dict[int, 'SimplifiedMesh'] = {}
-        
     def add_face(self, vertices: List[Tuple[float, float, float]]):
         """Afegeix una cara a la geometria"""
         face = Face3D(vertices)
@@ -116,7 +89,7 @@ class ComplexGeometry:
                 if face1.is_parallel_to(face2, tolerance):
                     self.parallel_face_pairs.append((i, j))
                     
-        debug_print(f"Detectades {len(self.parallel_face_pairs)} parelles de cares paral·leles")
+        print(f"🔍 Detectades {len(self.parallel_face_pairs)} parelles de cares paral·leles")
     
     def calculate_real_volume(self):
         """Calcula el volum real per triangulació de cares"""
@@ -212,124 +185,9 @@ class ComplexGeometry:
         self.interlocking_features = interlocking_features
         return interlocking_features
     
-    def initialize_mesh_simplification(self):
-        """Inicialitza el sistema de simplificació de malla adaptatiu"""
-        if not MESH_SIMPLIFICATION_AVAILABLE:
-            debug_print("Sistema de simplificació no disponible")
-            return False
-        
-        if len(self.vertices) < 20:
-            debug_print("Geometria massa simple per simplificar")
-            return False
-        
-        try:
-            # Convertir cares a format de llista d'índexs
-            face_indices = []
-            for i, face in enumerate(self.faces):
-                # Trobar índexs dels vèrtexs de cada cara
-                vertex_indices = []
-                for vertex in face.vertices:
-                    try:
-                        idx = self.vertices.index(vertex)
-                        vertex_indices.append(idx)
-                    except ValueError:
-                        # Vèrtex no trobat, saltar aquesta cara
-                        break
-                
-                if len(vertex_indices) >= 3:  # Mínim per una cara vàlida
-                    face_indices.append(vertex_indices)
-            
-            if len(face_indices) < 4:  # Mínim per una forma 3D
-                debug_print("No hi ha prou cares vàlides per simplificar")
-                return False
-            
-            # Crear simplificador
-            self.mesh_simplifier = AdaptiveMeshSimplifier(self.vertices, face_indices)
-            
-            print(f"🔧 Sistema de simplificació inicialitzat:")
-            print(f"   📊 Vèrtexs: {len(self.vertices):,}")
-            print(f"   🔷 Cares: {len(face_indices):,}")
-            print(f"   💾 Volum: {self.real_volume:.2f} mm³")
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error inicialitzant simplificació: {e}")
-            return False
-    
-    def open_mesh_editor(self):
-        """Obre l'editor visual de simplificació de malla"""
-        if not self.mesh_simplifier:
-            if not self.initialize_mesh_simplification():
-                from tkinter import messagebox
-                messagebox.showerror("Error", 
-                                   "No es pot inicialitzar el sistema de simplificació\\n"
-                                   "La geometria pot ser massa simple o hi ha un error.")
-                return None
-        
-        try:
-            # Crear interfície de visualització
-            visualizer = MeshVisualizationWindow(self.mesh_simplifier)
-            window = visualizer.create_window()
-            
-            print("🎮 Editor de malla obert")
-            return visualizer
-            
-        except Exception as e:
-            print(f"❌ Error obrint editor de malla: {e}")
-            from tkinter import messagebox
-            messagebox.showerror("Error", f"Error obrint editor de malla:\\n{str(e)}")
-            return None
-    
-    def simplify_to_vertex_count(self, target_vertices: int, 
-                               preserve_features: bool = True) -> bool:
-        """
-        Simplifica la geometria a un nombre específic de vèrtexs
-        """
-        if not self.mesh_simplifier:
-            if not self.initialize_mesh_simplification():
-                return False
-        
-        try:
-            # Obtenir malla simplificada
-            simplified = self.mesh_simplifier.simplify_to_vertex_count(
-                target_vertices, preserve_features
-            )
-            
-            self.current_simplified_mesh = simplified
-            self.simplification_levels[target_vertices] = simplified
-            
-            print(f"✅ Geometria simplificada a {len(simplified.vertices)} vèrtexs")
-            print(f"   📊 Qualitat volum: {simplified.volume_preservation:.1%}")
-            print(f"   📐 Qualitat superfície: {simplified.surface_area_preservation:.1%}")
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Error simplificant geometria: {e}")
-            return False
-    
-    def get_simplified_mesh_info(self) -> Optional[Dict]:
-        """Retorna informació de la malla simplificada actual"""
-        if not self.current_simplified_mesh:
-            return None
-        
-        mesh = self.current_simplified_mesh
-        return {
-            'vertices': len(mesh.vertices),
-            'faces': len(mesh.faces),
-            'original_vertices': mesh.original_vertex_count,
-            'original_faces': mesh.original_face_count,
-            'simplification_ratio': mesh.simplification_ratio,
-            'volume_preservation': mesh.volume_preservation,
-            'surface_area_preservation': mesh.surface_area_preservation,
-            'vertex_reduction': (1 - mesh.simplification_ratio) * 100,
-            'recommended_for_packing': mesh.simplification_ratio > 0.1 and mesh.volume_preservation > 0.7
-        }
-    
     def get_analysis_summary(self) -> Dict:
         """Retorna un resum complet de l'anàlisi geomètric"""
-        summary = {
+        return {
             'total_faces': len(self.faces),
             'total_vertices': len(self.vertices),
             'parallel_face_pairs': len(self.parallel_face_pairs),
@@ -344,16 +202,8 @@ class ComplexGeometry:
                                  self.bounding_box.get('height', 1))) if self.bounding_box else 0,
             'complexity_score': self.complexity_score,
             'interlocking_features': len(self.interlocking_features),
-            'surface_area': sum(face.area for face in self.faces),
-            
-            # Nou: Informació de simplificació
-            'supports_mesh_simplification': MESH_SIMPLIFICATION_AVAILABLE and len(self.vertices) >= 20,
-            'mesh_simplifier_initialized': self.mesh_simplifier is not None,
-            'current_simplified_mesh': self.get_simplified_mesh_info(),
-            'available_simplification_levels': list(self.simplification_levels.keys()) if self.simplification_levels else []
+            'surface_area': sum(face.area for face in self.faces)
         }
-        
-        return summary
 
 
 def parse_stp_advanced_geometry(stp_content: str, filename: str) -> Optional[ComplexGeometry]:
@@ -368,17 +218,22 @@ def parse_stp_advanced_geometry(stp_content: str, filename: str) -> Optional[Com
         points = re.findall(points_pattern, stp_content)
         
         if not points:
+            print("⚠️  No s'han trobat punts CARTESIAN_POINT")
             return None
         
         # Convertir a coordenades flotants
         vertices = [(float(p[0]), float(p[1]), float(p[2])) for p in points]
         unique_vertices = list(set(vertices))  # Eliminar duplicats
         
-        # Detectar cares des de ADVANCED_FACE o FACE_BOUND
+        print(f"📊 Punts únics trobats: {len(unique_vertices)}")
+        
+        # 2. Detectar cares des de ADVANCED_FACE o FACE_BOUND
         faces_pattern = r'ADVANCED_FACE\s*\([^)]+\)'
         face_matches = re.findall(faces_pattern, stp_content)
         
-        # Si tenim molts punts, crear cares aproximades
+        print(f"📊 Cares avançades trobades: {len(face_matches)}")
+        
+        # 3. Si tenim molts punts, crear cares aproximades
         if len(unique_vertices) >= 8:  # Mínim per un objecte 3D
             # Algoritme simple: crear cares basades en proximitat de punts
             geometry.vertices = unique_vertices
@@ -397,12 +252,12 @@ def parse_stp_advanced_geometry(stp_content: str, filename: str) -> Optional[Com
         geometry.detect_interlocking_features()
         geometry.calculate_complexity_score()
         
-        debug_print(f"Geometria analitzada: {len(geometry.faces)} cares, {len(geometry.vertices)} vèrtexs")
+        print(f"✅ Geometria analitzada: {len(geometry.faces)} cares, {len(geometry.vertices)} vèrtexs")
         
         return geometry
         
     except Exception as e:
-        print(f"Error en anàlisi avançada de geometria: {e}")
+        print(f"❌ Error en anàlisi avançada de geometria: {e}")
         return None
 
 
@@ -458,7 +313,7 @@ class GeometrySimplifier:
         if self.face_importance is not None:
             return self.face_importance
             
-        print("Calculant importància de cares...")
+        print("🔄 Calculant importància de cares...")
         importance_scores = []
         
         for i, face in enumerate(self.original_geometry.faces):
@@ -487,7 +342,7 @@ class GeometrySimplifier:
             importance_scores.append(score)
         
         self.face_importance = importance_scores
-        print(f"Importància calculada per {len(importance_scores)} cares")
+        print(f"✅ Importància calculada per {len(importance_scores)} cares")
         return self.face_importance
     
     def simplify_to_percentage_on_demand(self, percentage: int) -> ComplexGeometry:
@@ -505,7 +360,7 @@ class GeometrySimplifier:
         original_faces = len(self.original_geometry.faces)
         target_faces = max(4, int(original_faces * (percentage / 100)))
         
-        print(f"Simplificant a {percentage}% ({target_faces} cares)...")
+        print(f"🔄 Simplificant a {percentage}% ({target_faces} cares)...")
         
         # Calcular importància només si no s'ha fet
         face_importance = self.calculate_face_importance_once()
@@ -535,7 +390,7 @@ class GeometrySimplifier:
         # Guardar al cache
         self.simplified_cache[percentage] = simplified
         
-        print(f"Simplificat a {len(simplified.faces)} cares")
+        print(f"✅ Simplificat a {len(simplified.faces)} cares")
         return simplified
     
     def get_real_time_stats(self, percentage: int) -> Dict:
@@ -558,38 +413,270 @@ class GeometrySimplifier:
     def _estimate_processing_speed(self, face_count: int) -> str:
         """Estima la velocitat de processament segons el nombre de cares"""
         if face_count > 1000:
-            return "Molt lent"
+            return "🐌 Molt lent"
         elif face_count > 500:
-            return "Lent"
+            return "🚶 Lent"
         elif face_count > 100:
-            return "Moderat"
+            return "🚴 Moderat"
         elif face_count > 50:
-            return "Ràpid"
+            return "🏃 Ràpid"
         else:
-            return "Molt ràpid"
+            return "⚡ Molt ràpid"
+
+
+class SmartBoundingBoxGenerator:
+    """
+    Generador de caixetes envoltants intel·ligents
+    """
+    
+    def __init__(self, complex_geometry: ComplexGeometry):
+        self.original_geometry = complex_geometry
+        self.original_bounds = self._calculate_bounds(complex_geometry)
+        
+    def _calculate_bounds(self, geometry: ComplexGeometry) -> dict:
+        """Calcula els límits de la geometria"""
+        if len(geometry.vertices) == 0:
+            return {'min': np.array([0, 0, 0]), 'max': np.array([0, 0, 0])}
+            
+        vertices_array = np.array(geometry.vertices)
+        return {
+            'min': np.min(vertices_array, axis=0),
+            'max': np.max(vertices_array, axis=0)
+        }
+    
+    def generate_smart_bounding_box(self, target_faces: int, box_type: str = "rectangular") -> ComplexGeometry:
+        """
+        Genera una caixa envoltant intel·ligent amb el nombre de cares especificat
+        
+        Args:
+            target_faces: Nombre de cares desitjades
+            box_type: Tipus de caixa ("rectangular", "cylindrical", "octagonal")
+            
+        Returns:
+            ComplexGeometry: Caixa envoltant amb el nombre de cares especificat
+        """
+        bounds = self.original_bounds
+        dimensions = bounds['max'] - bounds['min']
+        
+        # Afegeix marge del 2% per assegurar que l'objecte hi cap
+        margin = dimensions * 0.02
+        min_point = bounds['min'] - margin
+        max_point = bounds['max'] + margin
+        
+        if box_type == "rectangular":
+            return self._create_rectangular_box(min_point, max_point, target_faces)
+        elif box_type == "cylindrical":
+            return self._create_cylindrical_box(min_point, max_point, target_faces)
+        elif box_type == "octagonal":
+            return self._create_octagonal_box(min_point, max_point, target_faces)
+        else:
+            return self._create_adaptive_box(min_point, max_point, target_faces)
+    
+    def _create_rectangular_box(self, min_point: np.ndarray, max_point: np.ndarray, target_faces: int) -> ComplexGeometry:
+        """Crea una caixa rectangular amb subdivisions per arribar al nombre de cares"""
+        if target_faces < 6:
+            target_faces = 6  # Mínim per un cub
+            
+        # Crear geometria buida
+        geometry = ComplexGeometry()
+        
+        # Cub bàsic (6 cares)
+        vertices = [
+            (min_point[0], min_point[1], min_point[2]),  # 0
+            (max_point[0], min_point[1], min_point[2]),  # 1
+            (max_point[0], max_point[1], min_point[2]),  # 2
+            (min_point[0], max_point[1], min_point[2]),  # 3
+            (min_point[0], min_point[1], max_point[2]),  # 4
+            (max_point[0], min_point[1], max_point[2]),  # 5
+            (max_point[0], max_point[1], max_point[2]),  # 6
+            (min_point[0], max_point[1], max_point[2])   # 7
+        ]
+        
+        faces_indices = [
+            [0, 1, 2, 3],  # Base inferior
+            [4, 7, 6, 5],  # Base superior
+            [0, 4, 5, 1],  # Lateral 1
+            [1, 5, 6, 2],  # Lateral 2
+            [2, 6, 7, 3],  # Lateral 3
+            [3, 7, 4, 0]   # Lateral 4
+        ]
+        
+        # Afegir les cares a la geometria
+        for face_indices in faces_indices:
+            face_vertices = [vertices[i] for i in face_indices]
+            geometry.add_face(face_vertices)
+        
+        # Si necessitem més cares, subdividim
+        if target_faces > 6:
+            geometry = self._subdivide_geometry(geometry, target_faces)
+        
+        return geometry
+    
+    def _create_cylindrical_box(self, min_point: np.ndarray, max_point: np.ndarray, target_faces: int) -> ComplexGeometry:
+        """Crea una caixa cilíndrica"""
+        import math
+        
+        # Crear geometria buida
+        geometry = ComplexGeometry()
+        
+        # Calcula el radi necessari
+        dimensions = max_point - min_point
+        radius = max(dimensions[0], dimensions[1]) / 2 * 1.1  # 10% marge extra
+        center_x = (min_point[0] + max_point[0]) / 2
+        center_y = (min_point[1] + max_point[1]) / 2
+        
+        # Determina el nombre de costats del cilindre
+        sides = max(8, min(target_faces // 3, 32))  # Entre 8 i 32 costats
+        
+        # Generar vèrtexs del cilindre
+        bottom_vertices = []
+        top_vertices = []
+        
+        for i in range(sides):
+            angle = 2 * math.pi * i / sides
+            x = center_x + radius * math.cos(angle)
+            y = center_y + radius * math.sin(angle)
+            bottom_vertices.append((x, y, min_point[2]))
+            top_vertices.append((x, y, max_point[2]))
+        
+        # Crear base inferior
+        geometry.add_face(bottom_vertices)
+        
+        # Crear base superior (en ordre invers)
+        geometry.add_face(top_vertices[::-1])
+        
+        # Crear cares laterals
+        for i in range(sides):
+            next_i = (i + 1) % sides
+            face_vertices = [
+                bottom_vertices[i],
+                bottom_vertices[next_i], 
+                top_vertices[next_i],
+                top_vertices[i]
+            ]
+            geometry.add_face(face_vertices)
+        
+        return geometry
+    
+    def _create_octagonal_box(self, min_point: np.ndarray, max_point: np.ndarray, target_faces: int) -> ComplexGeometry:
+        """Crea una caixa octogonal"""
+        # Similar al cilíndric però amb 8 costats fixos
+        return self._create_cylindrical_box(min_point, max_point, target_faces)
+    
+    def _create_adaptive_box(self, min_point: np.ndarray, max_point: np.ndarray, target_faces: int) -> ComplexGeometry:
+        """Crea una caixa adaptativa segons les proporcions de l'objecte"""
+        dimensions = max_point - min_point
+        
+        # Si l'objecte és molt allargat, usa cilindre
+        aspect_ratios = dimensions / np.min(dimensions)
+        if np.max(aspect_ratios) > 3:
+            return self._create_cylindrical_box(min_point, max_point, target_faces)
+        else:
+            return self._create_rectangular_box(min_point, max_point, target_faces)
+    
+    def _subdivide_geometry(self, geometry: ComplexGeometry, target_faces: int) -> ComplexGeometry:
+        """Subdivideix les cares d'una geometria per arribar al nombre objectiu"""
+        if len(geometry.faces) >= target_faces:
+            return geometry
+        
+        # Crear nova geometria
+        new_geometry = ComplexGeometry()
+        
+        faces_added = 0
+        for face in geometry.faces:
+            if faces_added >= target_faces:
+                break
+                
+            # Subdividir cada cara en 4 subcares si és possible
+            if len(face.vertices) == 4 and faces_added + 4 <= target_faces:
+                subcares = self._subdivide_face(face)
+                for subface_vertices in subcares:
+                    new_geometry.add_face(subface_vertices)
+                    faces_added += 1
+            else:
+                # Afegir cara original
+                new_geometry.add_face(face.vertices)
+                faces_added += 1
+        
+        return new_geometry
+    
+    def _subdivide_face(self, face: 'Face3D') -> List[List[Tuple[float, float, float]]]:
+        """Subdivideix una cara en 4 subcares"""
+        if len(face.vertices) != 4:
+            return [face.vertices]  # No es pot subdividir
+        
+        v0, v1, v2, v3 = face.vertices
+        
+        # Calcular punts mitjos
+        def midpoint(p1, p2):
+            return ((p1[0] + p2[0])/2, (p1[1] + p2[1])/2, (p1[2] + p2[2])/2)
+        
+        # Punts mitjos de les arestes
+        m01 = midpoint(v0, v1)
+        m12 = midpoint(v1, v2) 
+        m23 = midpoint(v2, v3)
+        m30 = midpoint(v3, v0)
+        
+        # Punt central
+        center = midpoint(midpoint(v0, v2), midpoint(v1, v3))
+        
+        # Crear 4 subcares
+        return [
+            [v0, m01, center, m30],
+            [m01, v1, m12, center],
+            [center, m12, v2, m23],
+            [m30, center, m23, v3]
+        ]
+    
+    def calculate_efficiency(self, bounding_box: ComplexGeometry) -> dict:
+        """Calcula l'eficiència espacial de la caixa envoltant"""
+        original_volume = self._calculate_volume(self.original_geometry)
+        box_volume = self._calculate_volume(bounding_box)
+        
+        if box_volume == 0:
+            efficiency = 0
+        else:
+            efficiency = original_volume / box_volume
+        
+        return {
+            'efficiency': efficiency,
+            'space_utilization': efficiency * 100,
+            'original_volume': original_volume,
+            'box_volume': box_volume,
+            'wasted_space': (1 - efficiency) * 100
+        }
+    
+    def _calculate_volume(self, geometry: ComplexGeometry) -> float:
+        """Calcula el volum aproximat d'una geometria"""
+        bounds = self._calculate_bounds(geometry)
+        dimensions = bounds['max'] - bounds['min']
+        return float(np.prod(dimensions))
 
 
 class RealTimeGeometryViewer:
     """
-    Visualitzador en temps real optimitzat
+    Visualitzador en temps real optimitzat amb funcionalitat de bounding box
     """
     
     def __init__(self, geometry_simplifier: GeometrySimplifier):
         self.simplifier = geometry_simplifier
+        self.bbox_generator = SmartBoundingBoxGenerator(geometry_simplifier.original_geometry)
         self.current_geometry = None
+        self.current_bbox = None
         self.viewer_window = None
         self.is_calculating = False
+        self.use_bounding_box = False
         
     def create_interactive_viewer(self):
         """
-        Crea la finestra interactiva optimitzada
+        Crea la finestra interactiva optimitzada amb opcions de bounding box
         """
         import tkinter as tk
         from tkinter import ttk
         
         self.viewer_window = tk.Toplevel()
-        self.viewer_window.title("Editor de Complexitat Geomètrica")
-        self.viewer_window.geometry("1000x700")
+        self.viewer_window.title("🎛️ Editor de Complexitat Geomètrica")
+        self.viewer_window.geometry("1200x800")
         self.viewer_window.configure(bg="#f5f5f5")
         
         # Estil modern
@@ -604,21 +691,65 @@ class RealTimeGeometryViewer:
         # Títol
         title_label = ttk.Label(
             main_frame, 
-            text=f"Simplificació: {len(self.simplifier.original_geometry.faces)} cares originals",
+            text=f"🎯 Simplificació: {len(self.simplifier.original_geometry.faces)} cares originals",
             style='Title.TLabel'
         )
         title_label.pack(pady=(0, 15))
         
+        # Mode de simplificació
+        mode_frame = ttk.LabelFrame(main_frame, text="🔧 Mode de Simplificació", padding="15")
+        mode_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        self.mode_var = tk.StringVar(value="faces")
+        
+        # Opcions de mode
+        modes_frame = ttk.Frame(mode_frame)
+        modes_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Radiobutton(
+            modes_frame, 
+            text="🔺 Reducció de cares (tradicional)", 
+            variable=self.mode_var, 
+            value="faces",
+            command=self._on_mode_change
+        ).pack(side=tk.LEFT, padx=(0, 20))
+        
+        ttk.Radiobutton(
+            modes_frame, 
+            text="📦 Caixa envoltant intel·ligent", 
+            variable=self.mode_var, 
+            value="bbox",
+            command=self._on_mode_change
+        ).pack(side=tk.LEFT)
+        
+        # Opcions per bounding box
+        self.bbox_options_frame = ttk.Frame(mode_frame)
+        self.bbox_options_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Label(self.bbox_options_frame, text="Tipus de caixa:").pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.bbox_type_var = tk.StringVar(value="rectangular")
+        bbox_combo = ttk.Combobox(
+            self.bbox_options_frame, 
+            textvariable=self.bbox_type_var,
+            values=["rectangular", "cylindrical", "octagonal", "adaptive"],
+            state="readonly",
+            width=15
+        )
+        bbox_combo.pack(side=tk.LEFT, padx=(0, 20))
+        
         # Control de simplificació
-        control_frame = ttk.LabelFrame(main_frame, text="Control de Detall", padding="15")
+        control_frame = ttk.LabelFrame(main_frame, text="🎚️ Control de Detall", padding="15")
         control_frame.pack(fill=tk.X, pady=(0, 15))
         
         # Barra lliscant amb millor resolució
         scale_frame = ttk.Frame(control_frame)
         scale_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Label(scale_frame, text="Mínim detall").pack(side=tk.LEFT)
-        ttk.Label(scale_frame, text="Màxim detall").pack(side=tk.RIGHT)
+        self.scale_min_label = ttk.Label(scale_frame, text="Mínim detall")
+        self.scale_min_label.pack(side=tk.LEFT)
+        self.scale_max_label = ttk.Label(scale_frame, text="Màxim detall")
+        self.scale_max_label.pack(side=tk.RIGHT)
         
         self.detail_var = tk.IntVar(value=100)
         self.detail_scale = ttk.Scale(
@@ -631,6 +762,22 @@ class RealTimeGeometryViewer:
         )
         self.detail_scale.pack(fill=tk.X, pady=10)
         
+        # Input manual
+        manual_frame = ttk.Frame(control_frame)
+        manual_frame.pack(fill=tk.X, pady=5)
+        
+        ttk.Label(manual_frame, text="Valor manual:").pack(side=tk.LEFT, padx=(0, 10))
+        self.manual_var = tk.StringVar()
+        self.manual_entry = ttk.Entry(manual_frame, textvariable=self.manual_var, width=10)
+        self.manual_entry.pack(side=tk.LEFT, padx=(0, 10))
+        self.manual_entry.bind('<Return>', self._on_manual_input)
+        
+        ttk.Button(
+            manual_frame, 
+            text="Aplicar", 
+            command=self._on_manual_input
+        ).pack(side=tk.LEFT)
+        
         # Informació en temps real
         info_frame = ttk.Frame(control_frame)
         info_frame.pack(fill=tk.X, pady=10)
@@ -641,7 +788,10 @@ class RealTimeGeometryViewer:
         self.speed_label = ttk.Label(info_frame, text="", style='Info.TLabel')
         self.speed_label.pack(side=tk.LEFT, padx=(0, 20))
         
-        self.status_label = ttk.Label(info_frame, text="Llest", style='Info.TLabel')
+        self.efficiency_label = ttk.Label(info_frame, text="", style='Info.TLabel')
+        self.efficiency_label.pack(side=tk.LEFT, padx=(0, 20))
+        
+        self.status_label = ttk.Label(info_frame, text="📊 Llest", style='Info.TLabel')
         self.status_label.pack(side=tk.RIGHT)
         
         # Botons d'acció
@@ -650,24 +800,30 @@ class RealTimeGeometryViewer:
         
         ttk.Button(
             button_frame, 
-            text="Aplicar Simplificació", 
+            text="� Previsualitzar", 
+            command=self._preview_changes
+        ).pack(side=tk.LEFT, padx=(0, 10))
+        
+        ttk.Button(
+            button_frame, 
+            text="✅ Aplicar Simplificació", 
             command=self._apply_simplification
         ).pack(side=tk.LEFT, padx=(0, 10))
         
         ttk.Button(
             button_frame, 
-            text="Restaurar Original", 
+            text="↩️ Restaurar Original", 
             command=self._restore_original
         ).pack(side=tk.LEFT, padx=(0, 10))
         
         ttk.Button(
             button_frame, 
-            text="Tancar", 
+            text="❌ Tancar", 
             command=self.viewer_window.destroy
         ).pack(side=tk.RIGHT)
         
         # Àrea d'informació
-        info_text_frame = ttk.LabelFrame(main_frame, text="Informació", padding="10")
+        info_text_frame = ttk.LabelFrame(main_frame, text="📊 Informació", padding="10")
         info_text_frame.pack(fill=tk.BOTH, expand=True)
         
         self.info_text = tk.Text(
@@ -688,29 +844,170 @@ class RealTimeGeometryViewer:
         
         return self.viewer_window
     
+    def _on_mode_change(self):
+        """
+        Callback quan canvia el mode de simplificació
+        """
+        mode = self.mode_var.get()
+        self.use_bounding_box = (mode == "bbox")
+        
+        # Actualitzar les etiquetes de la barra lliscant
+        if self.use_bounding_box:
+            self.scale_min_label.config(text="Poques cares")
+            self.scale_max_label.config(text="Moltes cares")
+            # Canviar els límits per bounding box (mínim 6 cares per un cub)
+            self.detail_scale.config(from_=6, to=200)
+            self.detail_var.set(50)  # Valor per defecte reasonable
+        else:
+            self.scale_min_label.config(text="Mínim detall")
+            self.scale_max_label.config(text="Màxim detall")
+            # Restaurar límits originals
+            self.detail_scale.config(from_=10, to=100)
+            self.detail_var.set(100)
+        
+        # Actualitzar vista
+        self._on_scale_change(self.detail_var.get())
+    
+    def _on_manual_input(self, event=None):
+        """
+        Callback per input manual
+        """
+        try:
+            value = int(self.manual_var.get())
+            if self.use_bounding_box:
+                value = max(6, min(500, value))  # Límits per bounding box
+            else:
+                value = max(10, min(100, value))  # Límits per reducció
+            
+            self.detail_var.set(value)
+            self._on_scale_change(value)
+        except ValueError:
+            pass  # Ignorar valors no vàlids
+    
+    def _preview_changes(self):
+        """
+        Previsualitza els canvis sense aplicar-los
+        """
+        if self.use_bounding_box:
+            self._calculate_bounding_box(self.detail_var.get())
+        else:
+            self._calculate_geometry(self.detail_var.get())
+    
     def _on_scale_change(self, value):
         """Callback optimitzat quan canvia la barra"""
         if self.is_calculating:
             return  # Ignorar si ja està calculant
             
-        percentage = int(float(value))
+        percentage_or_faces = int(float(value))
         
-        # Actualitzar estadístiques ràpides
-        stats = self.simplifier.get_real_time_stats(percentage)
+        if self.use_bounding_box:
+            # Mode bounding box
+            stats = self._get_bbox_stats(percentage_or_faces)
+            self.faces_label.config(
+                text=f"📦 Cares caixa: {percentage_or_faces} (Original: {len(self.simplifier.original_geometry.faces)})"
+            )
+            
+            if 'efficiency' in stats:
+                self.efficiency_label.config(
+                    text=f"⚡ Eficiència: {stats['efficiency']['space_utilization']:.1f}%"
+                )
+        else:
+            # Mode reducció tradicional
+            stats = self.simplifier.get_real_time_stats(percentage_or_faces)
+            self.faces_label.config(
+                text=f"📊 Cares: {stats['current_faces']:,} / {stats['original_faces']:,} "
+                     f"({stats['reduction_ratio']:.1%})"
+            )
+            self.efficiency_label.config(text="")
         
-        # Actualitzar labels instantàniament
-        self.faces_label.config(
-            text=f"Cares: {stats['current_faces']:,} / {stats['original_faces']:,} "
-                 f"({stats['reduction_ratio']:.1%})"
-        )
+        self.speed_label.config(text=f"⚡ Velocitat: {stats.get('processing_speed_estimate', 'N/A')}")
         
-        self.speed_label.config(text=f"Velocitat: {stats['processing_speed_estimate']}")
-        
-        # Programar càlcul real amb retard per evitar càlculs innecessaris
+        # Programar càlcul real amb retard
         if hasattr(self, '_calculation_timer'):
             self.viewer_window.after_cancel(self._calculation_timer)
         
-        self._calculation_timer = self.viewer_window.after(300, lambda: self._calculate_geometry(percentage))
+        if self.use_bounding_box:
+            self._calculation_timer = self.viewer_window.after(300, lambda: self._calculate_bounding_box(percentage_or_faces))
+        else:
+            self._calculation_timer = self.viewer_window.after(300, lambda: self._calculate_geometry(percentage_or_faces))
+    
+    def _get_bbox_stats(self, target_faces: int) -> dict:
+        """Obté estadístiques ràpides per bounding box"""
+        return {
+            'processing_speed_estimate': '⚡ Molt ràpid',
+            'target_faces': target_faces
+        }
+    
+    def _calculate_bounding_box(self, target_faces: int):
+        """Calcula la caixa envoltant"""
+        if self.is_calculating:
+            return
+            
+        self.is_calculating = True
+        self.status_label.config(text="🔄 Generant caixa...")
+        self.viewer_window.update()
+        
+        try:
+            # Generar caixa envoltant
+            box_type = self.bbox_type_var.get()
+            self.current_bbox = self.bbox_generator.generate_smart_bounding_box(target_faces, box_type)
+            
+            # Calcular eficiència
+            efficiency_stats = self.bbox_generator.calculate_efficiency(self.current_bbox)
+            
+            # Actualitzar informació
+            self._update_bbox_info_display(target_faces, efficiency_stats)
+            
+            self.status_label.config(text="✅ Caixa generada")
+            
+        except Exception as e:
+            self.status_label.config(text=f"❌ Error: {str(e)}")
+        finally:
+            self.is_calculating = False
+    
+    def _update_bbox_info_display(self, target_faces: int, efficiency_stats: dict):
+        """Actualitza la informació de la caixa envoltant"""
+        info_text = f"""
+📦 CAIXA ENVOLTANT INTEL·LIGENT
+{'='*50}
+
+🎯 Configuració:
+  • Tipus: {self.bbox_type_var.get().title()}
+  • Cares objectiu: {target_faces}
+  • Cares generades: {len(self.current_bbox.faces)}
+
+📊 Geometria Original:
+  • Vèrtexs: {len(self.simplifier.original_geometry.vertices):,}
+  • Cares: {len(self.simplifier.original_geometry.faces):,}
+  • Volum aproximat: {efficiency_stats['original_volume']:.2f} unitats³
+
+📦 Caixa Generada:
+  • Vèrtexs: {len(self.current_bbox.vertices):,}
+  • Cares: {len(self.current_bbox.faces):,}
+  • Volum: {efficiency_stats['box_volume']:.2f} unitats³
+
+⚡ Eficiència Espacial:
+  • Utilització: {efficiency_stats['space_utilization']:.1f}%
+  • Espai malgastat: {efficiency_stats['wasted_space']:.1f}%
+  • Relació volum: {efficiency_stats['efficiency']:.3f}
+
+🚀 Avantatges:
+  • Collision detection ultra-ràpid
+  • Memòria mínima requerida
+  • Ideal per packing amb formes complexes
+  • Mantén les dimensions originals
+
+⚠️  Nota: La caixa conté completament l'objecte original
+     amb un marge de seguretat del 2%.
+"""
+        
+        self.info_text.delete(1.0, 'end')
+        self.info_text.insert(1.0, info_text)
+        
+        # Actualitzar etiqueta d'eficiència
+        self.efficiency_label.config(
+            text=f"⚡ Eficiència: {efficiency_stats['space_utilization']:.1f}%"
+        )
     
     def _calculate_geometry(self, percentage):
         """Calcula la geometria amb indicador de progrés"""
@@ -718,7 +1015,7 @@ class RealTimeGeometryViewer:
             return
             
         self.is_calculating = True
-        self.status_label.config(text="Calculant...")
+        self.status_label.config(text="🔄 Calculant...")
         self.viewer_window.update()
         
         try:
@@ -729,10 +1026,10 @@ class RealTimeGeometryViewer:
             # Actualitzar informació detallada
             self._update_info_display(percentage)
             
-            self.status_label.config(text="Calculat")
+            self.status_label.config(text="✅ Calculat")
             
         except Exception as e:
-            self.status_label.config(text=f"Error: {str(e)}")
+            self.status_label.config(text=f"❌ Error: {str(e)}")
             print(f"Error calculant geometria: {e}")
         
         finally:
@@ -744,21 +1041,21 @@ class RealTimeGeometryViewer:
         
         original = self.simplifier.original_geometry
         
-        info = f"""GEOMETRIA ORIGINAL:
+        info = f"""🎯 GEOMETRIA ORIGINAL:
 ═══════════════════════════════════════════
-Cares totals: {len(original.faces):,}
-Vèrtexs: {len(original.vertices):,}
-Volum real: {original.real_volume:,.2f} mm³
-Cares paral·leles: {len(original.parallel_face_pairs)}
-Score complexitat: {original.complexity_score:.2f}
+� Cares totals: {len(original.faces):,}
+📐 Vèrtexs: {len(original.vertices):,}
+📦 Volum real: {original.real_volume:,.2f} mm³
+🔗 Cares paral·leles: {len(original.parallel_face_pairs)}
+🧮 Score complexitat: {original.complexity_score:.2f}
 
-CONFIGURACIÓ ACTUAL:
+🎛️ CONFIGURACIÓ ACTUAL:
 ═══════════════════════════════════════════
-Nivell de detall: {percentage}%
-Cares objetivo: {max(4, int(len(original.faces) * (percentage / 100))):,}
-Velocitat estimada: {self.simplifier._estimate_processing_speed(max(4, int(len(original.faces) * (percentage / 100))))}
+📊 Nivell de detall: {percentage}%
+📊 Cares objetivo: {max(4, int(len(original.faces) * (percentage / 100))):,}
+⚡ Velocitat estimada: {self.simplifier._estimate_processing_speed(max(4, int(len(original.faces) * (percentage / 100))))}
 
-CONSELLS:
+💡 CONSELLS:
 ═══════════════════════════════════════════
 • 90-100%: Qualitat màxima, processament lent
 • 50-90%: Bon balanç qualitat/velocitat  
@@ -769,28 +1066,49 @@ CONSELLS:
         if hasattr(self, 'current_geometry') and self.current_geometry:
             current = self.current_geometry
             info += f"""
-GEOMETRIA SIMPLIFICADA:
+🎯 GEOMETRIA SIMPLIFICADA:
 ═══════════════════════════════════════════
-Cares actuals: {len(current.faces):,}
-Volum: {current.real_volume:,.2f} mm³
-Reducció: {(1 - len(current.faces)/len(original.faces))*100:.1f}%
+📊 Cares actuals: {len(current.faces):,}
+📦 Volum: {current.real_volume:,.2f} mm³
+📈 Reducció: {(1 - len(current.faces)/len(original.faces))*100:.1f}%
 """
         
         self.info_text.insert(tk.END, info)
     
     def _apply_simplification(self):
         """Aplica la simplificació actual"""
-        if self.current_geometry:
-            # TODO: Integrar amb el sistema principal
-            print(f"Aplicant simplificació: {len(self.current_geometry.faces)} cares")
+        if self.use_bounding_box and self.current_bbox:
+            # Aplicar caixa envoltant
+            self.simplifier.original_geometry = self.current_bbox
+            print(f"✅ Aplicant caixa envoltant: {len(self.current_bbox.faces)} cares")
+            
+            import tkinter.messagebox as messagebox
+            efficiency_stats = self.bbox_generator.calculate_efficiency(self.current_bbox)
+            messagebox.showinfo(
+                "Caixa Aplicada", 
+                f"Caixa envoltant aplicada:\n"
+                f"• Cares: {len(self.current_bbox.faces)}\n"
+                f"• Eficiència: {efficiency_stats['space_utilization']:.1f}%\n"
+                f"• Tipus: {self.bbox_type_var.get()}"
+            )
+            
+        elif self.current_geometry:
+            # Aplicar reducció tradicional
+            self.simplifier.original_geometry = self.current_geometry
+            print(f"✅ Aplicant simplificació: {len(self.current_geometry.faces)} cares")
+            
+            import tkinter.messagebox as messagebox
             messagebox.showinfo("Aplicat", f"Simplificació aplicada: {len(self.current_geometry.faces)} cares")
+        
+        # Tancar finestra després d'aplicar
+        self.viewer_window.destroy()
     
     def _restore_original(self):
         """Restaura la geometria original"""
         self.detail_var.set(100)
         self.current_geometry = self.simplifier.original_geometry
         self._update_info_display(100)
-        print("Restaurada geometria original")
+        print("↩️ Restaurada geometria original")
 
 
 def analyze_stp_real_geometry(file_path: str) -> Optional[Dict]:
@@ -813,13 +1131,13 @@ def analyze_stp_real_geometry(file_path: str) -> Optional[Dict]:
         # Crear simplificador si la geometria és complexa
         simplifier = None
         if len(geometry.faces) > 20:  # Només per geometries complexes
-            print(f"Creant sistema de simplificació per {len(geometry.faces)} cares")
+            print(f"🔧 Creant sistema de simplificació per {len(geometry.faces)} cares")
             try:
                 simplifier = GeometrySimplifier(geometry)
                 # NO cridem generate_simplification_levels() - sistema on-demand
-                print("Sistema de simplificació preparat (càlcul sota demanda)")
+                print("✅ Sistema de simplificació preparat (càlcul sota demanda)")
             except Exception as e:
-                print(f"Error creant simplificador: {e}")
+                print(f"⚠️  Error creant simplificador: {e}")
                 simplifier = None
         
         # Retornar anàlisi complet
@@ -838,139 +1156,5 @@ def analyze_stp_real_geometry(file_path: str) -> Optional[Dict]:
         return analysis
         
     except Exception as e:
-        print(f"Error analitzant geometria real: {e}")
+        print(f"❌ Error analitzant geometria real: {e}")
         return None
-
-
-def create_mesh_simplification_demo(vertices: List[Tuple[float, float, float]], 
-                                  faces_data: List[List[int]]) -> Optional['MeshVisualizationWindow']:
-    """
-    Funció de demostració per crear directament l'editor de malla
-    Útil per proves i integració ràpida
-    """
-    if not MESH_SIMPLIFICATION_AVAILABLE:
-        print("❌ Sistema de simplificació de malla no disponible")
-        return None
-    
-    try:
-        print("🔧 Creant demo de simplificació de malla...")
-        
-        # Crear simplificador directament
-        simplifier = AdaptiveMeshSimplifier(vertices, faces_data)
-        
-        # Crear visualitzador
-        visualizer = MeshVisualizationWindow(simplifier)
-        window = visualizer.create_window()
-        
-        print("✅ Demo de simplificació llest!")
-        return visualizer
-        
-    except Exception as e:
-        print(f"❌ Error creant demo: {e}")
-        return None
-
-
-def open_mesh_editor_for_stp(file_path: str) -> Optional['MeshVisualizationWindow']:
-    """
-    Obre l'editor de malla directament per un fitxer STP
-    """
-    try:
-        print(f"🔍 Analitzant {file_path} per simplificació...")
-        
-        # Analitzar geometria
-        analysis = analyze_stp_real_geometry(file_path)
-        if not analysis:
-            print("❌ No s'ha pogut analitzar la geometria")
-            return None
-        
-        geometry_obj = analysis.get('geometry_object')
-        if not geometry_obj:
-            print("❌ No s'ha trobat objecte de geometria")
-            return None
-        
-        # Obrir editor
-        return geometry_obj.open_mesh_editor()
-        
-    except Exception as e:
-        print(f"❌ Error obrint editor per STP: {e}")
-        return None
-
-
-# Funcions d'utilitat per integració amb el sistema principal
-def get_simplified_geometry_for_packing(complex_geometry: 'ComplexGeometry', 
-                                      max_vertices: int = 500) -> Optional[Dict]:
-    """
-    Retorna una geometria simplificada optimitzada per bin packing
-    """
-    if not complex_geometry.mesh_simplifier:
-        if not complex_geometry.initialize_mesh_simplification():
-            return None
-    
-    # Simplificar mantenint característiques
-    success = complex_geometry.simplify_to_vertex_count(max_vertices, preserve_features=True)
-    if not success:
-        return None
-    
-    mesh_info = complex_geometry.get_simplified_mesh_info()
-    if not mesh_info or not mesh_info['recommended_for_packing']:
-        print("⚠️ La malla simplificada pot no ser adequada per packing")
-    
-    # Retornar dades en format compatible amb el sistema de packing
-    simplified_mesh = complex_geometry.current_simplified_mesh
-    
-    return {
-        'vertices': simplified_mesh.vertices,
-        'faces': [[int(idx) for idx in face] for face in simplified_mesh.faces],
-        'bounding_box': complex_geometry.bounding_box,
-        'volume': simplified_mesh.volume_preservation * complex_geometry.real_volume,
-        'quality_metrics': {
-            'vertex_reduction': mesh_info['vertex_reduction'],
-            'volume_preservation': mesh_info['volume_preservation'],
-            'surface_preservation': mesh_info['surface_area_preservation'],
-            'recommended': mesh_info['recommended_for_packing']
-        },
-        'packing_hints': {
-            'complexity_level': 'simplified',
-            'collision_detection': 'mesh_based',
-            'rotation_support': True,
-            'interlocking_possible': len(complex_geometry.parallel_face_pairs) > 0
-        }
-    }
-
-
-def create_mesh_editor_button_for_gui(parent_widget, geometry_object: 'ComplexGeometry'):
-    """
-    Crea un botó per obrir l'editor de malla en una GUI existent
-    """
-    import tkinter as tk
-    from tkinter import ttk
-    
-    def open_editor():
-        try:
-            visualizer = geometry_object.open_mesh_editor()
-            if visualizer:
-                print("🎮 Editor de malla obert des de GUI")
-        except Exception as e:
-            print(f"❌ Error obrint editor: {e}")
-    
-    # Verificar si es pot usar
-    can_simplify = (
-        MESH_SIMPLIFICATION_AVAILABLE and 
-        len(geometry_object.vertices) >= 20
-    )
-    
-    if can_simplify:
-        button_text = f"Simplificar Malla ({len(geometry_object.vertices):,} vèrtexs)"
-        button_state = tk.NORMAL
-    else:
-        button_text = "Simplificació no disponible"
-        button_state = tk.DISABLED
-    
-    button = ttk.Button(
-        parent_widget,
-        text=button_text,
-        command=open_editor,
-        state=button_state
-    )
-    
-    return button
