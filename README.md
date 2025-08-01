@@ -1,205 +1,157 @@
-# PackAssist - 3D Bin Packing Optimizer
+# 🚀 PackAssist - Aplicació Simple d'Empaquetament Intel·ligent
 
-Una eina per optimitzar l'empaquetament 3D que calcula dinàmicament el nombre màxim d'objectes que poden encaixar en un contenidor personalitzat.
+**Aplicació unificada i simple per optimitzar l'empaquetament de peces 3D**
 
-## 🎯 Objectius del Projecte
+## ✨ Què fa PackAssist?
 
-- **Pont entre visió i implementació**: Permet l'entrada manual de dimensions o càrrega de models 3D (fitxers STP)
-- **Valor estratègic**: Facilita decisions basades en dades sobre disseny de contenidors i col·locació d'objectes
-- **Escalabilitat i flexibilitat**: Disseny modular que suporta futures millores com GUI, processament en lot, o algoritmes avançats
+PackAssist és una aplicació **simple i directa** que t'ajuda a calcular quantes peces caben dins una caixa de manera òptima.
 
-## 🚀 Funcionalitats
+### 🎯 Workflow Simple
+1. **📂 Importa** un fitxer STL de la teva peça
+2. **� Simplifica** la malla (opcional) amb visualitzador 3D integrat
+3. **📦 Configura** les dimensions de la caixa
+4. **⚡ Calcula** l'empaquetament òptim automàticament
+5. **🎮 Visualitza** el resultat en 3D
 
-### ✅ Implementades
-- **Entrada flexible**: Dimensions manual o fitxers STP
-- **Optimització 3D**: Utilitza algoritmes de bin packing per càlcul real
-- **Anàlisi comparativa**: Compara màxim teòric vs. real
-- **Gestió d'errors robusta**: Validació completa d'entrades
-- **Interfície interactiva**: Menú de consola amigable
-- **Informes detallats**: Eficiència d'espai, volums utilitzats, etc.
+## 🚀 Com Executar
 
-### 🔮 Futures millores
-- GUI amb PyQt o Tkinter
-- Visualització 3D dels resultats
-- Exportació de resultats (PDF, Excel)
-- Algoritmes ML per optimització topològica
-- API REST per integració
-- Processament en lot
-
-## 📋 Requisits del Sistema
-
-- Python 3.8+
-- Windows/Linux/macOS
-- Memòria: 4GB RAM mínim
-- Espai: 2GB per dependències
-
-## 🛠️ Instal·lació
-
-### 1. Clonar el repositori
+### Mètode 1: Executar Directament
 ```bash
-git clone <repository-url>
-cd SOME-PackagingAssistant
+python start.py
 ```
 
-### 2. Crear entorn virtual (recomanat)
+### Mètode 2: Executar l'Aplicació Principal
 ```bash
-python -m venv packassist
-# Windows
-packassist\Scripts\activate
-# Linux/macOS  
-source packassist/bin/activate
+python packassist.py
 ```
 
-### 3. Instal·lar dependències
-```bash
-pip install -r requirements.txt
-```
-
-### 4. Configurar dades de mostra (opcional)
-```bash
-python setup_samples.py
-```
-
-## 🎮 Ús de l'Aplicació
-
-### Execució principal
-```bash
-python app.py
-```
-
-### Opcions disponibles
-
-#### 1. **Mode fitxers STP**
-- Utilitza el fitxer `data/index.csv` per definir caixes i objectes
-- Carrega models 3D automàticament
-- Processa múltiples combinacions
-
-#### 2. **Mode entrada manual**
-- Introdueix dimensions directament
-- Ideal per prototips ràpids
-- No requereix fitxers STP
-
-#### 3. **Sortir**
-- Tanca l'aplicació
-
-## 📁 Estructura del Projecte
+## 📁 Estructura Ultra Neta
 
 ```
 SOME-PackagingAssistant/
-├── app.py                 # Aplicació principal
-├── setup_samples.py       # Configuració de mostra
-├── requirements.txt       # Dependències
-├── data/
-│   └── index.csv         # Metadades de fitxers
-├── boxes/                # Fitxers STP de contenidors
-├── objects/              # Fitxers STP d'objectes
-└── src/packassist/
-    ├── __init__.py
-    ├── stp_loader.py     # Càrrega de fitxers STP
-    ├── optimizer.py      # Algoritmes d'optimització
-    └── utils.py          # Utilitats generals
+├── 🚀 launch.py                    # PUNT D'ENTRADA PRINCIPAL
+├── 📱 packassist_gui.py            # Aplicació GUI completa
+├── 📱 packassist_simple.py         # Aplicació simple (2 pestanyes)
+├── 📄 requirements.txt             # Dependencies
+├── 📄 LICENSE                      # Llicència
+│
+├── 📁 actiu/                       # ✅ TOT EL CODI FUNCIONAL
+│   ├── src/packassist/             # Mòduls principals
+│   ├── tools/mesh_simplifiers/     # Simplificadors de malles
+│   ├── tests/                      # Scripts de proves
+│   ├── data/, boxes/, objects/     # Dades del projecte
+│   └── results/                    # Resultats dels càlculs
+│
+├── 📁 documentacio/                # 📖 DOCUMENTACIÓ COMPLETA
+├── 📁 no-utilitzat/                # 🗄️ FITXERS ANTICS
+└── 📁 packassist_env/              # 🐍 ENTORN VIRTUAL
 ```
 
-## 📊 Format del CSV
+## 🎯 Opcions del Launcher
 
-El fitxer `data/index.csv` ha de tenir aquesta estructura:
+Executa `python launch.py` i tria:
 
-```csv
-type,name,file_path
-box,Caixa Petita,boxes/box_small.stp
-box,Caixa Gran,boxes/box_large.stp
-object,Producte A,objects/product_a.stp
-object,Producte B,objects/product_b.stp
-```
+1. **🚀 PackAssist GUI** - Interfície completa (RECOMANAT)
+2. **🎯 Aplicació Simple** - 2 pestanyes bàsiques  
+3. **🔧 Simplificador STL Avançat** - GUI amb 3 pestanyes
+4. **⚡ Simplificador Ultra Ràpid** - Terminal amb múltiples algoritmes
+5. **🔧 Simplificador Simple** - Versió bàsica
+6. **🧪 Proves de Simplificació** - Testing avançat
+7. **❌ Sortir**
 
-### Camps:
-- **type**: "box" o "object"
-- **name**: Nom descriptiu
-- **file_path**: Ruta relativa al fitxer STP
+## 🔧 Funcionalitats Principals
 
-## 🔧 Exemples d'Ús
+### ✅ Completament Operatives:
+- **Empaquetament 3D** amb algoritmes optimitzats
+- **Visualització 3D** amb PyVista i matplotlib  
+- **Suport STP/STL** per geometries complexes
+- **Simplificació de malles** ultra-ràpida (4 algoritmes)
+- **GUI avançada** amb threading per rendiment
+- **Exportació** d'imatges i dades
 
-### Exemple 1: Entrada Manual
-```
-📦 Introdueix les dimensions del contenidor:
-Longitud (mm): 200
-Amplada (mm): 150
-Altura (mm): 100
+### 🎯 Característiques Destacades:
+- **Sistema unificat**: Un sol launcher per tot
+- **Estructura neta**: Només 3 carpetes + essencials
+- **Alt rendiment**: Threading i optimització automàtica
+- **Multiplataforma**: Python pur, sense dependencies de .bat
 
-📋 Introdueix les dimensions de l'objecte:
-Longitud (mm): 50
-Amplada (mm): 30
-Altura (mm): 25
-```
+## 📦 Instal·lació
 
-### Resultat:
-```
-📊 RESULTATS:
-  ➕ Màxim teòric (per volum): 16 unitats
-  ✅ Màxim real (3D packing): 12 unitats
-  📈 Eficiència d'espai: 75.00%
-  📏 Volum contenidor: 3000000.00 mm³
-  📦 Volum utilitzat: 2250000.00 mm³
-```
-
-### Exemple 2: Fitxers STP
-Carrega automàticament tots els models definits al CSV i mostra:
-```
-📦 Contenidor: Caixa Mitjana | Dimensions: {'length': 200.0, 'width': 150.0, 'height': 100.0, 'volume': 3000000.0}
-  ➕ Objecte: Producte Petit
-     📏 Dimensions: {'length': 30.0, 'width': 20.0, 'height': 15.0, 'volume': 9000.0}
-     🔢 Màxim teòric: 333 unitats
-     ✅ Màxim real: 280 unitats  
-     📈 Eficiència: 84.00%
-```
-
-## 🧪 Testing
-
-Per executar els tests (quan estiguin implementats):
 ```bash
-pytest tests/
+# 1. Clonar repositori
+git clone https://github.com/OriolCanillasGautier/SOME-PackagingAssistant.git
+cd SOME-PackagingAssistant
+
+# 2. Instal·lar dependencies
+pip install -r requirements.txt
+
+# 3. Executar
+python launch.py
 ```
 
-## 🚧 Resolució de Problemes
+## 🚀 Ús Ràpid
 
-### Error instal·lació de paquets des de requirements.txt
+### Empaquetament Bàsic:
 ```bash
-pip install --only-binary :all: -r requirements.txt
+python launch.py  # → Opció 1 o 2
 ```
 
-### Error: "El fitxer index.csv no existeix"
+### Simplificació de Malles STL:
+```bash  
+python launch.py  # → Opció 3 (GUI recomanat)
+```
+
+### Desenvolupament/Testing:
 ```bash
-python setup_samples.py
+python launch.py  # → Opció 6 (proves)
 ```
 
-### Error: "Fitxer STP no vàlid"
-- Verifica que els fitxers .stp existeixen
-- Comprova les rutes al CSV
-- Assegura't que els fitxers no estan corruptes
+## 📦 Dependencies Principals
 
-### Problemes de rendiment
-- Redueix `max_attempts` a `optimizer.py`
-- Utilitza dimensions més petites per testing
-- Augmenta la RAM disponible
+- `pymeshlab` - Simplificació ultra-ràpida
+- `pyvista` - Visualització 3D avançada
+- `matplotlib` - Gràfics i visualització
+- `tkinter` - Interfície gràfica (inclòs amb Python)
+- `trimesh` - Processament de malles
+- `numpy` - Càlculs numèrics
 
-## 🤝 Contribucions
+## 🔍 Neteja Realitzada (Agost 2025)
 
-1. Fork del projecte
-2. Crea una branca de funcionalitat
-3. Commit dels canvis
-4. Push a la branca
-5. Obre un Pull Request
+### ✅ Reorganització Ultra Neta:
+- **Eliminats .bat**: No necessaris, Python funciona directament
+- **3 carpetes úniques**: actiu/, documentacio/, no-utilitzat/
+- **Launcher unificat**: Un sol punt d'entrada
+- **Paths corregits**: Tots els imports actualitzats
+- **Estructura clara**: Només l'essencial a l'arrel
 
-## 📄 Llicència
+### 🗂️ Sistema de Carpetes:
+- **`actiu/`**: Tot el codi i dades que es fan servir
+- **`documentacio/`**: Tota la documentació consolidada  
+- **`no-utilitzat/`**: Versions antigues i experiments
 
-[Inclou aquí la informació de llicència]
+## 💡 Notes Importants
+
+- **Un sol punt d'entrada**: `python launch.py`
+- **Sense .bat**: Sistema 100% Python, multiplataforma
+- **Estructura neta**: Només 3 carpetes + fitxers essencials
+- **100% funcional**: Totes les característiques mantingudes
+
+## 🆘 Resolució de Problemes
+
+```bash
+# Si hi ha errors:
+1. Verifica entorn virtual: packassist_env/Scripts/activate
+2. Instal·la dependencies: pip install -r requirements.txt  
+3. Executa launcher: python launch.py
+4. Consulta documentacio/ per més detalls
+```
 
 ## 📞 Suport
 
-Per problemes o suggeriments:
-- Obre un issue al repositori
-- Contacta amb l'equip de desenvolupament
+- **Documentació**: Carpeta `documentacio/`
+- **Esquema actual**: `ESQUEMA_ACTUAL.md`
+- **Proves**: Launcher opció 6
 
 ---
 
-**Desenvolupat amb ❤️ per optimitzar l'eficiència d'empaquetament**
+**✨ Sistema completament reorganitzat per màxima simplicitat i eficiència ✨**

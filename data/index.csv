@@ -1,7 +1,0 @@
-type,name,file_path
-box,Caixa Petita,boxes/box_small.stp
-box,Caixa Gran,boxes/box_large.stp
-object,Caixa Petita STP,objects/caixa_petita.stp
-object,Test STP,objects/stptest.stp
-object,STP proves,objects\STP proves.stp
-box,3STP,boxes\3STP_154.5x218.5x86.5.stp

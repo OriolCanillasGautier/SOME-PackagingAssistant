@@ -1,0 +1,5 @@
+type,name,file_path
+box,Caixa Mitjana,boxes/box_medium.stp
+box,Caixa Gran,boxes/box_large.stp
+object,Producte A,objects/product_a.stp
+object,Producte B,objects/product_b.stp
