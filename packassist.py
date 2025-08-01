@@ -114,17 +114,23 @@ class PackAssistIntegratedApp:
             print("✅ Open3D disponible")
         except ImportError:
             available['open3d'] = False
-            print("❌ Open3D no disponible")
+            print("❌ Open3D no disponible (opcional)")
             
         return available
         
     def load_optimizer(self):
         """Carrega l'optimitzador des del codi existent"""
         try:
+            # Afegir el path correcte per l'optimitzador
+            import sys
+            optimizer_path = os.path.join(current_dir, 'src')
+            if optimizer_path not in sys.path:
+                sys.path.insert(0, optimizer_path)
+            
             # Carregar des de packassist.optimizer
             from packassist.optimizer import optimize_packing
             self.optimizer_func = optimize_packing
-            print("✅ Optimitzador carregat des de packassist.optimizer")
+            print("✅ Optimitzador carregat des de src/packassist.optimizer")
         except Exception as e:
             print(f"⚠️ No s'ha pogut carregar l'optimitzador: {e}")
             self.optimizer_func = None
@@ -140,10 +146,10 @@ class PackAssistIntegratedApp:
         # Mètode 2: Trimesh (ràpid)
         if self.available_libs.get('trimesh'):
             self.simplifier_methods['trimesh'] = self.simplify_with_trimesh
+            self.simplifier_methods['clustering'] = self.simplify_with_clustering
             
-        # Mètode 3: Open3D (alternatiu)
-        if self.available_libs.get('open3d'):
-            self.simplifier_methods['open3d'] = self.simplify_with_open3d
+        # Mètode 3: Edge Length (preserva detalls)
+        self.simplifier_methods['edge_length'] = self.simplify_with_edge_length
             
         print(f"✅ {len(self.simplifier_methods)} mètodes de simplificació carregats")
         
@@ -214,7 +220,7 @@ class PackAssistIntegratedApp:
             simplified_mesh = mesh.simplify_quadric_decimation(target_vertices)
             
             if simplified_mesh.is_empty:
-                # Fallback amb ratio
+                # Fallback amb face count
                 target_faces = max(12, target_vertices // 2)
                 simplified_mesh = mesh.simplify_quadric_decimation(face_count=target_faces)
                 
@@ -223,9 +229,63 @@ class PackAssistIntegratedApp:
         except Exception as e:
             raise Exception(f"Error amb Trimesh: {e}")
             
-    def simplify_with_open3d(self, mesh, target_vertices, preserve_volume=True):
-        """Simplifica amb Open3D (alternatiu)"""
+    def simplify_with_clustering(self, mesh, target_vertices, preserve_volume=True):
+        """Simplifica amb clustering de vèrtexs (molt ràpid)"""
         try:
+            import numpy as np
+            
+            # Clustering de vèrtexs
+            vertices = mesh.vertices
+            faces = mesh.faces
+            
+            # Calcular ratio de reducció
+            current_vertices = len(vertices)
+            reduction_ratio = target_vertices / current_vertices if current_vertices > 0 else 0.5
+            reduction_ratio = max(0.05, min(reduction_ratio, 0.95))
+            
+            # Simplificar per clustering espacial
+            if hasattr(mesh, 'simplify_quadric_decimation'):
+                # Usar decimació amb clustering
+                face_count = int(len(faces) * reduction_ratio)
+                simplified_mesh = mesh.simplify_quadric_decimation(face_count=max(12, face_count))
+            else:
+                # Fallback manual clustering
+                from sklearn.cluster import KMeans
+                if len(vertices) > target_vertices:
+                    # Clustering de vèrtexs
+                    kmeans = KMeans(n_clusters=target_vertices, random_state=42)
+                    clusters = kmeans.fit_predict(vertices)
+                    
+                    # Crear nous vèrtexs com a centroids
+                    new_vertices = kmeans.cluster_centers_
+                    
+                    # Remapear cares
+                    vertex_map = {}
+                    for i, cluster in enumerate(clusters):
+                        vertex_map[i] = cluster
+                    
+                    new_faces = []
+                    for face in faces:
+                        new_face = [vertex_map[face[0]], vertex_map[face[1]], vertex_map[face[2]]]
+                        if len(set(new_face)) == 3:  # Evitar triangles degenerats
+                            new_faces.append(new_face)
+                    
+                    simplified_mesh = trimesh.Trimesh(vertices=new_vertices, faces=new_faces)
+                else:
+                    simplified_mesh = mesh
+                
+            return simplified_mesh
+            
+        except ImportError:
+            # Fallback a trimesh normal si sklearn no està disponible
+            return self.simplify_with_trimesh(mesh, target_vertices, preserve_volume)
+        except Exception as e:
+            raise Exception(f"Error amb Clustering: {e}")
+            
+    def simplify_with_edge_length(self, mesh, target_vertices, preserve_volume=True):
+        """Simplifica preservant detalls per edge length"""
+        try:
+            # Usar Open3D si està disponible
             import open3d as o3d
             
             # Convertir trimesh a open3d
@@ -233,7 +293,7 @@ class PackAssistIntegratedApp:
             o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
             o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
             
-            # Simplificar
+            # Simplificar preservant detalls
             simplified_o3d = o3d_mesh.simplify_quadric_decimation(target_vertices)
             
             # Convertir de nou a trimesh
@@ -244,8 +304,25 @@ class PackAssistIntegratedApp:
             
             return simplified_mesh
             
+        except ImportError:
+            # Fallback a preservació manual de detalls amb trimesh
+            try:
+                # Usar trimesh amb preservació d'edges importants
+                if hasattr(mesh, 'simplify_quadric_decimation'):
+                    # Calcular face count conservador per preservar detalls
+                    target_faces = max(target_vertices, len(mesh.faces) // 2)
+                    simplified_mesh = mesh.simplify_quadric_decimation(face_count=target_faces)
+                else:
+                    simplified_mesh = mesh
+                    
+                return simplified_mesh
+                
+            except Exception as e:
+                # Últim fallback
+                return self.simplify_with_trimesh(mesh, target_vertices, preserve_volume)
+                
         except Exception as e:
-            raise Exception(f"Error amb Open3D: {e}")
+            raise Exception(f"Error amb Edge Length: {e}")
 
     def setup_styles(self):
         """Configura estils moderns"""
@@ -696,32 +773,19 @@ class PackAssistIntegratedApp:
                 self.simplified_mesh = self.simplifier_methods['pymeshlab'](original_mesh, target, preserve_volume)
                 method_used = "PyMeshLab Quadric"
                 
-            elif method == "clustering" and 'trimesh' in self.simplifier_methods:
-                # Per clustering, usar un enfocament específic
-                try:
-                    # Clustering simple amb trimesh
-                    ratio = target / len(original_mesh.vertices) if len(original_mesh.vertices) > 0 else 0.5
-                    ratio = max(0.05, min(ratio, 0.95))
+            elif method == "clustering" and 'clustering' in self.simplifier_methods:
+                self.simplified_mesh = self.simplifier_methods['clustering'](original_mesh, target, preserve_volume)
+                method_used = "Clustering Ràpid"
                     
-                    self.simplified_mesh = self.simplifier_methods['trimesh'](original_mesh, target, preserve_volume)
-                    method_used = "Trimesh Clustering"
-                except:
-                    # Fallback a quadric
-                    self.simplified_mesh = self.simplifier_methods['trimesh'](original_mesh, target, preserve_volume)
-                    method_used = "Trimesh Quadric (fallback)"
-                    
-            elif method == "edge_length" and 'open3d' in self.simplifier_methods:
-                self.simplified_mesh = self.simplifier_methods['open3d'](original_mesh, target, preserve_volume)
-                method_used = "Open3D Edge Length"
+            elif method == "edge_length" and 'edge_length' in self.simplifier_methods:
+                self.simplified_mesh = self.simplifier_methods['edge_length'](original_mesh, target, preserve_volume)
+                method_used = "Preservar Detalls"
                 
             else:
-                # Usar el primer mètode disponible
+                # Fallback a trimesh si està disponible
                 if 'trimesh' in self.simplifier_methods:
                     self.simplified_mesh = self.simplifier_methods['trimesh'](original_mesh, target, preserve_volume)
                     method_used = "Trimesh (fallback)"
-                elif 'pymeshlab' in self.simplifier_methods:
-                    self.simplified_mesh = self.simplifier_methods['pymeshlab'](original_mesh, target, preserve_volume)
-                    method_used = "PyMeshLab (fallback)"
                 else:
                     raise Exception("Cap mètode de simplificació disponible")
             
