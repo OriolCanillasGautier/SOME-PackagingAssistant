@@ -20,11 +20,12 @@ trimesh>=3.15.0
 shapely>=1.8.0
 python-stl>=2.16.0
 
-# Simplificació de malles (noves biblioteques ultra-ràpides)
+# Simplificació de malles
 pymeshlab>=2023.12.post1
 pyfqmr>=1.1.0
+fast-simplification>=0.1.0
 
-# Visualització 3D i simplificació de malles
+# Visualització 3D
 plotly>=5.0.0
 kaleido>=0.2.0
 pyvista>=0.45.0
