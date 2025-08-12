@@ -107,14 +107,9 @@ class PackAssistIntegratedApp:
             available['trimesh'] = False
             print("❌ Trimesh no disponible")
         
-        # Open3D
-        try:
-            import open3d as o3d
-            available['open3d'] = True
-            print("✅ Open3D disponible")
-        except ImportError:
-            available['open3d'] = False
-            print("❌ Open3D no disponible (opcional)")
+        # Open3D (eliminat - no necessari)
+        available['open3d'] = False
+        print("❌ Open3D no utilitzat (simplificació optimitzada)")
             
         return available
         
@@ -139,17 +134,13 @@ class PackAssistIntegratedApp:
         """Carrega els simplificadors disponibles"""
         self.simplifier_methods = {}
         
-        # Mètode 1: PyMeshLab (millor qualitat)
+        # Mètode principal: PyMeshLab (millor qualitat) 
         if self.available_libs.get('pymeshlab'):
             self.simplifier_methods['pymeshlab'] = self.simplify_with_pymeshlab
             
-        # Mètode 2: Trimesh (ràpid)
+        # Mètode alternatiu: Trimesh (funcional i ràpid)
         if self.available_libs.get('trimesh'):
             self.simplifier_methods['trimesh'] = self.simplify_with_trimesh
-            self.simplifier_methods['clustering'] = self.simplify_with_clustering
-            
-        # Mètode 3: Edge Length (preserva detalls)
-        self.simplifier_methods['edge_length'] = self.simplify_with_edge_length
             
         print(f"✅ {len(self.simplifier_methods)} mètodes de simplificació carregats")
         
@@ -216,113 +207,88 @@ class PackAssistIntegratedApp:
     def simplify_with_trimesh(self, mesh, target_vertices, preserve_volume=True):
         """Simplifica amb Trimesh (ràpid)"""
         try:
-            # Usar decimació quadric de trimesh
-            simplified_mesh = mesh.simplify_quadric_decimation(target_vertices)
-            
-            if simplified_mesh.is_empty:
-                # Fallback amb face count
-                target_faces = max(12, target_vertices // 2)
-                simplified_mesh = mesh.simplify_quadric_decimation(face_count=target_faces)
-                
-            return simplified_mesh
-            
-        except Exception as e:
-            raise Exception(f"Error amb Trimesh: {e}")
-            
-    def simplify_with_clustering(self, mesh, target_vertices, preserve_volume=True):
-        """Simplifica amb clustering de vèrtexs (molt ràpid)"""
-        try:
-            import numpy as np
-            
-            # Clustering de vèrtexs
-            vertices = mesh.vertices
-            faces = mesh.faces
-            
-            # Calcular ratio de reducció
-            current_vertices = len(vertices)
-            reduction_ratio = target_vertices / current_vertices if current_vertices > 0 else 0.5
-            reduction_ratio = max(0.05, min(reduction_ratio, 0.95))
-            
-            # Simplificar per clustering espacial
-            if hasattr(mesh, 'simplify_quadric_decimation'):
-                # Usar decimació amb clustering
-                face_count = int(len(faces) * reduction_ratio)
-                simplified_mesh = mesh.simplify_quadric_decimation(face_count=max(12, face_count))
-            else:
-                # Fallback manual clustering
-                from sklearn.cluster import KMeans
-                if len(vertices) > target_vertices:
-                    # Clustering de vèrtexs
-                    kmeans = KMeans(n_clusters=target_vertices, random_state=42)
-                    clusters = kmeans.fit_predict(vertices)
-                    
-                    # Crear nous vèrtexs com a centroids
-                    new_vertices = kmeans.cluster_centers_
-                    
-                    # Remapear cares
-                    vertex_map = {}
-                    for i, cluster in enumerate(clusters):
-                        vertex_map[i] = cluster
-                    
-                    new_faces = []
-                    for face in faces:
-                        new_face = [vertex_map[face[0]], vertex_map[face[1]], vertex_map[face[2]]]
-                        if len(set(new_face)) == 3:  # Evitar triangles degenerats
-                            new_faces.append(new_face)
-                    
-                    simplified_mesh = trimesh.Trimesh(vertices=new_vertices, faces=new_faces)
-                else:
-                    simplified_mesh = mesh
-                
-            return simplified_mesh
-            
-        except ImportError:
-            # Fallback a trimesh normal si sklearn no està disponible
-            return self.simplify_with_trimesh(mesh, target_vertices, preserve_volume)
-        except Exception as e:
-            raise Exception(f"Error amb Clustering: {e}")
-            
-    def simplify_with_edge_length(self, mesh, target_vertices, preserve_volume=True):
-        """Simplifica preservant detalls per edge length"""
-        try:
-            # Usar Open3D si està disponible
-            import open3d as o3d
-            
-            # Convertir trimesh a open3d
-            o3d_mesh = o3d.geometry.TriangleMesh()
-            o3d_mesh.vertices = o3d.utility.Vector3dVector(mesh.vertices)
-            o3d_mesh.triangles = o3d.utility.Vector3iVector(mesh.faces)
-            
-            # Simplificar preservant detalls
-            simplified_o3d = o3d_mesh.simplify_quadric_decimation(target_vertices)
-            
-            # Convertir de nou a trimesh
-            vertices = np.asarray(simplified_o3d.vertices)
-            faces = np.asarray(simplified_o3d.triangles)
-            
-            simplified_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-            
-            return simplified_mesh
-            
-        except ImportError:
-            # Fallback a preservació manual de detalls amb trimesh
+            # Intentar decimació quadric de trimesh
             try:
-                # Usar trimesh amb preservació d'edges importants
-                if hasattr(mesh, 'simplify_quadric_decimation'):
-                    # Calcular face count conservador per preservar detalls
-                    target_faces = max(target_vertices, len(mesh.faces) // 2)
-                    simplified_mesh = mesh.simplify_quadric_decimation(face_count=target_faces)
-                else:
-                    simplified_mesh = mesh
+                # Calcular ratio de reducció (entre 0 i 1)
+                current_vertices = len(mesh.vertices)
+                if current_vertices <= target_vertices:
+                    return mesh  # No cal reducció
+                    
+                target_reduction = 1.0 - (target_vertices / current_vertices)
+                target_reduction = max(0.01, min(0.99, target_reduction))  # Assegurar límits
+                
+                simplified_mesh = mesh.simplify_quadric_decimation(target_reduction=target_reduction)
+                
+                if simplified_mesh.is_empty or len(simplified_mesh.vertices) == 0:
+                    # Fallback amb reducció més conservadora
+                    conservative_reduction = min(0.5, target_reduction)
+                    simplified_mesh = mesh.simplify_quadric_decimation(target_reduction=conservative_reduction)
                     
                 return simplified_mesh
                 
-            except Exception as e:
-                # Últim fallback
-                return self.simplify_with_trimesh(mesh, target_vertices, preserve_volume)
-                
+            except (ImportError, ModuleNotFoundError) as import_error:
+                # Si fast_simplification no està disponible, usar mètode alternatiu
+                if "fast_simplification" in str(import_error):
+                    print(f"⚠️ fast_simplification no disponible, usant mètode alternatiu")
+                    return self._simple_mesh_reduction(mesh, target_vertices)
+                else:
+                    raise import_error
+                    
         except Exception as e:
-            raise Exception(f"Error amb Edge Length: {e}")
+            raise Exception(f"Error amb Trimesh: {e}")
+            
+    def _simple_mesh_reduction(self, mesh, target_vertices):
+        """Mètode de reducció simple quan fast_simplification no està disponible"""
+        try:
+            # Calcular ratio de reducció
+            current_vertices = len(mesh.vertices)
+            if current_vertices <= target_vertices:
+                return mesh
+                
+            reduction_ratio = target_vertices / current_vertices
+            
+            # Usar subdivide i després simplificar per mostreig
+            vertices = mesh.vertices
+            faces = mesh.faces
+            
+            # Mostreig uniforme de vèrtexs
+            indices = np.linspace(0, current_vertices - 1, target_vertices, dtype=int)
+            new_vertices = vertices[indices]
+            
+            # Crear mapa de vèrtexs vells a nous
+            vertex_map = {old_idx: new_idx for new_idx, old_idx in enumerate(indices)}
+            
+            # Filtrar cares que tenen tots els vèrtexs en el nou conjunt
+            new_faces = []
+            for face in faces:
+                if all(v in vertex_map for v in face):
+                    new_face = [vertex_map[v] for v in face]
+                    # Verificar que no és degenerada
+                    if len(set(new_face)) == 3:
+                        new_faces.append(new_face)
+            
+            # Si no tenim prou cares, crear un subconjunt mínim
+            if len(new_faces) < 4:
+                # Crear tetraedre mínim
+                if len(new_vertices) >= 4:
+                    new_faces = [[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]]
+                elif len(new_vertices) >= 3:
+                    new_faces = [[0, 1, 2]]
+                else:
+                    # Tornar la malla original si és massa petita
+                    return mesh
+            
+            simplified_mesh = trimesh.Trimesh(vertices=new_vertices, faces=new_faces)
+            
+            # Verificar que la malla és vàlida
+            if simplified_mesh.is_empty or len(simplified_mesh.vertices) == 0:
+                return mesh  # Retornar original si la simplificació falla
+                
+            return simplified_mesh
+            
+        except Exception as e:
+            print(f"⚠️ Error en reducció simple: {e}")
+            return mesh  # Retornar original com a fallback
 
     def setup_styles(self):
         """Configura estils moderns"""
@@ -425,15 +391,14 @@ class PackAssistIntegratedApp:
         controls_frame = ttk.LabelFrame(main_frame, text="Controls de Reducció", padding="15")
         controls_frame.pack(fill=tk.X, pady=(0, 20))
         
-        # Selector de mètode (amb més opcions)
+        # Selector de mètode (simplificat)
         ttk.Label(controls_frame, text="Mètode de reducció:").pack(anchor=tk.W)
         self.simplify_method = tk.StringVar(value="quadric_advanced")
         method_frame = ttk.Frame(controls_frame)
         method_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Radiobutton(method_frame, text="Quadric Avançat", variable=self.simplify_method, value="quadric_advanced").pack(side=tk.LEFT, padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="Clustering Ràpid", variable=self.simplify_method, value="clustering").pack(side=tk.LEFT, padx=(0, 15))
-        ttk.Radiobutton(method_frame, text="Preservar Detalls", variable=self.simplify_method, value="edge_length").pack(side=tk.LEFT)
+        ttk.Radiobutton(method_frame, text="PyMeshLab Quadric (Recomanat)", variable=self.simplify_method, value="quadric_advanced").pack(side=tk.LEFT, padx=(0, 15))
+        ttk.Radiobutton(method_frame, text="Trimesh Alternatiu", variable=self.simplify_method, value="trimesh_fallback").pack(side=tk.LEFT)
         
         # Slider per vèrtexs objectiu (millor rang)
         ttk.Label(controls_frame, text="Nivell de reducció:").pack(anchor=tk.W, pady=(10, 0))
@@ -764,28 +729,27 @@ class PackAssistIntegratedApp:
             self.simplify_btn.config(state='normal', text="🚀 Reduir Complexitat")
             
     def _simplify_worker(self, target, method, preserve_volume):
-        """Worker per la simplificació en fil separat amb mètodes carregats"""
+        """Worker per la simplificació en fil separat amb mètodes simplificats"""
         try:
             original_mesh = self.original_mesh
             
-            # Seleccionar mètode de simplificació
+            # Seleccionar mètode de simplificació (només els que funcionen)
             if method == "quadric_advanced" and 'pymeshlab' in self.simplifier_methods:
                 self.simplified_mesh = self.simplifier_methods['pymeshlab'](original_mesh, target, preserve_volume)
                 method_used = "PyMeshLab Quadric"
                 
-            elif method == "clustering" and 'clustering' in self.simplifier_methods:
-                self.simplified_mesh = self.simplifier_methods['clustering'](original_mesh, target, preserve_volume)
-                method_used = "Clustering Ràpid"
-                    
-            elif method == "edge_length" and 'edge_length' in self.simplifier_methods:
-                self.simplified_mesh = self.simplifier_methods['edge_length'](original_mesh, target, preserve_volume)
-                method_used = "Preservar Detalls"
+            elif method == "trimesh_fallback" and 'trimesh' in self.simplifier_methods:
+                self.simplified_mesh = self.simplifier_methods['trimesh'](original_mesh, target, preserve_volume)
+                method_used = "Trimesh Alternatiu"
                 
             else:
-                # Fallback a trimesh si està disponible
-                if 'trimesh' in self.simplifier_methods:
+                # Fallback automàtic: primer PyMeshLab, després Trimesh
+                if 'pymeshlab' in self.simplifier_methods:
+                    self.simplified_mesh = self.simplifier_methods['pymeshlab'](original_mesh, target, preserve_volume)
+                    method_used = "PyMeshLab Quadric (auto)"
+                elif 'trimesh' in self.simplifier_methods:
                     self.simplified_mesh = self.simplifier_methods['trimesh'](original_mesh, target, preserve_volume)
-                    method_used = "Trimesh (fallback)"
+                    method_used = "Trimesh (auto)"
                 else:
                     raise Exception("Cap mètode de simplificació disponible")
             
@@ -997,7 +961,7 @@ class PackAssistIntegratedApp:
                 }
                 
             # Utilitzar optimitzador existent si està disponible
-            if self.optimizer_func:
+            if False:  # TEMPORALMENT DESHABILITAT per provar el meu algoritme STL millorat
                 try:
                     result = self.optimizer_func(box_dims, obj_dims)
                     
@@ -1015,7 +979,8 @@ class PackAssistIntegratedApp:
                     print(f"Error amb optimitzador avançat: {e}")
                     result = self._advanced_stl_optimization_fallback(box_dims, obj_dims, mesh)
             else:
-                # Fallback a optimització avançada pròpia
+                # Usar sempre l'optimització avançada STL pròpia
+                print("🔍 Usant optimitzador STL avançat propi amb rotacions intel·ligents...")
                 result = self._advanced_stl_optimization_fallback(box_dims, obj_dims, mesh)
             
             # Guardar resultats
@@ -1028,95 +993,350 @@ class PackAssistIntegratedApp:
             self.root.after(0, lambda: self._handle_optimization_error(str(e)))
             
     def _advanced_stl_optimization_fallback(self, box_dims, obj_dims, mesh):
-        """Optimització avançada per STL considerant geometria real"""
+        """Optimització avançada per STL considerant geometria real amb rotacions intel·ligents progressives"""
         try:
-            # Obtenir dimensions reals
-            obj_length = obj_dims['length']
-            obj_width = obj_dims['width'] 
-            obj_height = obj_dims['height']
+            print("🔍 Iniciant optimització avançada amb geometria STL real...")
             
             box_length = box_dims['length']
             box_width = box_dims['width']
             box_height = box_dims['height']
             
-            # Calcular orientacions possibles (original + 2 rotacions)
-            orientations = [
-                (obj_length, obj_width, obj_height, [0, 0, 0]),           # Original
-                (obj_width, obj_length, obj_height, [0, 0, 90]),         # Rotat 90° Z
-                (obj_height, obj_width, obj_length, [90, 0, 0]),         # Rotat 90° X
-                (obj_width, obj_height, obj_length, [0, 90, 0]),         # Rotat 90° Y
-                (obj_length, obj_height, obj_width, [0, 0, 0]),          # Intercanvi Y-Z
-                (obj_height, obj_length, obj_width, [90, 0, 90]),        # Combinada
-            ]
+            # Generar totes les rotacions possibles
+            all_rotations = self._generate_rotation_combinations()
             
             best_result = None
             max_pieces = 0
+            best_config = None
             
-            # Provar cada orientació
-            for ol, ow, oh, rotation in orientations:
-                # Verificar que l'objecte cap en la caixa en aquesta orientació
-                if ol <= box_length and ow <= box_width and oh <= box_height:
-                    # Calcular quants objectes caben
-                    pieces_x = max(1, int(box_length / ol))
-                    pieces_y = max(1, int(box_width / ow))
-                    pieces_z = max(1, int(box_height / oh))
-                    
-                    total_pieces = pieces_x * pieces_y * pieces_z
-                    
-                    if total_pieces > max_pieces:
-                        max_pieces = total_pieces
+            # Optimització progressiva amb fases
+            rotation_phases = [
+                ("� Fase bàsica", 8),      # 8 rotacions més probables
+                ("⚡ Fase estàndard", 16),   # Fins a 16 rotacions
+                ("🎯 Fase completa", -1)     # Totes les rotacions si cal
+            ]
+            
+            initial_max_pieces = 0
+            
+            for phase_name, max_rotations in rotation_phases:
+                rotations_to_test = all_rotations[:max_rotations] if max_rotations > 0 else all_rotations
+                print(f"\n{phase_name} - Testant {len(rotations_to_test)} orientacions...")
+                
+                phase_best_pieces = 0
+                
+                # Provar cada rotació de la fase
+                for i, rotation in enumerate(rotations_to_test):
+                    try:
+                        print(f"    🔄 Testant rotació {i+1}/{len(rotations_to_test)}: {rotation}")
                         
-                        # Crear posicions per aquesta orientació
-                        items = []
-                        for z in range(pieces_z):
-                            for y in range(pieces_y):
-                                for x in range(pieces_x):
-                                    items.append({
-                                        'position': [x * ol, y * ow, z * oh],
-                                        'dimensions': [ol, ow, oh],
-                                        'rotation': rotation,
-                                        'stl_mesh': mesh,
-                                        'is_stl': True
-                                    })
+                        # Aplicar rotació a la malla
+                        rotated_mesh = self._apply_rotation_to_mesh(mesh, rotation)
                         
-                        # Calcular volums
-                        box_volume = box_length * box_width * box_height
-                        obj_volume = getattr(mesh, 'volume', ol * ow * oh)
-                        used_volume = max_pieces * obj_volume
-                        efficiency = (used_volume / box_volume) * 100 if box_volume > 0 else 0
+                        # Calcular noves dimensions amb la rotació
+                        bounds = rotated_mesh.bounds
+                        obj_length = bounds[1][0] - bounds[0][0]
+                        obj_width = bounds[1][1] - bounds[0][1] 
+                        obj_height = bounds[1][2] - bounds[0][2]
                         
-                        best_result = {
-                            'max_objects': max_pieces,
-                            'efficiency': efficiency,
-                            'box_volume': box_volume,
-                            'used_volume': used_volume,
-                            'method': 'advanced_stl_optimization',
-                            'best_orientation': rotation,
-                            'piece_dimensions': [ol, ow, oh],
-                            'bins': [{
-                                'bin': {'dimensions': [box_length, box_width, box_height]},
-                                'items': items
-                            }]
-                        }
+                        print(f"      📐 Dimensions rotades: {obj_length:.1f} × {obj_width:.1f} × {obj_height:.1f} mm")
+                        
+                        # Verificar que cap en la caixa
+                        if obj_length <= box_length and obj_width <= box_width and obj_height <= box_height:
+                            print(f"      ✅ L'objecte cap en la caixa!")
+                            
+                            # Calcular empaquetament per aquesta orientació
+                            result = self._calculate_stl_packing(
+                                box_length, box_width, box_height,
+                                obj_length, obj_width, obj_height,
+                                rotated_mesh, rotation
+                            )
+                            
+                            if result['total_pieces'] > phase_best_pieces:
+                                phase_best_pieces = result['total_pieces']
+                            
+                            if result['total_pieces'] > max_pieces:
+                                max_pieces = result['total_pieces']
+                                best_result = result
+                                best_config = {
+                                    'rotation': rotation,
+                                    'dimensions': [obj_length, obj_width, obj_height],
+                                    'mesh': rotated_mesh
+                                }
+                                print(f"      🎉 NOVA MILLOR CONFIGURACIÓ: {max_pieces} objectes!")
+                                
+                                # Si millorem molt (>50% més objectes), continuar amb aquesta fase
+                                if max_pieces > initial_max_pieces * 1.5:
+                                    print(f"        🎯 Gran millora! Continuant amb més rotacions...")
+                        else:
+                            print(f"      ❌ L'objecte NO cap: {obj_length:.1f} > {box_length} o {obj_width:.1f} > {box_width} o {obj_height:.1f} > {box_height}")
+                        
+                    except Exception as e:
+                        print(f"      ⚠️ Error amb rotació {rotation}: {e}")
+                        continue
+                
+                print(f"  📊 Millor resultat fase: {phase_best_pieces} objectes")
+                
+                # Si la primera fase és 0, provar més rotacions
+                if phase_name == "🚀 Fase bàsica":
+                    initial_max_pieces = phase_best_pieces
+                    if initial_max_pieces == 0:
+                        print("    🔄 Cap objecte col·locat, provant més orientacions...")
+                        continue
+                
+                # Si no hi ha millora significativa de la fase anterior, parar
+                if phase_best_pieces > 0 and max_pieces > 0:
+                    improvement_ratio = phase_best_pieces / max_pieces if max_pieces > 0 else 0
+                    if improvement_ratio < 1.1 and phase_name != "🎯 Fase completa":  # Menys del 10% millora
+                        print(f"    ⏭️ Poca millora ({improvement_ratio:.2f}x), saltant fases següents")
+                        break
+                
+                # Si ja tenim una eficiència molt alta, parar
+                if max_pieces > 0:
+                    box_volume = box_length * box_width * box_height
+                    # Usar eficiència de bounding box per decidir si parar
+                    best_bbox_dims = best_config['dimensions'] if best_config else [10, 10, 10]
+                    obj_bbox_volume = best_bbox_dims[0] * best_bbox_dims[1] * best_bbox_dims[2]
+                    estimated_efficiency = (max_pieces * obj_bbox_volume / box_volume) * 100 if box_volume > 0 else 0
+                    if estimated_efficiency > 85:
+                        print(f"    🎯 Eficiència alta estimada ({estimated_efficiency:.1f}%), parant optimització")
+                        break
             
             if best_result is None:
-                # L'objecte no cap en cap orientació
                 return {
                     'max_objects': 0,
                     'efficiency': 0,
                     'error': 'L\'objecte és massa gran per la caixa en qualsevol orientació',
                     'bins': []
                 }
-                
-            return best_result
+            
+            # Crear resultat final
+            box_volume = box_length * box_width * box_height
+            
+            # MILLORAT: Usar volum de bounding box en lloc de volum STL real 
+            # (molts STL són buits per dins i donen eficiències irrellevants)
+            obj_bbox_volume = (best_config['dimensions'][0] * 
+                             best_config['dimensions'][1] * 
+                             best_config['dimensions'][2])
+            used_bbox_volume = max_pieces * obj_bbox_volume
+            efficiency = (used_bbox_volume / box_volume) * 100 if box_volume > 0 else 0
+            
+            # També calcular eficiència real STL per comparació
+            obj_real_volume = getattr(mesh, 'volume', 0)
+            used_real_volume = max_pieces * obj_real_volume
+            real_efficiency = (used_real_volume / box_volume) * 100 if box_volume > 0 else 0
+            
+            final_result = {
+                'max_objects': max_pieces,
+                'efficiency': efficiency,  # Eficiència basada en bounding box (pràctica)
+                'real_efficiency': real_efficiency,  # Eficiència basada en volum STL real
+                'box_volume': box_volume,
+                'used_volume': used_bbox_volume,  # Volum de bounding boxes utilitzat
+                'used_real_volume': used_real_volume,  # Volum STL real utilitzat
+                'obj_bbox_volume': obj_bbox_volume,  # Volum individual bounding box
+                'obj_real_volume': obj_real_volume,  # Volum STL real individual
+                'method': 'advanced_stl_geometry_packing_progressive',
+                'best_orientation': best_config['rotation'],
+                'piece_dimensions': best_config['dimensions'],
+                'bins': [{
+                    'bin': {'dimensions': [box_length, box_width, box_height]},
+                    'items': best_result['items'],
+                    'mesh_data': best_config['mesh']
+                }]
+            }
+            
+            print(f"🎉 Optimització completada: {max_pieces} objectes")
+            print(f"📊 Eficiència pràctica (bounding box): {efficiency:.1f}%")
+            print(f"📊 Eficiència real STL (volum): {real_efficiency:.1f}%")
+            return final_result
             
         except Exception as e:
+            print(f"❌ Error en optimització avançada: {e}")
             return {
                 'max_objects': 0,
                 'efficiency': 0,
                 'error': f'Error en optimització STL: {e}',
                 'bins': []
             }
+            
+    def _generate_rotation_combinations(self):
+        """Genera combinacions de rotacions optimitzades (començant per les més probables)"""
+        rotations = []
+        
+        # Fase 1: Rotacions més probables (24 rotacions bàsiques)
+        # Orientacions principals de 90°
+        basic_90_rotations = [
+            [0, 0, 0],     # Original
+            [90, 0, 0],    # Rotat 90° X  
+            [180, 0, 0],   # Rotat 180° X
+            [270, 0, 0],   # Rotat 270° X
+            [0, 90, 0],    # Rotat 90° Y
+            [0, 180, 0],   # Rotat 180° Y
+            [0, 270, 0],   # Rotat 270° Y
+            [0, 0, 90],    # Rotat 90° Z
+            [0, 0, 180],   # Rotat 180° Z
+            [0, 0, 270],   # Rotat 270° Z
+            # Combinacions de 2 eixos més comunes
+            [90, 90, 0],   
+            [90, 0, 90],   
+            [0, 90, 90],   
+            [90, 90, 90],  
+            [180, 90, 0],  
+            [90, 180, 0],  
+            [180, 180, 0], 
+            [90, 270, 0],  
+            [270, 90, 0],  
+            [180, 0, 90],  
+            [0, 180, 90],  
+            [90, 0, 180],  
+            [0, 90, 180],  
+            [270, 180, 90] 
+        ]
+        
+        rotations.extend(basic_90_rotations)
+        
+        # Fase 2: Rotacions de 45° per refinament (només si necessari)
+        # Afegir algunes rotacions de 45° estratègiques
+        refinement_45_rotations = [
+            [45, 0, 0],    # 45° X
+            [0, 45, 0],    # 45° Y
+            [0, 0, 45],    # 45° Z
+            [45, 45, 0],   # 45° XY
+            [45, 0, 45],   # 45° XZ
+            [0, 45, 45],   # 45° YZ
+            [135, 0, 0],   # 135° X
+            [0, 135, 0],   # 135° Y
+            [0, 0, 135],   # 135° Z
+        ]
+        
+        rotations.extend(refinement_45_rotations)
+        
+        # Eliminar duplicats
+        unique_rotations = []
+        for rot in rotations:
+            # Normalitzar angles (0-360)
+            normalized = [angle % 360 for angle in rot]
+            if normalized not in unique_rotations:
+                unique_rotations.append(normalized)
+        
+        print(f"📐 Generades {len(unique_rotations)} rotacions optimitzades")
+        return unique_rotations
+    
+    def _apply_rotation_to_mesh(self, mesh, rotation):
+        """Aplica una rotació a la malla STL i la centra correctament"""
+        try:
+            import numpy as np
+            
+            # Crear còpia de la malla
+            rotated_mesh = mesh.copy()
+            
+            # Aplicar rotacions en ordre: X, Y, Z
+            rx, ry, rz = np.radians(rotation)
+            
+            # Matriu de rotació X
+            if rx != 0:
+                Rx = trimesh.transformations.rotation_matrix(rx, [1, 0, 0])
+                rotated_mesh.apply_transform(Rx)
+            
+            # Matriu de rotació Y
+            if ry != 0:
+                Ry = trimesh.transformations.rotation_matrix(ry, [0, 1, 0])
+                rotated_mesh.apply_transform(Ry)
+            
+            # Matriu de rotació Z
+            if rz != 0:
+                Rz = trimesh.transformations.rotation_matrix(rz, [0, 0, 1])
+                rotated_mesh.apply_transform(Rz)
+            
+            # IMPORTANT: Centrar la malla després de la rotació
+            # Moure la malla perquè el seu punt mínim sigui (0,0,0)
+            bounds = rotated_mesh.bounds
+            translation = -bounds[0]  # Moure des del punt mínim a l'origen
+            rotated_mesh.apply_translation(translation)
+            
+            return rotated_mesh
+            
+        except Exception as e:
+            print(f"⚠️ Error aplicant rotació {rotation}: {e}")
+            return mesh  # Retornar original si falla
+    
+    def _calculate_stl_packing(self, box_length, box_width, box_height, 
+                              obj_length, obj_width, obj_height, mesh, rotation):
+        """Calcula l'empaquetament òptim per una orientació específica amb posicions correctes SIN SUPERPOSICIÓ"""
+        try:
+            # Calcular quants objectes caben en cada dimensió amb marge de seguretat
+            margin = 0.1  # 0.1mm de marge entre objectes
+            
+            pieces_x = max(1, int((box_length + margin) / (obj_length + margin)))
+            pieces_y = max(1, int((box_width + margin) / (obj_width + margin)))
+            pieces_z = max(1, int((box_height + margin) / (obj_height + margin)))
+            
+            print(f"    🔢 Graella calculada: {pieces_x} × {pieces_y} × {pieces_z}")
+            print(f"    📐 Objecte: {obj_length:.1f} × {obj_width:.1f} × {obj_height:.1f} mm")
+            
+            # Generar posicions per cada objecte SIN SUPERPOSICIÓ
+            items = []
+            object_id = 0
+            
+            for z in range(pieces_z):
+                for y in range(pieces_y):
+                    for x in range(pieces_x):
+                        # Calcular posició de la cantonada inferior esquerra de cada objecte
+                        start_x = x * (obj_length + margin)
+                        start_y = y * (obj_width + margin)
+                        start_z = z * (obj_height + margin)
+                        
+                        # Calcular el centre de l'objecte
+                        center_x = start_x + obj_length/2
+                        center_y = start_y + obj_width/2  
+                        center_z = start_z + obj_height/2
+                        
+                        # Verificar que l'objecte complet cap dins del contenidor
+                        if (start_x + obj_length <= box_length and 
+                            start_y + obj_width <= box_width and 
+                            start_z + obj_height <= box_height):
+                            
+                            position = [center_x, center_y, center_z]
+                            
+                            items.append({
+                                'id': object_id,
+                                'position': position,
+                                'dimensions': [obj_length, obj_width, obj_height],
+                                'rotation': rotation,
+                                'stl_mesh': mesh,
+                                'is_stl': True,
+                                'bounds': {
+                                    'min': [start_x, start_y, start_z],
+                                    'max': [start_x + obj_length, start_y + obj_width, start_z + obj_height]
+                                }
+                            })
+                            
+                            print(f"      ✅ Objecte {object_id+1}: centre({center_x:.1f}, {center_y:.1f}, {center_z:.1f})")
+                            object_id += 1
+                        else:
+                            print(f"      ❌ Objecte no cap: posició ({start_x:.1f}, {start_y:.1f}, {start_z:.1f})")
+            
+            total_pieces = len(items)
+            print(f"    📊 Total objectes col·locats: {total_pieces}")
+            
+            return {
+                'total_pieces': total_pieces,
+                'items': items,
+                'grid': [pieces_x, pieces_y, pieces_z],
+                'utilization': {
+                    'x': (pieces_x * (obj_length + margin)) / box_length,
+                    'y': (pieces_y * (obj_width + margin)) / box_width,
+                    'z': (pieces_z * (obj_height + margin)) / box_height
+                }
+            }
+            
+        except Exception as e:
+            print(f"⚠️ Error calculant empaquetament: {e}")
+            return {'total_pieces': 0, 'items': []}
+            
+    def _try_mixed_orientations_packing(self, box_dims, mesh):
+        """Prova empaquetament amb orientacions mixtes (futur desenvolupament)"""
+        # TODO: Implementar empaquetament amb objectes en diferents orientacions
+        # Això seria el següent nivell d'optimització
+        pass
             
     def _simple_optimization_fallback(self, box_dims, obj_dims):
         """Optimització simple de fallback"""
@@ -1168,25 +1388,44 @@ class PackAssistIntegratedApp:
         else:
             max_objects = result.get('max_objects', 0)
             efficiency = result.get('efficiency', 0)
+            real_efficiency = result.get('real_efficiency', 0)
             
             results = f"🎉 RESULTATS DE L'OPTIMITZACIÓ\n"
             results += f"=" * 40 + "\n\n"
             results += f"📊 Objectes que caben: {max_objects:,}\n"
-            results += f"📈 Eficiència: {efficiency:.1f}%\n"
+            results += f"📈 Eficiència pràctica (espai ocupat): {efficiency:.1f}%\n"
+            results += f"📉 Eficiència real STL (volum sòlid): {real_efficiency:.1f}%\n"
             
             if 'box_volume' in result:
                 results += f"📦 Volum caixa: {result['box_volume']:,.0f} mm³\n"
                 
             if 'used_volume' in result:
-                results += f"📋 Volum utilitzat: {result['used_volume']:,.0f} mm³\n"
+                results += f"📋 Espai ocupat (bounding boxes): {result['used_volume']:,.0f} mm³\n"
+                
+            if 'used_real_volume' in result:
+                results += f"📐 Volum STL real utilitzat: {result['used_real_volume']:,.0f} mm³\n"
                 
             method = result.get('method', 'unknown')
             results += f"🔧 Mètode: {method}\n"
+            
+            # Mostrar informació de la rotació òptima
+            if 'best_orientation' in result:
+                rotation = result['best_orientation']
+                results += f"🔄 Rotació òptima: {rotation[0]}°, {rotation[1]}°, {rotation[2]}°\n"
+                
+            if 'piece_dimensions' in result:
+                dims = result['piece_dimensions']
+                results += f"📐 Dimensions rotades: {dims[0]:.1f} × {dims[1]:.1f} × {dims[2]:.1f} mm\n"
             
             if 'bins' in result and result['bins']:
                 bin_info = result['bins'][0]
                 if 'items' in bin_info:
                     results += f"📍 Posicions calculades: {len(bin_info['items'])}\n"
+                    
+                    # Mostrar informació de la graella si està disponible
+                    first_item = bin_info['items'][0] if bin_info['items'] else None
+                    if first_item and 'bounds' in first_item:
+                        results += f"📋 Empaquetament intel·ligent amb geometria STL real\n"
                     
             results += f"\n✨ Optimització completada amb èxit!\n"
             
@@ -1237,7 +1476,9 @@ class PackAssistIntegratedApp:
         if result and not result.get("error"):
             summary += f"\n⚡ Empaquetament:\n"
             summary += f"   • Objectes que caben: {result.get('max_objects', 0):,}\n"
-            summary += f"   • Eficiència: {result.get('efficiency', 0):.1f}%\n"
+            summary += f"   • Eficiència pràctica: {result.get('efficiency', 0):.1f}%\n"
+            if 'real_efficiency' in result:
+                summary += f"   • Eficiència real STL: {result.get('real_efficiency', 0):.1f}%\n"
             summary += f"   • Caixa: {self.box_length.get()} × {self.box_width.get()} × {self.box_height.get()} mm\n"
             
         summary += f"\n✅ Procés completat amb èxit!\n"
@@ -1319,21 +1560,28 @@ class PackAssistIntegratedApp:
             messagebox.showerror("Error", f"No s'ha pogut visualitzar la malla:\n{e}")
             
     def visualize_3d(self):
-        """Visualitza els resultats de l'empaquetament en 3D amb peces STL reals"""
+        """Visualitza els resultats de l'empaquetament en 3D amb PyVista"""
+        print("🎮 ===== INICIANT VISUALITZACIÓ 3D (PYVISTA) =====")
+        
         if not self.optimization_results:
+            print("❌ ERROR: No hi ha optimization_results")
             messagebox.showwarning("Avís", "Primer has de calcular l'empaquetament")
             return
             
         try:
             import pyvista as pv
+            import numpy as np
+            import numpy as np
+            import traceback
             
-            # Crear visualitzador amb millor configuració
-            plotter = pv.Plotter(window_size=(1200, 800))
-            plotter.set_background('white')
+            print("🔍 Verificant dades de l'optimització...")
             
-            # Obtenir dades del resultat
+            # Verificar dades dels resultats
             bins_data = self.optimization_results.get('bins', [])
+            print(f"📋 Bins data trobat: {len(bins_data)} bins")
+            
             if not bins_data:
+                print("❌ ERROR: No hi ha dades de bins")
                 messagebox.showwarning("Avís", "No hi ha dades de visualització disponibles")
                 return
                 
@@ -1341,137 +1589,540 @@ class PackAssistIntegratedApp:
             items = bin_data.get('items', [])
             container_dims = bin_data.get('bin', {}).get('dimensions', [100, 100, 100])
             
-            # Dibuixar contenidor
-            container = pv.Cube(bounds=(0, container_dims[0], 0, container_dims[1], 0, container_dims[2]))
-            plotter.add_mesh(container, style='wireframe', color='gray', line_width=3, label='Contenidor')
+            print(f"📦 Contenidor: {container_dims[0]} × {container_dims[1]} × {container_dims[2]} mm")
+            print(f"📋 Items trobats: {len(items)}")
             
-            # Determinar quina malla usar per les peces
+            if len(items) == 0:
+                print("❌ ERROR: No hi ha items per visualitzar")
+                messagebox.showwarning("Avís", "No hi ha objectes per visualitzar")
+                return
+            
+            # Debug: mostrar primer item
+            if items:
+                first_item = items[0]
+                print(f"🔍 Primer item: {list(first_item.keys())}")
+                print(f"   - position: {first_item.get('position', 'MISSING')}")
+                print(f"   - rotation: {first_item.get('rotation', 'MISSING')}")
+                print(f"   - dimensions: {first_item.get('dimensions', 'MISSING')}")
+                print(f"   - stl_mesh: {'YES' if first_item.get('stl_mesh') else 'NO'}")
+            
+            # Crear plotter PyVista amb configuració optimitzada
+            print("🎨 Creant plotter PyVista...")
+            plotter = pv.Plotter(window_size=(1200, 900))
+            plotter.set_background('white')
+            
+            # Configurar il·luminació uniforme per colors consistents
+            plotter.enable_anti_aliasing()  # Anti-aliasing per millor qualitat
+            
+            # Configurar colors més distintius i uniformes
+            colors = [
+                '#DC143C',  # Crimson (vermell)
+                '#1E90FF',  # DodgerBlue (blau)
+                '#228B22',  # ForestGreen (verd)
+                '#FF8C00',  # DarkOrange (taronja)
+                '#9370DB',  # MediumPurple (lila)
+                '#D2691E',  # Chocolate (marró)
+                '#FF1493',  # DeepPink (rosa)
+                '#696969',  # DimGray (gris)
+                '#808000',  # Olive (oliva)
+                '#00CED1'   # DarkTurquoise (turquesa)
+            ]
+            
+            # Determinar quina malla usar
             mesh_to_show = self.simplified_mesh if (self.use_simplified.get() and self.simplified_mesh) else self.original_mesh
             
             if not mesh_to_show:
+                print("❌ ERROR: No hi ha malla carregada")
                 messagebox.showwarning("Avís", "No hi ha malla carregada per visualitzar")
                 return
             
-            # Convertir trimesh a pyvista
-            def trimesh_to_pyvista(tmesh):
-                """Converteix una malla trimesh a pyvista"""
-                try:
-                    # Crear array de cares amb comptador
-                    faces_with_count = []
-                    for face in tmesh.faces:
-                        faces_with_count.extend([3, face[0], face[1], face[2]])
-                    
-                    return pv.PolyData(tmesh.vertices, faces_with_count)
-                except Exception as e:
-                    print(f"Error convertint malla: {e}")
-                    return None
+            print(f"🔧 Usant malla: {'simplificada' if self.simplified_mesh and self.use_simplified.get() else 'original'}")
             
-            # Convertir la malla STL a pyvista
-            base_pv_mesh = trimesh_to_pyvista(mesh_to_show)
+            # Dibuixar contenidor com a wireframe
+            print("📦 Dibuixant contenidor...")
+            self._draw_container_wireframe_pyvista(plotter, container_dims)
             
-            if base_pv_mesh is None:
-                messagebox.showerror("Error", "No s'ha pogut convertir la malla per visualització")
-                return
+            # Processem cada objecte
+            print(f"🔧 Processant {len(items)} objectes...")
+            pieces_added = 0
             
-            # Colors per objectes (més variats)
-            colors = ['lightcoral', 'lightblue', 'lightgreen', 'orange', 'plum', 
-                     'khaki', 'pink', 'lightcyan', 'wheat', 'lightgray']
-            
-            # Dibuixar cada peça STL real en la seva posició
             for i, item in enumerate(items):
+                print(f"\n🔸 === PROCESSANT OBJECTE {i+1}/{len(items)} ===")
                 try:
+                    # Convertir numpy arrays a llistes Python normals
                     pos = item.get('position', [0, 0, 0])
+                    if hasattr(pos, 'tolist'):
+                        pos = pos.tolist()
+                    elif hasattr(pos[0], 'item'):
+                        pos = [float(p.item()) if hasattr(p, 'item') else float(p) for p in pos]
+                    else:
+                        pos = [float(p) for p in pos]
+                    
                     rotation = item.get('rotation', [0, 0, 0])
+                    if hasattr(rotation, 'tolist'):
+                        rotation = rotation.tolist()
+                    elif hasattr(rotation[0], 'item'):
+                        rotation = [float(r.item()) if hasattr(r, 'item') else float(r) for r in rotation]
+                    else:
+                        rotation = [float(r) for r in rotation]
                     
-                    # Crear còpia de la malla base
-                    piece_mesh = base_pv_mesh.copy()
+                    dimensions = item.get('dimensions', [10, 10, 10])
+                    if hasattr(dimensions, 'tolist'):
+                        dimensions = dimensions.tolist()
+                    elif hasattr(dimensions[0], 'item'):
+                        dimensions = [float(d.item()) if hasattr(d, 'item') else float(d) for d in dimensions]
+                    else:
+                        dimensions = [float(d) for d in dimensions]
                     
-                    # Aplicar rotació si cal
-                    if any(r != 0 for r in rotation):
-                        # Convertir rotacions de graus a radians si cal
-                        rx, ry, rz = [np.radians(r) if abs(r) > 2*np.pi else r for r in rotation]
-                        
-                        # Aplicar rotacions
-                        if rx != 0:
-                            piece_mesh = piece_mesh.rotate_x(np.degrees(rx))
-                        if ry != 0:
-                            piece_mesh = piece_mesh.rotate_y(np.degrees(ry))
-                        if rz != 0:
-                            piece_mesh = piece_mesh.rotate_z(np.degrees(rz))
+                    print(f"   📍 Posició neta: {pos}")
+                    print(f"   📐 Dimensions netes: {dimensions}")
                     
-                    # Aplicar translació a la posició correcta
-                    piece_mesh.translate(pos, inplace=True)
+                    # CANVI: Mostrar STL real amb PyVista per millor rendiment
+                    stl_mesh = item.get('stl_mesh')
+                    if stl_mesh and hasattr(stl_mesh, 'vertices'):
+                        print(f"   🎨 Usant visualització STL real amb PyVista...")
+                        # Aplicar rotació a la malla si cal
+                        rotated_mesh = self._apply_rotation_to_mesh(stl_mesh, rotation)
+                        # Usar posició central per STL
+                        self._draw_stl_mesh_pyvista(plotter, rotated_mesh, pos, colors[i % len(colors)], i+1)
+                    else:
+                        # Fallback: usar cub si no hi ha malla STL
+                        print(f"   🔲 Fallback: usant visualització amb cub rectangular...")
+                        corner_pos = [
+                            pos[0] - dimensions[0]/2,  # x: centre - amplada/2 = cantonada esquerra
+                            pos[1] - dimensions[1]/2,  # y: centre - altura/2 = cantonada frontal  
+                            pos[2] - dimensions[2]/2   # z: centre - profunditat/2 = cantonada inferior
+                        ]
+                        corner_pos = [max(0, c) for c in corner_pos]
+                        self._draw_cube_pyvista(plotter, corner_pos, dimensions, colors[i % len(colors)], i+1)
                     
-                    # Afegir la peça amb color únic
-                    color = colors[i % len(colors)]
-                    plotter.add_mesh(
-                        piece_mesh, 
-                        color=color, 
-                        opacity=0.8, 
-                        label=f'Peça STL {i+1}',
-                        show_edges=True,
-                        edge_color='darkgray',
-                        line_width=0.5
-                    )
+                    pieces_added += 1
+                    print(f"   ✅ Objecte {i+1} afegit correctament")
                     
                 except Exception as e:
-                    print(f"Error afegint peça {i}: {e}")
-                    # Fallback: crear un cub si la peça STL falla
-                    dims = item.get('dimensions', [10, 10, 10])
-                    fallback_mesh = pv.Cube(bounds=(
-                        pos[0], pos[0] + dims[0],
-                        pos[1], pos[1] + dims[1], 
-                        pos[2], pos[2] + dims[2]
-                    ))
-                    color = colors[i % len(colors)]
-                    plotter.add_mesh(fallback_mesh, color=color, opacity=0.6, label=f'Peça {i+1} (aprox)')
-                
-            # Configurar vista i controls
+                    print(f"   ❌ ERROR processant objecte {i+1}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    continue
+            
+            print(f"\n📊 RESUM: {pieces_added}/{len(items)} objectes afegits correctament")
+            
+            # Configurar vista i títol
+            print("🎨 Configurant vista...")
+            max_objects = self.optimization_results.get('max_objects', 0)
+            efficiency = self.optimization_results.get('efficiency', 0)
+            real_efficiency = self.optimization_results.get('real_efficiency', 0)
+            
+            title = f"Empaquetament: {max_objects} objectes - "
+            title += f"Eficiència: {efficiency:.1f}% (pràctica) | {real_efficiency:.1f}% (volum STL)"
+            
+            # Configurar vista isomètrica
             plotter.camera_position = 'iso'
             plotter.show_grid()
             plotter.add_axes()
             
-            # Títol i informació detallada
-            max_objects = self.optimization_results.get('max_objects', 0)
-            efficiency = self.optimization_results.get('efficiency', 0)
-            mesh_type = "optimitzada" if (self.use_simplified.get() and self.simplified_mesh) else "original"
+            # Afegir títol
+            plotter.add_text(title, position='upper_edge', font_size=12, color='black')
             
-            title = f"Empaquetament: {max_objects} peces STL {mesh_type} ({efficiency:.1f}% eficiència)"
-            plotter.add_text(title, position='upper_edge', font_size=14, color='black')
+            print("🚀 Mostrant finestra PyVista...")
             
-            # Info de la caixa
-            box_info = f"Caixa: {container_dims[0]:.0f}×{container_dims[1]:.0f}×{container_dims[2]:.0f} mm"
-            plotter.add_text(box_info, position='lower_left', font_size=10, color='gray')
+            # Mostrar la visualització
+            plotter.show(interactive=True, auto_close=False)
             
-            # Info de la malla
-            if mesh_to_show:
-                mesh_info = f"Malla {mesh_type}: {len(mesh_to_show.vertices):,} vèrtexs, {len(mesh_to_show.faces):,} cares"
-                plotter.add_text(mesh_info, position='lower_right', font_size=10, color='gray')
+            print("✅ Visualització 3D completada - finestra hauria de ser visible!")
             
-            # Afegir llegenda si hi ha objectes
-            if items and len(items) <= 20:  # Només si no hi ha massa objectes
-                plotter.add_legend(size=(0.2, 0.3))
-            
-            # Configurar controls de càmera
-            plotter.enable_zoom_style()
-            plotter.enable_trackball_style()
-            
-            # Mostrar amb millor qualitat
-            plotter.show(
-                interactive=True, 
-                auto_close=False,
-                screenshot=False
-            )
-            
-        except ImportError:
-            messagebox.showerror("Error", "PyVista no està instal·lat.\nInstal·la'l amb: pip install pyvista")
+        except ImportError as e:
+            print("❌ ERROR: PyVista no està disponible")
+            messagebox.showerror("Error", f"PyVista no està instal·lat:\n{e}")
         except Exception as e:
-            error_msg = f"No s'ha pogut crear la visualització 3D:\n{e}\n\nRevisa que la malla STL sigui vàlida."
-            messagebox.showerror("Error", error_msg)
-            print(f"Error detallat en visualització: {e}")
+            error_msg = f"Error crític en visualització 3D: {e}"
+            print(f"❌ {error_msg}")
             import traceback
             traceback.print_exc()
+            messagebox.showerror("Error", f"No s'ha pogut crear la visualització 3D:\n{e}")
+    
+    def _draw_container_wireframe_pyvista(self, plotter, dims):
+        """Dibuixa el contenidor com a wireframe amb PyVista"""
+        try:
+            import pyvista as pv
+            import numpy as np
             
+            # Crear les vèrtexs del contenidor
+            vertices = np.array([
+                [0, 0, 0], [dims[0], 0, 0], [dims[0], dims[1], 0], [0, dims[1], 0],  # Base inferior
+                [0, 0, dims[2]], [dims[0], 0, dims[2]], [dims[0], dims[1], dims[2]], [0, dims[1], dims[2]]  # Base superior
+            ])
+            
+            # Definir les arestes del contenidor
+            edges = [
+                # Base inferior
+                [0, 1], [1, 2], [2, 3], [3, 0],
+                # Base superior  
+                [4, 5], [5, 6], [6, 7], [7, 4],
+                # Arestes verticals
+                [0, 4], [1, 5], [2, 6], [3, 7]
+            ]
+            
+            # Crear línies per cada aresta
+            for edge in edges:
+                line_points = vertices[edge]
+                line = pv.Line(line_points[0], line_points[1])
+                plotter.add_mesh(line, color='black', line_width=3, opacity=0.8)
+                
+            print("   ✅ Contenidor wireframe PyVista dibuixat")
+            
+        except Exception as e:
+            print(f"   ❌ Error dibuixant contenidor PyVista: {e}")
+    
+    def _draw_container_wireframe(self, ax, dims):
+        """Dibuixa el contenidor com a wireframe"""
+        try:
+            import numpy as np
+            
+            # Definir les vèrtexs del contenidor
+            vertices = [
+                [0, 0, 0], [dims[0], 0, 0], [dims[0], dims[1], 0], [0, dims[1], 0],  # Base inferior
+                [0, 0, dims[2]], [dims[0], 0, dims[2]], [dims[0], dims[1], dims[2]], [0, dims[1], dims[2]]  # Base superior
+            ]
+            
+            # Definir les arestes del contenidor
+            edges = [
+                # Base inferior
+                [0, 1], [1, 2], [2, 3], [3, 0],
+                # Base superior  
+                [4, 5], [5, 6], [6, 7], [7, 4],
+                # Arestes verticals
+                [0, 4], [1, 5], [2, 6], [3, 7]
+            ]
+            
+            # Dibuixar cada aresta
+            for edge in edges:
+                points = np.array([vertices[edge[0]], vertices[edge[1]]])
+                ax.plot3D(points[:, 0], points[:, 1], points[:, 2], 'k-', linewidth=2, alpha=0.6)
+                
+            print("   ✅ Contenidor wireframe dibuixat")
+            
+        except Exception as e:
+            print(f"   ❌ Error dibuixant contenidor: {e}")
+    
+    def _draw_stl_mesh_matplotlib(self, ax, mesh, position, color, obj_id):
+        """Dibuixa una malla STL amb matplotlib optimitzada"""
+        try:
+            import numpy as np
+            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+            
+            # Convertir posició a array numpy normal
+            position = np.array([float(p) for p in position])
+            
+            # Obtenir vèrtexs i cares de la malla
+            vertices = mesh.vertices
+            faces = mesh.faces
+            
+            print(f"      🔧 Malla STL: {len(vertices)} vèrtexs, {len(faces)} cares")
+            
+            # La malla ja està centrada a l'origen després de _apply_rotation_to_mesh
+            # Només cal aplicar la translació al centre desitjat
+            mesh_center = np.mean(vertices, axis=0)  # Centre actual de la malla
+            translation = position - mesh_center  # Vector per moure al centre desitjat
+            
+            # Aplicar translació als vèrtexs
+            translated_vertices = vertices + translation
+            
+            print(f"      📍 Centre malla: {mesh_center}, Posició objectiu: {position}")
+            print(f"      🔄 Translació aplicada: {translation}")
+            
+            # Optimització: Reduir cares per visualització fluida
+            max_faces_to_show = 300  # Augmentat lleugerament per millor qualitat
+            if len(faces) > max_faces_to_show:
+                step = max(1, len(faces) // max_faces_to_show)
+                selected_faces = faces[::step]
+                print(f"      📉 Mostrant {len(selected_faces)}/{len(faces)} cares per rendiment")
+            else:
+                selected_faces = faces
+            
+            # Crear polígons per cada cara seleccionada
+            polygons = []
+            valid_polygons = 0
+            
+            for face in selected_faces:
+                try:
+                    # Verificar que la cara té 3 vèrtexs vàlids
+                    if len(face) == 3 and all(0 <= idx < len(translated_vertices) for idx in face):
+                        polygon = translated_vertices[face]
+                        # Verificar que el polígon no té NaN o infinits
+                        if not np.any(np.isnan(polygon)) and not np.any(np.isinf(polygon)):
+                            polygons.append(polygon)
+                            valid_polygons += 1
+                except Exception as face_error:
+                    print(f"        ⚠️ Error en cara: {face_error}")
+                    continue
+            
+            if valid_polygons == 0:
+                print(f"      ❌ No s'han pogut processar cares vàlides, usant cub")
+                # Fallback: dibuixar com a cub
+                bounds = mesh.bounds if hasattr(mesh, 'bounds') else [[0,0,0], [10,10,10]]
+                dims = bounds[1] - bounds[0]
+                # Convertir posició central a cantonada pel cub
+                corner_pos = position - dims/2
+                self._draw_cube_matplotlib(ax, corner_pos.tolist(), dims.tolist(), color, obj_id)
+                return
+            
+            print(f"      📊 Processades {valid_polygons} cares vàlides")
+            
+            # Crear col·lecció de polígons amb configuració millorada
+            poly3d = Poly3DCollection(
+                polygons, 
+                alpha=0.85,  # Lleugerament més opac per millor visibilitat
+                facecolor=color, 
+                edgecolor='darkgray', 
+                linewidths=0.1  # Línies més visibles
+            )
+            ax.add_collection3d(poly3d)
+            
+            # Afegir etiqueta en el centre de l'objecte
+            ax.text(position[0], position[1], position[2], f'STL {obj_id}', 
+                   fontsize=10, color='white', weight='bold',
+                   bbox=dict(boxstyle="round,pad=0.3", facecolor='black', alpha=0.7))
+            
+            print(f"      ✅ Malla STL dibuixada amb {valid_polygons} cares")
+            
+        except Exception as e:
+            print(f"      ❌ Error dibuixant malla STL: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback: dibuixar com a cub
+            try:
+                bounds = mesh.bounds if hasattr(mesh, 'bounds') else [[0,0,0], [10,10,10]]
+                dims = bounds[1] - bounds[0]
+                # Convertir posició central a cantonada pel cub
+                corner_pos = position - dims/2 if hasattr(position, '__len__') else [position-5, position-5, position-5]
+                position_list = corner_pos.tolist() if hasattr(corner_pos, 'tolist') else [float(corner_pos[0]), float(corner_pos[1]), float(corner_pos[2])]
+                dims_list = [float(d) for d in dims] if hasattr(dims, '__iter__') else [10, 10, 10]
+                self._draw_cube_matplotlib(ax, position_list, dims_list, color, obj_id)
+            except Exception as fallback_error:
+                print(f"      ❌ Error en fallback cub: {fallback_error}")
+    
+    def _draw_stl_mesh_pyvista(self, plotter, mesh, position, color, obj_id):
+        """Dibuixa una malla STL amb PyVista per millor rendiment"""
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            # Convertir posició a array numpy normal
+            position = np.array([float(p) for p in position])
+            
+            # Obtenir vèrtexs i cares de la malla
+            vertices = mesh.vertices
+            faces = mesh.faces
+            
+            print(f"      🔧 Malla STL: {len(vertices)} vèrtexs, {len(faces)} cares")
+            
+            # La malla ja està centrada a l'origen després de _apply_rotation_to_mesh
+            # Només cal aplicar la translació al centre desitjat
+            mesh_center = np.mean(vertices, axis=0)  # Centre actual de la malla
+            translation = position - mesh_center  # Vector per moure al centre desitjat
+            
+            # Aplicar translació als vèrtexs
+            translated_vertices = vertices + translation
+            
+            print(f"      📍 Centre malla: {mesh_center}, Posició objectiu: {position}")
+            print(f"      🔄 Translació aplicada: {translation}")
+            
+            # Crear malla PyVista
+            # PyVista necessita faces amb format [n_points, p0, p1, p2, ...]
+            faces_with_count = []
+            for face in faces:
+                if len(face) == 3:  # Triangles
+                    faces_with_count.extend([3, face[0], face[1], face[2]])
+                else:
+                    print(f"        ⚠️ Cara no triangular ignorada: {len(face)} vèrtexs")
+            
+            if len(faces_with_count) == 0:
+                print(f"      ❌ No hi ha cares vàlides, usant cub")
+                bounds = mesh.bounds if hasattr(mesh, 'bounds') else [[0,0,0], [10,10,10]]
+                dims = bounds[1] - bounds[0]
+                corner_pos = position - dims/2
+                self._draw_cube_pyvista(plotter, corner_pos.tolist(), dims.tolist(), color, obj_id)
+                return
+            
+            # Crear PolyData de PyVista
+            pv_mesh = pv.PolyData(translated_vertices, faces_with_count)
+            
+            # Afegir malla al plotter amb color uniforme
+            plotter.add_mesh(
+                pv_mesh, 
+                color=color,
+                opacity=0.85,
+                show_edges=True,
+                edge_color='darkgray',
+                line_width=0.5,
+                smooth_shading=False,  # Desactivar suavitzat per colors uniformes
+                lighting=True,         # Mantenir il·luminació
+                ambient=0.3,          # Il·luminació ambient
+                diffuse=0.7,          # Il·luminació difusa
+                specular=0.1,         # Il·luminació especular mínima
+                scalars=None,         # No usar escalars per evitar degradats
+                cmap=None             # No usar mapa de colors
+            )
+            
+            # Afegir etiqueta en el centre de l'objecte
+            plotter.add_point_labels(
+                [position], 
+                [f'STL {obj_id}'], 
+                point_size=0,  # No mostrar el punt, només l'etiqueta
+                font_size=12,
+                text_color='white',
+                shape_color='black',
+                shape_opacity=0.7,
+                pickable=False
+            )
+            
+            print(f"      ✅ Malla STL PyVista dibuixada amb {len(faces)} cares")
+            
+        except Exception as e:
+            print(f"      ❌ Error dibuixant malla STL PyVista: {e}")
+            import traceback
+            traceback.print_exc()
+            # Fallback: dibuixar com a cub
+            try:
+                bounds = mesh.bounds if hasattr(mesh, 'bounds') else [[0,0,0], [10,10,10]]
+                dims = bounds[1] - bounds[0]
+                corner_pos = position - dims/2 if hasattr(position, '__len__') else [position-5, position-5, position-5]
+                position_list = corner_pos.tolist() if hasattr(corner_pos, 'tolist') else [float(corner_pos[0]), float(corner_pos[1]), float(corner_pos[2])]
+                dims_list = [float(d) for d in dims] if hasattr(dims, '__iter__') else [10, 10, 10]
+                self._draw_cube_pyvista(plotter, position_list, dims_list, color, obj_id)
+            except Exception as fallback_error:
+                print(f"      ❌ Error en fallback cub PyVista: {fallback_error}")
+    
+    def _draw_cube_pyvista(self, plotter, position, dimensions, color, obj_id):
+        """Dibuixa un cub amb PyVista posicionat per cantonades"""
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            # Convertir tots els valors a float Python normals
+            position = [float(p) for p in position]
+            dimensions = [float(d) for d in dimensions]
+            
+            print(f"      🔲 Creant cub PyVista: cantonada={position}, dims={dimensions}")
+            
+            # Crear cub centrat a l'origen
+            cube = pv.Cube()
+            
+            # Escalar el cub a les dimensions desitjades
+            cube.scale([dimensions[0], dimensions[1], dimensions[2]], inplace=True)
+            
+            # Calcular el centre del cub basant-se en la cantonada i dimensions
+            center = [
+                position[0] + dimensions[0]/2,
+                position[1] + dimensions[1]/2,
+                position[2] + dimensions[2]/2
+            ]
+            
+            # Trasladar el cub al centre calculat
+            cube.translate(center, inplace=True)
+            
+            # Afegir el cub al plotter amb color uniforme
+            plotter.add_mesh(
+                cube,
+                color=color,
+                opacity=0.8,
+                show_edges=True,
+                edge_color='black',
+                line_width=2,
+                smooth_shading=False,  # Desactivar suavitzat per colors uniformes
+                lighting=True,         # Mantenir il·luminació
+                ambient=0.3,          # Il·luminació ambient
+                diffuse=0.7,          # Il·luminació difusa
+                specular=0.1,         # Il·luminació especular mínima
+                scalars=None,         # No usar escalars
+                cmap=None             # No usar mapa de colors
+            )
+            
+            # Afegir etiqueta en el centre del cub
+            plotter.add_point_labels(
+                [center], 
+                [f'Obj {obj_id}'], 
+                point_size=0,
+                font_size=12,
+                text_color='white',
+                shape_color=color,
+                shape_opacity=0.8,
+                pickable=False
+            )
+            
+            print(f"      ✅ Cub PyVista posicionat correctament: centre {center}")
+            
+        except Exception as e:
+            print(f"      ❌ Error dibuixant cub PyVista: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _draw_cube_matplotlib(self, ax, position, dimensions, color, obj_id):
+        """Dibuixa un cub posicionat per cantonades (no centrat) per evitar que surti fora"""
+        try:
+            import numpy as np
+            from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+            
+            # Convertir tots els valors a float Python normals
+            position = [float(p) for p in position]
+            dimensions = [float(d) for d in dimensions]
+            
+            print(f"      🔲 Creant cub: cantonada={position}, dims={dimensions}")
+            
+            # CANVI IMPORTANT: position és la cantonada inferior esquerra, NO el centre
+            # Això assegura que l'objecte està dins del contenidor
+            corner = np.array(position)
+            dims = np.array(dimensions)
+            
+            # Calcular les 8 vèrtexs del cub des de la cantonada
+            vertices = [
+                # Base inferior (z = corner[2])
+                corner,                                           # (x, y, z)
+                corner + [dims[0], 0, 0],                        # (x+w, y, z)
+                corner + [dims[0], dims[1], 0],                  # (x+w, y+h, z)
+                corner + [0, dims[1], 0],                        # (x, y+h, z)
+                # Base superior (z = corner[2] + dims[2])
+                corner + [0, 0, dims[2]],                        # (x, y, z+d)
+                corner + [dims[0], 0, dims[2]],                  # (x+w, y, z+d)
+                corner + [dims[0], dims[1], dims[2]],            # (x+w, y+h, z+d)
+                corner + [0, dims[1], dims[2]]                   # (x, y+h, z+d)
+            ]
+            
+            # Definir les 6 cares del cub
+            faces = [
+                [vertices[0], vertices[1], vertices[2], vertices[3]],  # Base inferior
+                [vertices[4], vertices[5], vertices[6], vertices[7]],  # Base superior
+                [vertices[0], vertices[1], vertices[5], vertices[4]],  # Cara frontal
+                [vertices[2], vertices[3], vertices[7], vertices[6]],  # Cara posterior
+                [vertices[1], vertices[2], vertices[6], vertices[5]],  # Cara dreta
+                [vertices[4], vertices[7], vertices[3], vertices[0]]   # Cara esquerra
+            ]
+            
+            # Crear col·lecció de polígons
+            poly3d = Poly3DCollection(
+                faces, 
+                alpha=0.8, 
+                facecolor=color, 
+                edgecolor='black', 
+                linewidths=1.5
+            )
+            ax.add_collection3d(poly3d)
+            
+            # Calcular centre per l'etiqueta
+            center = corner + dims/2
+            
+            # Afegir etiqueta en el centre del cub
+            ax.text(center[0], center[1], center[2], f'Obj {obj_id}', 
+                   fontsize=10, color='white', weight='bold',
+                   bbox=dict(boxstyle="round,pad=0.3", facecolor=color, alpha=0.8))
+            
+            print(f"      ✅ Cub posicionat correctament: cantonada {position} + dimensions {dimensions}")
+            
+        except Exception as e:
+            print(f"      ❌ Error dibuixant cub: {e}")
+            import traceback
+            traceback.print_exc()
     def export_results(self):
         """Exporta els resultats a un fitxer"""
         if not self.optimization_results:
