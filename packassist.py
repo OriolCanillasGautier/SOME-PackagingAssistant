@@ -12,6 +12,8 @@ from tkinter import ttk, filedialog, messagebox
 import threading
 from pathlib import Path
 import numpy as np
+from datetime import datetime
+import json
 
 # Afegir paths necessaris
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -88,6 +90,24 @@ class PackAssistOriginalGUI:
         self.enable_rotations = tk.BooleanVar(value=True)
         self.enable_intelligent_spacing = tk.BooleanVar(value=True)
         self.optimization_method = tk.StringVar(value="intelligent")
+        
+        # Variables per configuració de visualització (persistents durant l'execució)
+        self.viz_show_wireframe = tk.BooleanVar(value=True)
+        self.viz_show_labels = tk.BooleanVar(value=True)  
+        self.viz_use_gradient = tk.BooleanVar(value=False)
+        self.viz_auto_screenshot = tk.BooleanVar(value=False)
+        self.viz_auto_stl_export = tk.BooleanVar(value=False)
+        self.viz_container_color = tk.StringVar(value="black")
+        self.viz_piece_opacity = tk.DoubleVar(value=1.0)  # Colors sòlids per defecte
+        self.viz_background_color = tk.StringVar(value="white")
+        # Variables addicionals per opcions del diàleg
+        self.viz_show_axes = tk.BooleanVar(value=True)
+        self.viz_show_grid = tk.BooleanVar(value=True)
+        self.viz_show_edges = tk.BooleanVar(value=False)
+        self.viz_window_size = tk.StringVar(value="1200x900")
+        
+        # Carregar configuració des del fitxer JSON
+        self.load_config_from_json()
         
     def setup_components(self):
         """Configura els components (adaptat per usar mòduls nous)"""
@@ -588,7 +608,12 @@ class PackAssistOriginalGUI:
         # Exportació (millorada)
         self.export_btn = ttk.Button(buttons_row1, text="📤 Exportar Resultats", 
                                     command=self.export_results, state='disabled')
-        self.export_btn.pack(side=tk.LEFT)
+        self.export_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # Exportació amb screenshot (nou)
+        self.export_visual_btn = ttk.Button(buttons_row1, text="📸 Exportar amb Screenshot", 
+                                           command=self.export_with_visualization, state='disabled')
+        self.export_visual_btn.pack(side=tk.LEFT)
         
         # Informació dels resultats
         info_frame = ttk.LabelFrame(main_frame, text="Informació dels Resultats", padding="15")
@@ -720,15 +745,26 @@ class PackAssistOriginalGUI:
     # Mètodes de visualització (adaptats per usar els nous mòduls)
     
     def visualize_3d_direct(self):
-        """Visualització 3D directa amb els nous mòduls"""
+        """Visualització 3D directa amb configuració JSON (MESTRA)"""
         if not self.optimization_results:
             messagebox.showwarning("Avís", "Primer executa l'optimització")
             return
         
+        # SEMPRE usar la configuració JSON com a MESTRA
+        options = self.get_config_as_options()
+        
+        print("🎯 Visualització directa - Configuració JSON MESTRA:")
+        print(f"   Wireframe: {options['show_wireframe']}")
+        print(f"   Etiquetes: {options['show_labels']}")
+        print(f"   Color caixa: {options['container_color']}")
+        print(f"   Background: {options['background_color']}")
+        print(f"   Esquema colors: {options['color_scheme']}")
+        print(f"   Walls enabled: {options.get('container_walls_enabled', True)}")
+        print(f"   Top open: {options.get('container_top_open', True)}")
+        
         if MODULES_AVAILABLE and hasattr(self, 'visualizer'):
-            # Usar el nou visualitzador
-            mesh_to_use = self.simplified_mesh if self.simplified_mesh else self.original_mesh
-            self.visualizer.show_direct_3d(self.optimization_results, mesh_to_use)
+            # Usar PyVista amb configuració JSON
+            self._show_3d_results_with_pyvista_options(options)
         else:
             # Fallback al mètode tradicional
             self._show_3d_visualization_traditional()
@@ -740,13 +776,18 @@ class PackAssistOriginalGUI:
             return
         
         if MODULES_AVAILABLE and hasattr(self, 'visualizer'):
-            # Usar el nou diàleg
+            # Usar el nou diàleg amb callback millorat
             def callback(action, options):
                 mesh_to_use = self.simplified_mesh if self.simplified_mesh else self.original_mesh
                 if action == 'visualize':
-                    self.visualizer.show_3d_with_options(self.optimization_results, mesh_to_use, **options)
+                    # Usar PyVista amb opcions personalitzades
+                    self._show_3d_results_with_pyvista_options(options)
                 elif action == 'export':
+                    # Exportació automàtica tradicional
                     self.export_results()
+                elif action == 'export_manual':
+                    # Exportació manual amb configuració de visualització
+                    self._export_with_visualization_config(options)
             
             dialog = VisualizationDialog(self.root, self.optimization_results, callback)
             dialog.show()
@@ -754,23 +795,499 @@ class PackAssistOriginalGUI:
             # Usar mètode tradicional
             self.visualize_3d_with_options()
     
+    def _export_with_visualization_config(self, options):
+        """Exporta amb configuració de visualització actual"""
+        print(f"🎯 Exportació manual amb opcions: {options}")
+        
+        if not self.optimization_results:
+            messagebox.showwarning("Avís", "Primer executa l'optimització")
+            return
+            
+        # Configurar visualització abans d'exportar
+        self._setup_visualization_for_export(options)
+        
+        # Determinar tipus d'exportació
+        if options.get('export_screenshot'):
+            self._export_screenshot_with_config(options)
+        elif options.get('export_json'):
+            self._export_json_with_config(options)
+        elif options.get('export_csv'):
+            self._export_csv_with_config(options)
+        else:
+            print("⚠️ Tipus d'exportació no especificat")
+    
+    def _setup_visualization_for_export(self, options):
+        """Configura les variables de visualització segons les opcions"""
+        # Actualitzar variables persistents amb la configuració actual
+        self.viz_show_wireframe.set(options.get('show_wireframe', False))
+        self.viz_show_labels.set(options.get('show_labels', False))
+        self.viz_show_axes.set(options.get('show_axes', True))
+        self.viz_show_grid.set(options.get('show_grid', False))
+        self.viz_show_edges.set(options.get('show_edges', False))
+        self.viz_container_color.set(options.get('container_color', 'green'))
+        self.viz_piece_opacity.set(options.get('piece_opacity', 0.8))
+        self.viz_background_color.set(options.get('background_color', 'white'))
+        self.viz_window_size.set(options.get('window_size', '1024x768'))
+        print(f"✅ Variables configurades per exportació")
+    
+    def _export_screenshot_with_config(self, options):
+        """Exporta screenshot amb configuració"""
+        from tkinter import filedialog
+        
+        # Seleccionar fitxer de destinació
+        filename = filedialog.asksaveasfilename(
+            title="Exportar Imatge 3D",
+            defaultextension=".png",
+            filetypes=[("PNG files", "*.png"), ("JPG files", "*.jpg"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                # Crear visualització temporal i capturar
+                self._create_and_export_screenshot(filename, options)
+                messagebox.showinfo("Èxit", f"Imatge exportada a:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error exportant imatge:\n{str(e)}")
+    
+    def _export_json_with_config(self, options):
+        """Exporta JSON amb configuració"""
+        from tkinter import filedialog
+        import json
+        from datetime import datetime
+        
+        # Seleccionar fitxer de destinació
+        filename = filedialog.asksaveasfilename(
+            title="Exportar Resultats JSON",
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                # Crear estructura d'exportació amb configuració
+                export_data = {
+                    'timestamp': datetime.now().isoformat(),
+                    'visualization_config': options,
+                    'optimization_results': self.optimization_results,
+                    'metadata': {
+                        'app_version': 'PackAssist v2.0',
+                        'export_type': 'manual_with_visualization'
+                    }
+                }
+                
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(export_data, f, indent=2, ensure_ascii=False)
+                
+                messagebox.showinfo("Èxit", f"JSON exportat a:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error exportant JSON:\n{str(e)}")
+    
+    def _export_csv_with_config(self, options):
+        """Exporta CSV amb configuració"""
+        from tkinter import filedialog
+        import csv
+        
+        # Seleccionar fitxer de destinació
+        filename = filedialog.asksaveasfilename(
+            title="Exportar Resultats CSV",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        
+        if filename:
+            try:
+                positions = self.optimization_results.get('positions', [])
+                
+                with open(filename, 'w', newline='', encoding='utf-8') as f:
+                    writer = csv.writer(f)
+                    
+                    # Headers
+                    writer.writerow(['Peça', 'X', 'Y', 'Z', 'Rotació', 'Dimensió_X', 'Dimensió_Y', 'Dimensió_Z'])
+                    
+                    # Dades
+                    for i, pos in enumerate(positions):
+                        item = pos.get('item', {})
+                        writer.writerow([
+                            item.get('name', f'Peça_{i+1}'),
+                            pos.get('position', [0, 0, 0])[0],
+                            pos.get('position', [0, 0, 0])[1], 
+                            pos.get('position', [0, 0, 0])[2],
+                            pos.get('rotation_type', 0),
+                            item.get('width', 0),
+                            item.get('height', 0),
+                            item.get('depth', 0)
+                        ])
+                
+                messagebox.showinfo("Èxit", f"CSV exportat a:\n{filename}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error exportant CSV:\n{str(e)}")
+
+    def export_with_visualization(self):
+        """Exporta amb screenshot automàtic usant configuració persistent"""
+        if not self.optimization_results:
+            messagebox.showwarning("Avís", "Primer executa l'optimització")
+            return
+        
+        # Crear opcions basades en les variables persistents
+        options = {
+            'show_wireframe': self.viz_show_wireframe.get() if hasattr(self, 'viz_show_wireframe') else True,
+            'show_labels': self.viz_show_labels.get() if hasattr(self, 'viz_show_labels') else True,
+            'show_axes': self.viz_show_axes.get() if hasattr(self, 'viz_show_axes') else True,
+            'show_grid': self.viz_show_grid.get() if hasattr(self, 'viz_show_grid') else True,
+            'show_edges': self.viz_show_edges.get() if hasattr(self, 'viz_show_edges') else False,
+            'color_scheme': 'gradient' if (hasattr(self, 'viz_use_gradient') and self.viz_use_gradient.get()) else 'solid',
+            'use_gradient': self.viz_use_gradient.get() if hasattr(self, 'viz_use_gradient') else False,
+            'container_color': self.viz_container_color.get() if hasattr(self, 'viz_container_color') else 'black',
+            'piece_opacity': self.viz_piece_opacity.get() if hasattr(self, 'viz_piece_opacity') else 1.0,
+            'background_color': self.viz_background_color.get() if hasattr(self, 'viz_background_color') else 'white',
+            'window_size': self.viz_window_size.get() if hasattr(self, 'viz_window_size') else '1200x900',
+            'auto_screenshot': True,  # FORÇAR screenshot
+            'auto_stl_export': self.viz_auto_stl_export.get() if hasattr(self, 'viz_auto_stl_export') else False,
+            'auto_json_export': True,  # Exportar també JSON
+            'auto_csv_export': True   # Exportar també CSV
+        }
+        
+        print("📸 Exportació amb visualització - Opcions:")
+        print(f"   Screenshot: {options['auto_screenshot']}")
+        print(f"   Color caixa: {options['container_color']}")
+        print(f"   Background: {options['background_color']}")
+        print(f"   Esquema colors: {options['color_scheme']}")
+        
+        # Usar la visualització amb exportació automàtica
+        self._show_3d_results_with_pyvista_options(options)
+
     def export_results(self):
         """Exporta resultats (millorat amb nous mòduls)"""
         if not self.optimization_results:
             messagebox.showwarning("Avís", "Primer executa l'optimització")
             return
         
-        if MODULES_AVAILABLE and hasattr(self, 'exporter'):
-            # Usar el nou sistema d'exportació
-            def callback(options):
-                self._perform_export_new(options)
-            
-            dialog = ExportDialog(self.root, self.optimization_results, callback)
-            dialog.show()
-        else:
-            # Usar mètode tradicional 
-            self._perform_export_traditional()
+        # Crear un diàleg senzill d'exportació
+        export_window = tk.Toplevel(self.root)
+        export_window.title("📤 Exportar Resultats")
+        export_window.geometry("400x300")
+        export_window.transient(self.root)
+        export_window.grab_set()
+        
+        # Centrar finestra
+        export_window.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + 100,
+            self.root.winfo_rooty() + 100
+        ))
+        
+        # Frame principal
+        main_frame = ttk.Frame(export_window, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(main_frame, text="📤 Exportar Resultats", 
+                 font=('Arial', 12, 'bold')).pack(pady=(0, 15))
+        
+        # Opcions d'exportació
+        ttk.Button(main_frame, text="📸 Exportar Screenshot PNG", 
+                  command=lambda: self._export_screenshot_with_config(export_window)).pack(fill=tk.X, pady=5)
+        ttk.Button(main_frame, text="🎯 Exportar STL Posicionat", 
+                  command=lambda: self._export_stl_with_config(export_window)).pack(fill=tk.X, pady=5)
+        ttk.Button(main_frame, text="📋 Exportar Dades JSON", 
+                  command=lambda: self._export_json_with_config(export_window)).pack(fill=tk.X, pady=5)
+        ttk.Button(main_frame, text="📊 Exportar Taula CSV", 
+                  command=lambda: self._export_csv_with_config(export_window)).pack(fill=tk.X, pady=5)
+        
+        ttk.Label(main_frame, text="💡 Els arxius usen la configuració\nde visualització actual", 
+                 foreground='blue', justify=tk.CENTER).pack(pady=(15, 0))
+        
+        # Botó tancar
+        ttk.Button(main_frame, text="❌ Cancel·lar", 
+                  command=export_window.destroy).pack(pady=(15, 0))
     
+    def _export_screenshot_with_config(self, parent_window):
+        """Exporta screenshot usant la configuració actual"""
+        try:
+            # Crear opcions basades en la configuració actual
+            options = {
+                'show_wireframe': self.viz_show_wireframe.get() if hasattr(self, 'viz_show_wireframe') else True,
+                'show_labels': self.viz_show_labels.get() if hasattr(self, 'viz_show_labels') else True,
+                'show_axes': self.viz_show_axes.get() if hasattr(self, 'viz_show_axes') else True,
+                'show_grid': self.viz_show_grid.get() if hasattr(self, 'viz_show_grid') else True,
+                'show_edges': self.viz_show_edges.get() if hasattr(self, 'viz_show_edges') else False,
+                'color_scheme': 'gradient' if (hasattr(self, 'viz_use_gradient') and self.viz_use_gradient.get()) else 'solid',
+                'container_color': self.viz_container_color.get() if hasattr(self, 'viz_container_color') else 'black',
+                'piece_opacity': self.viz_piece_opacity.get() if hasattr(self, 'viz_piece_opacity') else 1.0,
+                'background_color': self.viz_background_color.get() if hasattr(self, 'viz_background_color') else 'white',
+                'window_size': self.viz_window_size.get() if hasattr(self, 'viz_window_size') else '1200x900',
+            }
+            
+            # Generar nom de fitxer
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"packassist_screenshot_{timestamp}.png"
+            
+            print(f"📸 Exportant screenshot amb configuració actual: {filename}")
+            
+            # Crear screenshot amb PyVista off-screen
+            self._create_offscreen_visualization_and_save(filename, options)
+            
+            messagebox.showinfo("Èxit", f"Screenshot exportat com: {filename}")
+            parent_window.destroy()
+            
+        except Exception as e:
+            print(f"❌ Error exportant screenshot: {e}")
+            messagebox.showerror("Error", f"Error exportant screenshot: {e}")
+    
+    def _export_stl_with_config(self, parent_window):
+        """Exporta STL posicionat"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"packassist_positioned_{timestamp}.stl"
+            
+            # Aquí implementaries la lògica d'exportació STL
+            messagebox.showinfo("Info", f"Exportació STL: {filename}\n(Funcionalitat en desenvolupament)")
+            parent_window.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error exportant STL: {e}")
+    
+    def _export_json_with_config(self, parent_window):
+        """Exporta dades JSON"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"packassist_data_{timestamp}.json"
+            
+            # Guardar dades d'optimització
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(self.optimization_results, f, indent=2, ensure_ascii=False, default=str)
+                
+            messagebox.showinfo("Èxit", f"Dades JSON exportades: {filename}")
+            parent_window.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error exportant JSON: {e}")
+    
+    def _export_csv_with_config(self, parent_window):
+        """Exporta taula CSV"""
+        try:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"packassist_table_{timestamp}.csv"
+            
+            # Crear CSV amb posicions
+            positions = self.optimization_results.get('positions', [])
+            rotations = self.optimization_results.get('rotations', [])
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write("Peça,X,Y,Z,Rot_X,Rot_Y,Rot_Z\n")
+                for i, (pos, rot) in enumerate(zip(positions, rotations)):
+                    f.write(f"{i+1},{pos[0]:.2f},{pos[1]:.2f},{pos[2]:.2f},{rot[0]:.2f},{rot[1]:.2f},{rot[2]:.2f}\n")
+                    
+            messagebox.showinfo("Èxit", f"Taula CSV exportada: {filename}")
+            parent_window.destroy()
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error exportant CSV: {e}")
+    
+    def _create_offscreen_visualization_and_save(self, filename, options):
+        """Crea visualització off-screen i guarda screenshot"""
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            # Obtenir dades
+            positions = self.optimization_results.get('positions', [])
+            rotations = self.optimization_results.get('rotations', [])
+            box_dims = self.optimization_results.get('box_dims', {})
+            
+            # Convertir box_dims
+            if isinstance(box_dims, dict):
+                dims = [box_dims.get('length', 100), box_dims.get('width', 100), box_dims.get('height', 100)]
+            else:
+                dims = list(box_dims) if hasattr(box_dims, '__iter__') else [100, 100, 100]
+            
+            # Configurar plotter off-screen
+            window_size = options.get('window_size', '1200x900')
+            width, height = map(int, window_size.split('x'))
+            
+            plotter = pv.Plotter(off_screen=True, window_size=(width, height))
+            plotter.set_background(options.get('background_color', 'white'))
+            
+            # Afegir elements segons configuració
+            if options.get('show_axes', True):
+                plotter.add_axes()
+            if options.get('show_grid', True):
+                plotter.show_grid()
+            
+            # Afegir peces
+            mesh_to_show = self.simplified_mesh if (hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None) else self.original_mesh
+            if mesh_to_show:
+                colors = self._generate_piece_colors(positions, options.get('color_scheme', 'solid'), dims)
+                
+                for i, (pos, rot) in enumerate(zip(positions, rotations)):
+                    piece_mesh = mesh_to_show.copy()
+                    
+                    # Aplicar transformacions
+                    if any(angle != 0 for angle in rot):
+                        rot_radians = [np.radians(angle) for angle in rot]
+                        transform_matrix = trimesh.transformations.euler_matrix(rot_radians[0], rot_radians[1], rot_radians[2])
+                        piece_mesh.apply_transform(transform_matrix)
+                    
+                    piece_mesh.apply_translation(pos)
+                    
+                    # Convertir a PyVista i afegir
+                    try:
+                        faces_pv = np.column_stack(([3] * len(piece_mesh.faces), piece_mesh.faces)).flatten()
+                        pv_mesh = pv.PolyData(piece_mesh.vertices, faces_pv)
+                        plotter.add_mesh(pv_mesh, color=colors[i], 
+                                        show_edges=options.get('show_edges', False), 
+                                        opacity=options.get('piece_opacity', 1.0))
+                        
+                        # Etiquetes si cal
+                        if options.get('show_labels', True):
+                            center = piece_mesh.centroid
+                            plotter.add_point_labels([center], [str(i+1)], point_size=10, font_size=12)
+                    except:
+                        pass  # Ignorem errors de conversió
+            
+            # Afegir contenidor
+            if options.get('show_wireframe', True):
+                self._draw_container_wireframe_pyvista_colored(plotter, dims, options.get('container_color', 'black'))
+            
+            # Configurar càmera i guardar
+            plotter.camera_position = 'iso'
+            plotter.screenshot(filename, transparent_background=False)
+            plotter.close()
+            
+            print(f"✅ Screenshot guardat: {filename}")
+            
+        except Exception as e:
+            print(f"❌ Error creant screenshot off-screen: {e}")
+            raise
+    
+    def _create_and_export_screenshot(self, filename, options):
+        """Crea visualització temporal i exporta screenshot"""
+        import pyvista as pv
+        
+        print(f"📸 Creant screenshot amb opcions: {options}")
+        
+        # Crear plotter amb configuració
+        plotter = pv.Plotter(off_screen=True)
+        
+        # Configurar fons
+        bg_color = options.get('background_color', 'white')
+        plotter.set_background(bg_color)
+        
+        # Obtenir mides del contenidor
+        container = self.optimization_results.get('container', {})
+        container_dims = [
+            container.get('width', 100),
+            container.get('height', 100), 
+            container.get('depth', 100)
+        ]
+        
+        # Dibuixar contenidor amb wireframe si està activat
+        if options.get('show_wireframe', False):
+            self._add_container_wireframe_to_plotter(plotter, container_dims, options)
+        
+        # Dibuixar peces
+        positions = self.optimization_results.get('positions', [])
+        color_scheme = options.get('color_scheme', 'default')
+        piece_opacity = options.get('piece_opacity', 0.8)
+        
+        for i, pos in enumerate(positions):
+            self._add_piece_to_plotter(plotter, pos, i, color_scheme, piece_opacity, options)
+        
+        # Configurar vista
+        if options.get('show_axes', True):
+            plotter.show_axes()
+            
+        if options.get('show_grid', False):
+            plotter.show_grid()
+        
+        # Configurar càmera
+        plotter.camera_position = 'isometric'
+        
+        # Exportar screenshot
+        window_size = options.get('window_size', '1024x768').split('x')
+        width, height = int(window_size[0]), int(window_size[1])
+        
+        plotter.screenshot(filename, window_size=[width, height])
+        plotter.close()
+        
+        print(f"✅ Screenshot exportat a: {filename}")
+    
+    def _add_container_wireframe_to_plotter(self, plotter, dims, options):
+        """Afegeix wireframe del contenidor al plotter"""
+        container_color = options.get('container_color', 'green')
+        
+        # Crear punts del contenidor
+        points = [
+            [0, 0, 0],
+            [dims[0], 0, 0],
+            [dims[0], dims[1], 0],
+            [0, dims[1], 0],
+            [0, 0, dims[2]],
+            [dims[0], 0, dims[2]],
+            [dims[0], dims[1], dims[2]],
+            [0, dims[1], dims[2]]
+        ]
+        
+        # Definir línies del wireframe
+        lines = [
+            # Base inferior
+            [0, 1], [1, 2], [2, 3], [3, 0],
+            # Base superior
+            [4, 5], [5, 6], [6, 7], [7, 4],
+            # Connexions verticals
+            [0, 4], [1, 5], [2, 6], [3, 7]
+        ]
+        
+        # Crear línies individuals
+        for line in lines:
+            line_points = [points[line[0]], points[line[1]]]
+            line_mesh = pv.Line(line_points[0], line_points[1])
+            plotter.add_mesh(line_mesh, color=container_color, line_width=2, opacity=1.0)
+    
+    def _add_piece_to_plotter(self, plotter, pos, index, color_scheme, opacity, options):
+        """Afegeix una peça al plotter"""
+        import pyvista as pv
+        
+        # Obtenir posició i dimensions
+        position = pos.get('position', [0, 0, 0])
+        item = pos.get('item', {})
+        dims = [
+            item.get('width', 10),
+            item.get('height', 10),
+            item.get('depth', 10)
+        ]
+        
+        # Crear cub per la peça
+        cube = pv.Cube(
+            center=[position[0] + dims[0]/2, position[1] + dims[1]/2, position[2] + dims[2]/2],
+            x_length=dims[0],
+            y_length=dims[1], 
+            z_length=dims[2]
+        )
+        
+        # Determinar color
+        if color_scheme == 'gradient':
+            # Gradient basat en altura
+            max_z = max([p.get('position', [0, 0, 0])[2] for p in self.optimization_results.get('positions', [])])
+            color_factor = position[2] / max_z if max_z > 0 else 0
+            color = [color_factor, 0.5, 1 - color_factor]  # Blau a vermell
+        elif color_scheme == 'random':
+            import random
+            random.seed(index)  # Consistent colors
+            color = [random.random(), random.random(), random.random()]
+        else:
+            # Color per defecte basat en índex
+            colors = ['lightblue', 'lightgreen', 'lightcoral', 'lightyellow', 'lightpink', 'lightgray']
+            color = colors[index % len(colors)]
+        
+        # Afegir peça
+        plotter.add_mesh(cube, color=color, opacity=opacity, 
+                        show_edges=options.get('show_edges', False))
+        
+        # Afegir etiqueta si està activat
+        if options.get('show_labels', False):
+            label = item.get('name', f'Peça {index+1}')
+            label_pos = [position[0] + dims[0]/2, position[1] + dims[1]/2, position[2] + dims[2] + 5]
+            plotter.add_point_labels([label_pos], [label], point_size=1, font_size=8)
+
     def _perform_export_new(self, options):
         """Realitza exportació amb el nou sistema"""
         try:
@@ -940,6 +1457,8 @@ class PackAssistOriginalGUI:
         self.viz_direct_btn.config(state='normal')
         self.viz_options_btn.config(state='normal')
         self.export_btn.config(state='normal')
+        if hasattr(self, 'export_visual_btn'):
+            self.export_visual_btn.config(state='normal')
     
     def _save_results_automatically(self, results):
         """Guarda els resultats automàticament"""
@@ -1357,6 +1876,422 @@ class PackAssistOriginalGUI:
             traceback.print_exc()
             messagebox.showerror("Error", f"Error mostrant visualització 3D: {e}")
     
+    def _show_3d_results_with_pyvista_options(self, options=None):
+        """Mostra els resultats 3D amb PyVista utilitzant la configuració JSON com a master"""
+        try:
+            # Carregar configuració del JSON com a master
+            json_config = self.load_config_from_json()
+            
+            # Combinar opcions: JSON té prioritat, després options passades, després defaults
+            final_config = {}
+            
+            # Defaults bàsics
+            defaults = {
+                'show_wireframe': True,
+                'show_labels': True,
+                'show_axes': True,
+                'show_grid': True,
+                'show_edges': False,
+                'color_scheme': 'density',
+                'background_color': 'white',
+                'piece_opacity': 1.0,
+                'window_size': '1200x900',
+                'wireframe_color': 'blue',
+                'wireframe_line_width': 4,
+                'wireframe_opacity': 1.0,
+                'container_walls_enabled': True,
+                'container_walls_opacity': 0.15,
+                'container_top_open': True
+            }
+            
+            # Aplicar configuració amb lògica intel·ligent:
+            # - Si no hi ha opcions: defaults < JSON (carregat automàtic)
+            # - Si hi ha opcions: defaults < JSON < opcions (opcions del diàleg tenen prioritat)
+            final_config.update(defaults)
+            
+            # Primer apliquem el JSON (configuració guardada)
+            if json_config:
+                final_config.update(json_config)
+            
+            # Després apliquem les opcions del diàleg (si n'hi ha), que tenen prioritat màxima
+            if options:
+                final_config.update(options)
+                print("🎯 Opcions del diàleg aplicades (prioritat màxima)")
+                # Guardar les opcions del diàleg al JSON per la propera vegada
+                self._update_json_with_options(options)
+            else:
+                print("⚠️ Configuració JSON carregada automàticament")
+            
+            print(f"🔧 Configuració final utilitzada: {final_config.get('color_scheme', 'density')} colors, wireframe: {final_config.get('show_wireframe', True)}")
+            
+            # Verificar que tenim les dades necessàries
+            positions = self.optimization_results.get('positions', [])
+            rotations = self.optimization_results.get('rotations', [])
+            box_dims = self.optimization_results.get('box_dims', {})
+            
+            # Convertir box_dims a llista si és un dict
+            if isinstance(box_dims, dict):
+                dims = [box_dims.get('length', 100), box_dims.get('width', 100), box_dims.get('height', 100)]
+            else:
+                dims = list(box_dims) if hasattr(box_dims, '__iter__') else [100, 100, 100]
+            
+            if not positions:
+                messagebox.showwarning("Avís", "No hi ha posicions per visualitzar.")
+                return
+            
+            # Importar PyVista
+            import pyvista as pv
+            import numpy as np
+            
+            # Decidir quina malla usar per visualitzar
+            mesh_to_show = self.simplified_mesh if (hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None) else self.original_mesh
+            if not mesh_to_show:
+                print("❌ ERROR: No hi ha malla carregada per visualitzar")
+                messagebox.showwarning("Avís", "No hi ha malla carregada per visualitzar")
+                return
+            
+            print(f"🎮 Iniciant visualització 3D personalitzada amb {len(positions)} objectes...")
+            print(f"📦 Dimensions contenidor: {dims}")
+            print(f"📍 Primeres 3 posicions: {positions[:3] if len(positions) > 0 else 'Cap'}")
+            
+            # Verificar si les posicions estan dins del contenidor
+            if positions:
+                pos_x = [p[0] for p in positions]
+                pos_y = [p[1] for p in positions]
+                pos_z = [p[2] for p in positions]
+                print(f"📊 Rang X: {min(pos_x):.1f} - {max(pos_x):.1f} (contenidor: 0 - {dims[0]})")
+                print(f"📊 Rang Y: {min(pos_y):.1f} - {max(pos_y):.1f} (contenidor: 0 - {dims[1]})")
+                print(f"📊 Rang Z: {min(pos_z):.1f} - {max(pos_z):.1f} (contenidor: 0 - {dims[2]})")
+            
+            # Extreure opcions de visualització des de la configuració final
+            show_wireframe = final_config.get('show_wireframe', True)
+            show_labels = final_config.get('show_labels', True)
+            show_axes = final_config.get('show_axes', True)
+            show_grid = final_config.get('show_grid', True)
+            show_edges = final_config.get('show_edges', False)
+            color_scheme = final_config.get('color_scheme', 'density')
+            container_color = final_config.get('wireframe_color', 'blue')
+            piece_opacity = final_config.get('piece_opacity', 1.0)
+            background_color = final_config.get('background_color', 'white')
+            window_size = final_config.get('window_size', '1200x900')
+            
+            # Configurar mida de finestra
+            width, height = map(int, window_size.split('x'))
+            
+            # Crear visualitzador
+            plotter = pv.Plotter(window_size=(width, height))
+            plotter.set_background(background_color)
+            
+            # Afegir eixos si cal
+            if show_axes:
+                plotter.add_axes()
+            
+            # Afegir reixa si cal
+            if show_grid:
+                plotter.show_grid()
+            
+            # Generar colors per les peces segons l'esquema seleccionat (usar configuració JSON)
+            piece_colors_config = final_config.get('piece_colors', {})
+            colors = self._generate_piece_colors(positions, color_scheme, dims, piece_colors_config)
+            
+            # Dibuixar cada peça posicionada PRIMER
+            for i, (pos, rot) in enumerate(zip(positions, rotations)):
+                color = colors[i]
+                obj_id = i + 1
+                
+                # Clonar la malla base
+                piece_mesh = mesh_to_show.copy()
+                
+                # Aplicar rotació si cal
+                if any(angle != 0 for angle in rot):
+                    rot_radians = [np.radians(angle) for angle in rot]
+                    transform_matrix = trimesh.transformations.euler_matrix(rot_radians[0], rot_radians[1], rot_radians[2])
+                    piece_mesh.apply_transform(transform_matrix)
+                
+                # Aplicar translació
+                piece_mesh.apply_translation(pos)
+                
+                # Convertir a PyVista
+                try:
+                    faces_pv = np.column_stack(([3] * len(piece_mesh.faces), piece_mesh.faces)).flatten()
+                    pv_mesh = pv.PolyData(piece_mesh.vertices, faces_pv)
+                    
+                    # Configurar renderització segons opcions
+                    plotter.add_mesh(pv_mesh, color=color, 
+                                    show_edges=show_edges, 
+                                    opacity=piece_opacity, 
+                                    name=f'obj_{obj_id}')
+                    
+                    # Afegir etiqueta si cal
+                    if show_labels:
+                        center = piece_mesh.centroid
+                        plotter.add_point_labels([center], [f'{obj_id}'], 
+                                                point_size=10, font_size=12,
+                                                name=f'label_{obj_id}')
+                        
+                except Exception as conv_error:
+                    print(f"⚠️ Error convertint peça {obj_id} a PyVista: {conv_error}")
+                    # Fallback: Dibuixar un cub simple
+                    bounds = piece_mesh.bounds
+                    if bounds is not None:
+                        dims_piece = bounds[1] - bounds[0]
+                        center = (bounds[1] + bounds[0]) / 2
+                        corner_pos = center - dims_piece / 2
+                        cube = pv.Cube(bounds=(corner_pos[0], corner_pos[0]+dims_piece[0],
+                                              corner_pos[1], corner_pos[1]+dims_piece[1],
+                                              corner_pos[2], corner_pos[2]+dims_piece[2]))
+                        plotter.add_mesh(cube, color=color, opacity=piece_opacity, name=f'obj_{obj_id}_fallback')
+            
+            # Dibuixar el contenidor DESPRÉS de les peces amb configuració JSON
+            if show_wireframe:
+                self._draw_container_wireframe_pyvista_enhanced(plotter, dims, final_config)
+            
+            # Configuració final i mostra
+            plotter.add_text(f"Empaquetament 3D: {len(positions)} peces", position='upper_edge', font_size=12)
+            
+            # Configuració de la càmera
+            camera_config = final_config.get('camera', {})
+            camera_position = camera_config.get('position', 'iso')
+            plotter.camera_position = camera_position
+            
+            # Exportació automàtica si està activada
+            if final_config.get('auto_screenshot', False):
+                screenshot_path = f"screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                plotter.screenshot(screenshot_path)
+                print(f"📸 Screenshot guardat: {screenshot_path}")
+            
+            print("✅ Preparada la visualització 3D amb configuració JSON")
+            plotter.show(interactive=True, auto_close=False)
+            print("✅ Visualització 3D tancada")
+            
+            # Exportació automàtica després de tancar
+            if final_config.get('auto_stl_export', False) or final_config.get('auto_json_export', False) or final_config.get('auto_csv_export', False):
+                self.export_results()
+                
+        except ImportError:
+            error_msg = "PyVista no està instal·lat. Instal·la'l amb: pip install pyvista"
+            print(f"❌ {error_msg}")
+            messagebox.showerror("Error", error_msg)
+        except Exception as e:
+            error_msg = f"No s'ha pogut crear la visualització 3D: {e}"
+            print(f"❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", error_msg)
+
+    def _generate_piece_colors(self, positions, color_scheme, dims, piece_colors=None):
+        """Genera colors per les peces segons l'esquema seleccionat (usa configuració JSON)"""
+        num_pieces = len(positions)
+        
+        # Usar colors del JSON si estan disponibles
+        if piece_colors and isinstance(piece_colors, dict):
+            if color_scheme in piece_colors:
+                base_colors = piece_colors[color_scheme]
+            elif 'density' in piece_colors:
+                base_colors = piece_colors['density']  # Preferir density per defecte
+            else:
+                base_colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]
+        else:
+            # Fallback colors
+            if color_scheme == 'density':
+                base_colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#FD79A8", "#FDCB6E", "#6C5CE7", "#A29BFE", "#74B9FF"]
+            else:
+                base_colors = ["#DC143C", "#1E90FF", "#228B22", "#FF8C00", "#9370DB", "#D2691E", "#FF1493", "#696969", "#808000", "#00CED1"]
+        
+        if color_scheme == 'gradient':
+            # Gradient per altura (coordenada Z)
+            z_coords = [pos[2] for pos in positions]
+            z_min, z_max = min(z_coords), max(z_coords)
+            z_range = z_max - z_min if z_max > z_min else 1
+            
+            colors = []
+            for z in z_coords:
+                # Normalitzar altura entre 0 i 1
+                norm_z = (z - z_min) / z_range
+                # Color del blau (baix) al vermell (alt)
+                r = int(255 * norm_z)
+                g = int(128 * (1 - abs(norm_z - 0.5) * 2))
+                b = int(255 * (1 - norm_z))
+                colors.append(f'#{r:02x}{g:02x}{b:02x}')
+            return colors
+            
+        else:  # solid o density - usar paleta del JSON
+            return [base_colors[i % len(base_colors)] for i in range(num_pieces)]
+
+    def _draw_container_wireframe_pyvista_enhanced(self, plotter, dims, config):
+        """Dibuixa el contenidor amb wireframe configurable des del JSON"""
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            # Assegurar que dims és una llista de 3 elements
+            dims = list(dims) if hasattr(dims, '__iter__') else [dims, dims, dims]
+            if len(dims) < 3:
+                dims.extend([100] * (3 - len(dims)))
+            
+            # Extreure configuració del wireframe des del JSON
+            wireframe_color = config.get('wireframe_color', 'blue')
+            wireframe_line_width = config.get('wireframe_line_width', 4)
+            wireframe_opacity = config.get('wireframe_opacity', 1.0)
+            container_walls_enabled = config.get('container_walls_enabled', True)
+            container_walls_opacity = config.get('container_walls_opacity', 0.15)
+            container_top_open = config.get('container_top_open', True)
+            
+            print(f"🔧 Contenidor millorat: wireframe={wireframe_color} (gruix={wireframe_line_width}), parets={container_walls_enabled} (opacitat={container_walls_opacity}), superior obert={container_top_open}")
+            
+            # Crear vèrtexs del cub contenidor
+            vertices = np.array([
+                [0, 0, 0], [dims[0], 0, 0], [dims[0], dims[1], 0], [0, dims[1], 0],  # Base inferior: 0,1,2,3
+                [0, 0, dims[2]], [dims[0], 0, dims[2]], [dims[0], dims[1], dims[2]], [0, dims[1], dims[2]]  # Base superior: 4,5,6,7
+            ])
+            
+            # Arestes per al wireframe
+            if container_top_open:
+                # Només base i verticals, NO part superior
+                edges = [
+                    # Base inferior
+                    [0, 1], [1, 2], [2, 3], [3, 0],
+                    # Arestes verticals
+                    [0, 4], [1, 5], [2, 6], [3, 7]
+                ]
+            else:
+                # Contenidor tancat complet
+                edges = [
+                    # Base inferior
+                    [0, 1], [1, 2], [2, 3], [3, 0],
+                    # Base superior
+                    [4, 5], [5, 6], [6, 7], [7, 4],
+                    # Arestes verticals
+                    [0, 4], [1, 5], [2, 6], [3, 7]
+                ]
+            
+            # Dibuixar wireframe amb configuració JSON
+            for i, (start, end) in enumerate(edges):
+                line_points = np.array([vertices[start], vertices[end]])
+                line = pv.Line(line_points[0], line_points[1])
+                plotter.add_mesh(line, color=wireframe_color, line_width=wireframe_line_width, 
+                               opacity=wireframe_opacity, name=f'container_edge_{i}')
+            
+            # Crear parets transparents si està activat
+            if container_walls_enabled:
+                # Base del contenidor
+                base_points = np.array([vertices[0], vertices[1], vertices[2], vertices[3]])
+                base_faces = np.array([4, 0, 1, 2, 3])  # Quad amb 4 vèrtexs
+                base_mesh = pv.PolyData(base_points, base_faces)
+                plotter.add_mesh(base_mesh, color=wireframe_color, opacity=container_walls_opacity, name='container_base')
+                
+                # Paret frontal (Y=0)
+                front_points = np.array([vertices[0], vertices[1], vertices[5], vertices[4]])
+                front_faces = np.array([4, 0, 1, 2, 3])
+                front_mesh = pv.PolyData(front_points, front_faces)
+                plotter.add_mesh(front_mesh, color=wireframe_color, opacity=container_walls_opacity, name='container_front')
+                
+                # Paret posterior (Y=dims[1])
+                back_points = np.array([vertices[2], vertices[3], vertices[7], vertices[6]])
+                back_faces = np.array([4, 0, 1, 2, 3])
+                back_mesh = pv.PolyData(back_points, back_faces)
+                plotter.add_mesh(back_mesh, color=wireframe_color, opacity=container_walls_opacity, name='container_back')
+                
+                # Paret esquerra (X=0)
+                left_points = np.array([vertices[3], vertices[0], vertices[4], vertices[7]])
+                left_faces = np.array([4, 0, 1, 2, 3])
+                left_mesh = pv.PolyData(left_points, left_faces)
+                plotter.add_mesh(left_mesh, color=wireframe_color, opacity=container_walls_opacity, name='container_left')
+                
+                # Paret dreta (X=dims[0])
+                right_points = np.array([vertices[1], vertices[2], vertices[6], vertices[5]])
+                right_faces = np.array([4, 0, 1, 2, 3])
+                right_mesh = pv.PolyData(right_points, right_faces)
+                plotter.add_mesh(right_mesh, color=wireframe_color, opacity=container_walls_opacity, name='container_right')
+                
+                # Part superior només si no està oberta
+                if not container_top_open:
+                    top_points = np.array([vertices[4], vertices[5], vertices[6], vertices[7]])
+                    top_faces = np.array([4, 0, 1, 2, 3])
+                    top_mesh = pv.PolyData(top_points, top_faces)
+                    plotter.add_mesh(top_mesh, color=wireframe_color, opacity=container_walls_opacity, name='container_top')
+            
+            status_walls = f"parets (opacitat {container_walls_opacity})" if container_walls_enabled else "sense parets"
+            status_top = "superior obert" if container_top_open else "superior tancat"
+            print(f"✅ Contenidor renderitzat: {wireframe_color} wireframe (gruix {wireframe_line_width}) + {status_walls} + {status_top}")
+            
+        except Exception as e:
+            print(f"❌ Error dibuixant contenidor millorat: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _draw_container_wireframe_pyvista_colored(self, plotter, dims, color):
+        """Dibuixa el contenidor amb wireframe prim i parets transparents (sense part superior) - LEGACY"""
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            # Assegurar que dims és una llista de 3 elements
+            dims = list(dims) if hasattr(dims, '__iter__') else [dims, dims, dims]
+            if len(dims) < 3:
+                dims.extend([100] * (3 - len(dims)))
+            
+            print(f"🔧 Creant contenidor legacy amb dimensions: {dims}")
+            
+            # Crear vèrtexs del cub contenidor
+            vertices = np.array([
+                [0, 0, 0], [dims[0], 0, 0], [dims[0], dims[1], 0], [0, dims[1], 0],  # Base inferior: 0,1,2,3
+                [0, 0, dims[2]], [dims[0], 0, dims[2]], [dims[0], dims[1], dims[2]], [0, dims[1], dims[2]]  # Base superior: 4,5,6,7
+            ])
+            
+            # Arestes per al wireframe (només base i verticals, NO part superior)
+            edges = [
+                # Base inferior
+                [0, 1], [1, 2], [2, 3], [3, 0],
+                # Arestes verticals
+                [0, 4], [1, 5], [2, 6], [3, 7]
+                # NO dibuixem arestes de la part superior per deixar-la oberta
+            ]
+            
+            # Dibuixar wireframe més prim
+            for i, (start, end) in enumerate(edges):
+                line_points = np.array([vertices[start], vertices[end]])
+                line = pv.Line(line_points[0], line_points[1])
+                plotter.add_mesh(line, color=color, line_width=3, opacity=1.0, name=f'container_edge_{i}')
+            
+            # Crear parets transparents (sense la part superior)
+            # Base del contenidor
+            base_points = np.array([vertices[0], vertices[1], vertices[2], vertices[3]])
+            base_faces = np.array([4, 0, 1, 2, 3])  # Quad amb 4 vèrtexs
+            base_mesh = pv.PolyData(base_points, base_faces)
+            plotter.add_mesh(base_mesh, color=color, opacity=0.25, name='container_base')
+            
+            # Paret frontal (Y=0)
+            front_points = np.array([vertices[0], vertices[1], vertices[5], vertices[4]])
+            front_faces = np.array([4, 0, 1, 2, 3])
+            front_mesh = pv.PolyData(front_points, front_faces)
+            plotter.add_mesh(front_mesh, color=color, opacity=0.25, name='container_front')
+            
+            # Paret posterior (Y=dims[1])
+            back_points = np.array([vertices[2], vertices[3], vertices[7], vertices[6]])
+            back_faces = np.array([4, 0, 1, 2, 3])
+            back_mesh = pv.PolyData(back_points, back_faces)
+            plotter.add_mesh(back_mesh, color=color, opacity=0.25, name='container_back')
+            
+            # Paret esquerra (X=0)
+            left_points = np.array([vertices[3], vertices[0], vertices[4], vertices[7]])
+            left_faces = np.array([4, 0, 1, 2, 3])
+            left_mesh = pv.PolyData(left_points, left_faces)
+            plotter.add_mesh(left_mesh, color=color, opacity=0.25, name='container_left')
+            
+            # Paret dreta (X=dims[0])
+            right_points = np.array([vertices[1], vertices[2], vertices[6], vertices[5]])
+            right_faces = np.array([4, 0, 1, 2, 3])
+            right_mesh = pv.PolyData(right_points, right_faces)
+            plotter.add_mesh(right_mesh, color=color, opacity=0.25, name='container_right')
+                
+            print(f"✅ Contenidor legacy: wireframe prim (line_width=3) + parets transparents (25%) + part superior oberta ({color})")
+            
+        except Exception as e:
+            print(f"❌ Error dibuixant contenidor legacy: {e}")
+            import traceback
+            traceback.print_exc()
+
     def _show_3d_results_with_pyvista(self):
         """Mostra els resultats 3D amb PyVista com a fallback"""
         try:
@@ -1498,6 +2433,278 @@ class PackAssistOriginalGUI:
     def run(self):
         """Inicia l'aplicació"""
         self.root.mainloop()
+    
+    # === GESTIÓ DE CONFIGURACIÓ PERSISTENT ===
+    
+    def load_config_from_json(self):
+        """Carrega la configuració des del fitxer JSON (CONFIGURACIÓ MESTRA)"""
+        config_file = "packassist_config.json"
+        try:
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    
+                # Aplicar la configuració a les variables (JSON és la configuració MESTRA)
+                if hasattr(self, 'viz_show_wireframe'):
+                    self.viz_show_wireframe.set(config.get('show_wireframe', True))
+                    self.viz_show_labels.set(config.get('show_labels', True))
+                    self.viz_show_axes.set(config.get('show_axes', True))
+                    self.viz_show_grid.set(config.get('show_grid', True))
+                    self.viz_show_edges.set(config.get('show_edges', False))
+                    
+                    # Configurar color_scheme correctament
+                    color_scheme = config.get('color_scheme', 'density')
+                    self.viz_use_gradient.set(color_scheme == 'gradient')
+                    
+                    self.viz_container_color.set(config.get('wireframe_color', 'blue'))
+                    self.viz_piece_opacity.set(config.get('piece_opacity', 1.0))
+                    self.viz_background_color.set(config.get('background_color', 'white'))
+                    self.viz_window_size.set(config.get('window_size', '1200x900'))
+                    self.viz_auto_screenshot.set(config.get('auto_screenshot', False))
+                    self.viz_auto_stl_export.set(config.get('auto_stl_export', False))
+                    
+                    # Guardar la configuració completa del JSON per usar-la després
+                    self.json_config = config
+                    print("✅ Configuració MESTRA carregada des de packassist_config.json")
+                    print(f"   Color scheme: {color_scheme}")
+                    print(f"   Wireframe color: {config.get('wireframe_color', 'blue')}")
+                    print(f"   Background: {config.get('background_color', 'white')}")
+                    return config  # Retornar la configuració carregada
+                else:
+                    print("⚠️ Variables de configuració no inicialitzades encara")
+                    return {}  # Retornar diccionari buit
+            else:
+                # Crear fitxer per defecte
+                default_config = self._create_default_config()
+                print("⚠️ Fitxer de configuració no trobat, creat nou fitxer per defecte")
+                return default_config
+        except Exception as e:
+            print(f"❌ Error carregant configuració: {e}")
+            default_config = self._create_default_config()
+            return default_config
+    
+    def save_config_to_json(self):
+        """Guarda la configuració actual al fitxer JSON (CONFIGURACIÓ MESTRA)"""
+        config_file = "packassist_config.json"
+        try:
+            if hasattr(self, 'viz_show_wireframe'):
+                # Determinar color_scheme
+                if hasattr(self, 'json_config'):
+                    current_scheme = self.json_config.get('color_scheme', 'density')
+                else:
+                    current_scheme = 'gradient' if self.viz_use_gradient.get() else 'density'
+                
+                # Configuració completa que es guarda al JSON
+                config = {
+                    "show_wireframe": self.viz_show_wireframe.get(),
+                    "show_labels": self.viz_show_labels.get(),
+                    "show_axes": self.viz_show_axes.get(),
+                    "show_grid": self.viz_show_grid.get(),
+                    "show_edges": self.viz_show_edges.get(),
+                    "color_scheme": current_scheme,
+                    "background_color": self.viz_background_color.get(),
+                    "wireframe_color": self.viz_container_color.get(),
+                    "window_size": self.viz_window_size.get(),
+                    "auto_screenshot": self.viz_auto_screenshot.get(),
+                    "auto_stl_export": self.viz_auto_stl_export.get(),
+                    "auto_json_export": False,
+                    "auto_csv_export": False,
+                    "use_gradient": self.viz_use_gradient.get(),
+                    "piece_opacity": self.viz_piece_opacity.get(),
+                    "wireframe_line_width": 4,
+                    "wireframe_opacity": 1.0,
+                    "container_walls_enabled": True,
+                    "container_walls_opacity": 0.15,
+                    "container_top_open": True,
+                    "piece_colors": {
+                        "solid": ["#DC143C", "#1E90FF", "#228B22", "#FF8C00", "#9370DB", "#D2691E", "#FF1493", "#696969", "#808000", "#00CED1"],
+                        "density": ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#FD79A8", "#FDCB6E", "#6C5CE7", "#A29BFE", "#74B9FF"]
+                    },
+                    "camera": {
+                        "position": "iso",
+                        "auto_fit": True
+                    },
+                    "lighting": {
+                        "ambient": 0.3,
+                        "diffuse": 0.7
+                    }
+                }
+                
+                with open(config_file, 'w', encoding='utf-8') as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                print("✅ Configuració MESTRA guardada a packassist_config.json")
+                
+                # Actualitzar configuració interna
+                self.json_config = config
+            else:
+                print("⚠️ Variables no disponibles per guardar")
+        except Exception as e:
+            print(f"❌ Error guardant configuració: {e}")
+    
+    def _create_default_config(self):
+        """Crea fitxer de configuració per defecte"""
+        default_config = {
+            "show_wireframe": True,
+            "show_labels": True,
+            "show_axes": True,
+            "show_grid": True,
+            "show_edges": False,
+            "color_scheme": "density",
+            "background_color": "white",
+            "wireframe_color": "blue",
+            "window_size": "1200x900",
+            "auto_screenshot": False,
+            "auto_stl_export": False,
+            "auto_json_export": False,
+            "auto_csv_export": False,
+            "use_gradient": False,
+            "piece_opacity": 1.0,
+            "wireframe_line_width": 4,
+            "wireframe_opacity": 1.0,
+            "container_walls_enabled": True,
+            "container_walls_opacity": 0.15,
+            "container_top_open": True,
+            "piece_colors": {
+                "solid": ["#DC143C", "#1E90FF", "#228B22", "#FF8C00", "#9370DB", "#D2691E", "#FF1493", "#696969", "#808000", "#00CED1"],
+                "density": ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#FD79A8", "#FDCB6E", "#6C5CE7", "#A29BFE", "#74B9FF"]
+            },
+            "camera": {
+                "position": "iso",
+                "auto_fit": True
+            },
+            "lighting": {
+                "ambient": 0.3,
+                "diffuse": 0.7
+            }
+        }
+        
+        try:
+            with open("packassist_config.json", 'w', encoding='utf-8') as f:
+                json.dump(default_config, f, indent=2, ensure_ascii=False)
+            self.json_config = default_config
+            return default_config
+        except Exception as e:
+            print(f"❌ Error creant configuració per defecte: {e}")
+            return default_config  # Retornar la configuració encara que no es pugui guardar
+
+    def _update_json_with_options(self, options):
+        """Actualitza el JSON amb les opcions del diàleg"""
+        try:
+            config_file = "packassist_config.json"
+            
+            # Carregar configuració actual
+            current_config = {}
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    current_config = json.load(f)
+            
+            # Mapejar opcions del diàleg a format JSON
+            json_updates = {}
+            if 'show_wireframe' in options:
+                json_updates['show_wireframe'] = options['show_wireframe']
+            if 'show_labels' in options:
+                json_updates['show_labels'] = options['show_labels']
+            if 'show_axes' in options:
+                json_updates['show_axes'] = options['show_axes']
+            if 'show_grid' in options:
+                json_updates['show_grid'] = options['show_grid']
+            if 'show_edges' in options:
+                json_updates['show_edges'] = options['show_edges']
+            if 'color_scheme' in options:
+                json_updates['color_scheme'] = options['color_scheme']
+            if 'background_color' in options:
+                json_updates['background_color'] = options['background_color']
+            if 'container_color' in options:
+                json_updates['wireframe_color'] = options['container_color']
+            if 'piece_opacity' in options:
+                json_updates['piece_opacity'] = options['piece_opacity']
+            if 'window_size' in options:
+                json_updates['window_size'] = options['window_size']
+            
+            # Aplicar updates
+            current_config.update(json_updates)
+            
+            # Guardar JSON actualitzat
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(current_config, f, indent=2, ensure_ascii=False)
+            
+            # Actualitzar configuració en memòria
+            self.json_config = current_config
+            print(f"✅ JSON actualitzat amb opcions del diàleg: {list(json_updates.keys())}")
+            
+        except Exception as e:
+            print(f"❌ Error actualitzant JSON: {e}")
+
+    def get_config_as_options(self):
+        """Converteix la configuració JSON a format d'opcions per la visualització"""
+        try:
+            if hasattr(self, 'json_config') and self.json_config:
+                config = self.json_config
+                return {
+                    'show_wireframe': config.get('show_wireframe', True),
+                    'show_labels': config.get('show_labels', True),
+                    'show_axes': config.get('show_axes', True),
+                    'show_grid': config.get('show_grid', True),
+                    'show_edges': config.get('show_edges', False),
+                    'color_scheme': config.get('color_scheme', 'density'),
+                    'use_gradient': config.get('color_scheme', 'density') == 'gradient',
+                    'container_color': config.get('wireframe_color', 'blue'),
+                    'piece_opacity': config.get('piece_opacity', 1.0),
+                    'background_color': config.get('background_color', 'white'),
+                    'window_size': config.get('window_size', '1200x900'),
+                    'auto_screenshot': config.get('auto_screenshot', False),
+                    'auto_stl_export': config.get('auto_stl_export', False),
+                    'auto_json_export': config.get('auto_json_export', False),
+                    'auto_csv_export': config.get('auto_csv_export', False),
+                    # Opcions avançades del JSON
+                    'wireframe_line_width': config.get('wireframe_line_width', 4),
+                    'wireframe_opacity': config.get('wireframe_opacity', 1.0),
+                    'container_walls_enabled': config.get('container_walls_enabled', True),
+                    'container_walls_opacity': config.get('container_walls_opacity', 0.15),
+                    'container_top_open': config.get('container_top_open', True),
+                    'piece_colors': config.get('piece_colors', {}),
+                    'camera': config.get('camera', {}),
+                    'lighting': config.get('lighting', {})
+                }
+            else:
+                # Fallback si no hi ha JSON
+                return {
+                    'show_wireframe': True,
+                    'show_labels': True,
+                    'show_axes': True,
+                    'show_grid': True,
+                    'show_edges': False,
+                    'color_scheme': 'density',
+                    'use_gradient': False,
+                    'container_color': 'blue',
+                    'piece_opacity': 1.0,
+                    'background_color': 'white',
+                    'window_size': '1200x900',
+                    'auto_screenshot': False,
+                    'auto_stl_export': False,
+                    'auto_json_export': False,
+                    'auto_csv_export': False
+                }
+        except Exception as e:
+            print(f"❌ Error obtenint configuració: {e}")
+            # Fallback si hi ha error
+            return {
+                'show_wireframe': True,
+                'show_labels': True,
+                'show_axes': True,
+                'show_grid': True,
+                'show_edges': False,
+                'color_scheme': 'density',
+                'use_gradient': False,
+                'container_color': 'blue',
+                'piece_opacity': 1.0,
+                'background_color': 'white',
+                'window_size': '1200x900',
+                'auto_screenshot': False,
+                'auto_stl_export': False,
+                'auto_json_export': False,
+                'auto_csv_export': False
+            }
 
     def start_advanced_optimization(self):
         """Inicia l'optimització avançada unificada"""
