@@ -1,157 +1,133 @@
-# 🚀 PackAssist - Aplicació Simple d'Empaquetament Intel·ligent
+# 🚀 PackAssist - Intelligent 3D Packaging Assistant
 
-**Aplicació unificada i simple per optimitzar l'empaquetament de peces 3D**
+**A unified and simple application to optimize 3D part packaging**
 
-## ✨ Què fa PackAssist?
+## ✨ What does PackAssist do?
 
-PackAssist és una aplicació **simple i directa** que t'ajuda a calcular quantes peces caben dins una caixa de manera òptima.
+PackAssist is a **simple and direct** application that helps you calculate how many parts fit inside a box optimally.
 
-### 🎯 Workflow Simple
-1. **📂 Importa** un fitxer STL de la teva peça
-2. **� Simplifica** la malla (opcional) amb visualitzador 3D integrat
-3. **📦 Configura** les dimensions de la caixa
-4. **⚡ Calcula** l'empaquetament òptim automàticament
-5. **🎮 Visualitza** el resultat en 3D
+### 🎯 Simple Workflow
+1. **📂 Import** an STL file of your part
+2. **✂️ Simplify** the mesh (optional) with integrated 3D viewer
+3. **📦 Configure** box dimensions
+4. **⚡ Calculate** optimal packaging automatically
+5. **🎮 Visualize** the result in 3D
 
-## 🚀 Com Executar
+## 🚀 How to Run
 
-### Mètode 1: Executar Directament
-```bash
-python start.py
-```
-
-### Mètode 2: Executar l'Aplicació Principal
+### Method 1: Direct Execution
 ```bash
 python packassist.py
 ```
 
-## 📁 Estructura Ultra Neta
+### Method 2: Using the Modular Version
+```bash
+python packassist_modular.py
+```
+
+## 📁 Project Structure
 
 ```
 SOME-PackagingAssistant/
-├── 🚀 launch.py                    # PUNT D'ENTRADA PRINCIPAL
-├── 📱 packassist_gui.py            # Aplicació GUI completa
-├── 📱 packassist_simple.py         # Aplicació simple (2 pestanyes)
-├── 📄 requirements.txt             # Dependencies
-├── 📄 LICENSE                      # Llicència
+├── 🚀 packassist.py                 # Main application with original GUI
+├── 📱 packassist_modular.py         # Modular version of the application
+├── 📱 packassist_new.py             # New experimental version
+├── 📄 requirements.txt              # Dependencies
+├── 📄 LICENSE                       # License
+├── 📄 README.md                     # This file
 │
-├── 📁 actiu/                       # ✅ TOT EL CODI FUNCIONAL
-│   ├── src/packassist/             # Mòduls principals
-│   ├── tools/mesh_simplifiers/     # Simplificadors de malles
-│   ├── tests/                      # Scripts de proves
-│   ├── data/, boxes/, objects/     # Dades del projecte
-│   └── results/                    # Resultats dels càlculs
+├── 📁 actiu/                        # ✅ ACTIVE CODE AND DATA
+│   ├── src/packassist/              # Core modules
+│   │   ├── core/                    # Core functionality modules
+│   │   ├── gui/                     # GUI components
+│   │   └── utils/                   # Utility functions
+│   ├── boxes/                       # Box definitions
+│   ├── data/                        # Project data
+│   ├── objects/                     # 3D objects
+│   ├── results/                     # Calculation results
+│   └── tools/                       # Additional tools
 │
-├── 📁 documentacio/                # 📖 DOCUMENTACIÓ COMPLETA
-├── 📁 no-utilitzat/                # 🗄️ FITXERS ANTICS
-└── 📁 packassist_env/              # 🐍 ENTORN VIRTUAL
+├── 📁 documentacio/                 # 📖 COMPLETE DOCUMENTATION
+├── 📁 no-utilitzat/                 # 🗄️ OLD FILES
+└── 📁 packassist_env/               # 🐍 VIRTUAL ENVIRONMENT
 ```
 
-## 🎯 Opcions del Launcher
+## 🔧 Main Features
 
-Executa `python launch.py` i tria:
+### ✅ Fully Operational:
+- **3D Packaging** with optimized algorithms
+- **3D Visualization** with PyVista and matplotlib  
+- **STP/STL Support** for complex geometries
+- **Mesh Simplification** ultra-fast (multiple algorithms)
+- **Advanced GUI** with threading for performance
+- **Export** images and data
 
-1. **🚀 PackAssist GUI** - Interfície completa (RECOMANAT)
-2. **🎯 Aplicació Simple** - 2 pestanyes bàsiques  
-3. **🔧 Simplificador STL Avançat** - GUI amb 3 pestanyes
-4. **⚡ Simplificador Ultra Ràpid** - Terminal amb múltiples algoritmes
-5. **🔧 Simplificador Simple** - Versió bàsica
-6. **🧪 Proves de Simplificació** - Testing avançat
-7. **❌ Sortir**
+### 🎯 Key Features:
+- **Modular Architecture**: Clean separation of concerns
+- **High Performance**: Threading and automatic optimization
+- **Cross-platform**: Pure Python, no .bat dependencies
+- **Extensible Design**: Easy to add new features
 
-## 🔧 Funcionalitats Principals
-
-### ✅ Completament Operatives:
-- **Empaquetament 3D** amb algoritmes optimitzats
-- **Visualització 3D** amb PyVista i matplotlib  
-- **Suport STP/STL** per geometries complexes
-- **Simplificació de malles** ultra-ràpida (4 algoritmes)
-- **GUI avançada** amb threading per rendiment
-- **Exportació** d'imatges i dades
-
-### 🎯 Característiques Destacades:
-- **Sistema unificat**: Un sol launcher per tot
-- **Estructura neta**: Només 3 carpetes + essencials
-- **Alt rendiment**: Threading i optimització automàtica
-- **Multiplataforma**: Python pur, sense dependencies de .bat
-
-## 📦 Instal·lació
+## 📦 Installation
 
 ```bash
-# 1. Clonar repositori
+# 1. Clone repository
 git clone https://github.com/OriolCanillasGautier/SOME-PackagingAssistant.git
 cd SOME-PackagingAssistant
 
-# 2. Instal·lar dependencies
+# 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Executar
-python launch.py
+# 3. Run
+python packassist.py
 ```
 
-## 🚀 Ús Ràpid
+## 🚀 Quick Usage
 
-### Empaquetament Bàsic:
+### Basic Packaging:
 ```bash
-python launch.py  # → Opció 1 o 2
+python packassist.py
 ```
 
-### Simplificació de Malles STL:
-```bash  
-python launch.py  # → Opció 3 (GUI recomanat)
-```
-
-### Desenvolupament/Testing:
+### Modular Version:
 ```bash
-python launch.py  # → Opció 6 (proves)
+python packassist_modular.py
 ```
 
-## 📦 Dependencies Principals
+## 📦 Main Dependencies
 
-- `pymeshlab` - Simplificació ultra-ràpida
-- `pyvista` - Visualització 3D avançada
-- `matplotlib` - Gràfics i visualització
-- `tkinter` - Interfície gràfica (inclòs amb Python)
-- `trimesh` - Processament de malles
-- `numpy` - Càlculs numèrics
+- `pymeshlab` - Ultra-fast mesh simplification
+- `pyvista` - Advanced 3D visualization
+- `matplotlib` - Graphics and visualization
+- `tkinter` - Graphical interface (included with Python)
+- `trimesh` - Mesh processing
+- `numpy` - Numerical calculations
+- `cadquery` - CAD operations
+- `py3dbp` - 3D bin packing algorithm
 
-## 🔍 Neteja Realitzada (Agost 2025)
+## 💡 Important Notes
 
-### ✅ Reorganització Ultra Neta:
-- **Eliminats .bat**: No necessaris, Python funciona directament
-- **3 carpetes úniques**: actiu/, documentacio/, no-utilitzat/
-- **Launcher unificat**: Un sol punt d'entrada
-- **Paths corregits**: Tots els imports actualitzats
-- **Estructura clara**: Només l'essencial a l'arrel
+- **Modular Design**: Core functionality separated into modules
+- **Multiple Entry Points**: Different versions for different needs
+- **Clean Structure**: Organized folder structure
+- **100% Functional**: All features maintained
 
-### 🗂️ Sistema de Carpetes:
-- **`actiu/`**: Tot el codi i dades que es fan servir
-- **`documentacio/`**: Tota la documentació consolidada  
-- **`no-utilitzat/`**: Versions antigues i experiments
-
-## 💡 Notes Importants
-
-- **Un sol punt d'entrada**: `python launch.py`
-- **Sense .bat**: Sistema 100% Python, multiplataforma
-- **Estructura neta**: Només 3 carpetes + fitxers essencials
-- **100% funcional**: Totes les característiques mantingudes
-
-## 🆘 Resolució de Problemes
+## 🆘 Troubleshooting
 
 ```bash
-# Si hi ha errors:
-1. Verifica entorn virtual: packassist_env/Scripts/activate
-2. Instal·la dependencies: pip install -r requirements.txt  
-3. Executa launcher: python launch.py
-4. Consulta documentacio/ per més detalls
+# If there are errors:
+1. Check virtual environment: source packassist_env/bin/activate (Linux/Mac) or packassist_env\Scripts\activate (Windows)
+2. Install dependencies: pip install -r requirements.txt  
+3. Run application: python packassist.py
+4. Check documentation in documentacio/ for more details
 ```
 
-## 📞 Suport
+## 📞 Support
 
-- **Documentació**: Carpeta `documentacio/`
-- **Esquema actual**: `ESQUEMA_ACTUAL.md`
-- **Proves**: Launcher opció 6
+- **Documentation**: `documentacio/` folder
+- **Testing**: Run with pytest for unit tests
+- **Issues**: Report on GitHub repository
 
 ---
 
-**✨ Sistema completament reorganitzat per màxima simplicitat i eficiència ✨**
+**✨ Completely reorganized system for maximum simplicity and efficiency ✨**
