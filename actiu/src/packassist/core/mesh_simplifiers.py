@@ -88,6 +88,7 @@ def _simple_mesh_reduction(mesh, target_vertices):
         if current_vertices <= target_vertices:
             return mesh
 
+
         reduction_ratio = target_vertices / current_vertices
         print(f"🔧 Simplificació simple: {current_vertices:,} → ~{target_vertices:,} vèrtexs ({reduction_ratio*100:.1f}% ratio)")
 
@@ -136,3 +137,49 @@ def _simple_mesh_reduction(mesh, target_vertices):
     except Exception as e:
         print(f"⚠️ Error en mètode de reducció simple: {e}")
         return mesh  # Retornar original si falla
+
+def adaptive_mesh_simplifier(mesh, target_vertices, method="quadric_advanced", preserve_volume=True):
+    """
+    Simplificador de malla adaptatiu que tria el millor mètode disponible
+    
+    Args:
+        mesh: Malla Trimesh a simplificar
+        target_vertices: Nombre objectiu de vèrtexs
+        method: Mètode de simplificació ("quadric_advanced", "trimesh_fallback", "simple")
+        preserve_volume: Si preservar el volum de l'objecte
+        
+    Returns:
+        Malla simplificada
+    """
+    try:
+        # Verificar que la malla és vàlida
+        if mesh is None or len(mesh.vertices) == 0:
+            raise ValueError("Malla invàlida")
+        
+        # Si ja té menys vèrtexs dels desitjats, retornar-la
+        if len(mesh.vertices) <= target_vertices:
+            return mesh.copy()
+        
+        # Triar mètode segons disponibilitat i preferència
+        if method == "quadric_advanced":
+            try:
+                import pymeshlab
+                return simplify_mesh_pymeshlab(mesh, target_vertices, preserve_volume)
+            except ImportError:
+                print("⚠️ PyMeshLab no disponible, usant mètode alternatiu")
+                return simplify_mesh_trimesh(mesh, target_vertices, preserve_volume)
+                
+        elif method == "trimesh_fallback":
+            return simplify_mesh_trimesh(mesh, target_vertices, preserve_volume)
+            
+        else:  # Mètode simple
+            return _simple_mesh_reduction(mesh, target_vertices)
+            
+    except Exception as e:
+        print(f"Error en simplificació adaptativa: {e}")
+        # Fallback: retornar malla original
+        return mesh.copy() if mesh else None
+
+def get_mesh_simplifier():
+    """Obté una instància del simplificador de malla"""
+    return adaptive_mesh_simplifier

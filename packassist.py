@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.join(current_dir, 'actiu', 'src'))
 
 # Imports dels nostres mòduls
 try:
-    from packassist.core import MeshLoader, PackingOptimizer, ResultsExporter
+    from packassist.core import MeshLoader, ResultsExporter, NormalPackingOptimizer, BulkPackingOptimizer
+    from packassist.core.validation_utils import validate_positions_within_container, filter_valid_positions
     from packassist.gui import Visualizer3D, ExportDialog, VisualizationDialog
     from packassist.utils import save_results_file, generate_timestamp_filename
     MODULES_AVAILABLE = True
@@ -29,16 +30,53 @@ except ImportError as e:
     print(f"Error important mòduls nous: {e}")
     MODULES_AVAILABLE = False
 
+# Intentar importar el sistema millorat d'OBB (independent)
+try:
+    sys.path.insert(0, os.path.join(current_dir, 'actiu', 'src', 'packassist', 'optimizers'))
+    from improved_obb_integration import ImprovedOBBPackingSystem
+    IMPROVED_OBB_AVAILABLE = True
+    print("✅ Sistema OBB millorat disponible")
+except ImportError as e:
+    print(f"⚠️ Sistema OBB millorat no disponible: {e}")
+    IMPROVED_OBB_AVAILABLE = False
+
+# Intentar importar el nou optimitzador robust (independent)
+try:
+    from robust_3d_packer import Robust3DPacker
+    ROBUST_PACKER_AVAILABLE = True
+    print("✅ Optimitzador 3D robust disponible")
+except ImportError as e:
+    print(f"⚠️ Optimitzador 3D robust no disponible: {e}")
+    ROBUST_PACKER_AVAILABLE = False
+
+# Intentar importar el nou optimitzador avançat (independent)
+try:
+    from advanced_3d_packer import advanced_3d_pack, Advanced3DPacker
+    ADVANCED_3D_PACKER_AVAILABLE = True
+    print("✅ Advanced 3D Packer disponible")
+except ImportError as e:
+    print(f"⚠️ Advanced 3D Packer no disponible: {e}")
+    ADVANCED_3D_PACKER_AVAILABLE = False
+    MODULES_AVAILABLE = False
+
 # Imports tradicionals com backup
 try:
     import trimesh
+    TRIMESH_AVAILABLE = True
+    print("✅ Trimesh disponible")
 except ImportError:
     trimesh = None
+    TRIMESH_AVAILABLE = False
+    print("⚠️ Trimesh no disponible")
 
 try:
     import pyvista as pv
+    PYVISTA_AVAILABLE = True
+    print("✅ PyVista disponible")
 except ImportError:
     pv = None
+    PYVISTA_AVAILABLE = False
+    print("⚠️ PyVista no disponible - Instal·la amb: pip install pyvista")
 
 class PackAssistOriginalGUI:
     """Aplicació PackAssist amb GUI original completa però arquitectura modular"""
@@ -136,7 +174,7 @@ class PackAssistOriginalGUI:
             print("✅ MeshLoader configurat")
             
             # Configurar optimitzador (ens crearem instàncies quan calgui)
-            print("✅ PackingOptimizer configurat")
+            print("✅ Optimitzador configurat")
             
             # Configurar exportador
             print("✅ ResultsExporter configurat")
@@ -333,10 +371,11 @@ class PackAssistOriginalGUI:
         ttk.Label(method_frame, text="Mètode: PyMeshLab Quadric (Recomanat)", 
                  style='Step.TLabel').pack(side=tk.LEFT)
         
-        # Slider per vèrtexs objectiu
+        # Slider per vèrtexs objectiu (dinàmic segons malla real)
         ttk.Label(controls_frame, text="Nivell de reducció:").pack(anchor=tk.W, pady=(10, 0))
         
-        self.vertices_scale = tk.Scale(controls_frame, from_=100, to=50000,
+        # Inicialment amb valors per defecte (seran actualitzats quan es carregui una malla)
+        self.vertices_scale = tk.Scale(controls_frame, from_=100, to=10000,
                                       orient=tk.HORIZONTAL, variable=self.target_vertices,
                                       command=self.update_vertices_label)
         self.vertices_scale.pack(fill=tk.X, pady=5)
@@ -397,6 +436,42 @@ class PackAssistOriginalGUI:
         self.compare_btn = ttk.Button(simp_btn_frame, text="⚖️ Comparar Ambdues", 
                                      command=self.compare_meshes_3d, state='disabled')
         self.compare_btn.pack(side=tk.LEFT)
+        
+        # Botó per visualitzar OBB (només si el STL té més de 15 cares)
+        self.viz_obb_btn = ttk.Button(simp_btn_frame, text="🔍 Visualitzar OBB", 
+                                     command=self.visualize_obb, state='disabled')
+        self.viz_obb_btn.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # NOVA SECCIÓ: Comparació OBB vs AABB
+        obb_comparison_frame = ttk.LabelFrame(main_frame, text="📐 Comparació Dimensions: OBB vs Bounding Box Normal", padding="15")
+        obb_comparison_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        # Text explicatiu
+        explanation_label = ttk.Label(obb_comparison_frame, 
+                                    text="L'Oriented Bounding Box (OBB) pot ser més eficient que el Bounding Box tradicional:")
+        explanation_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        # Frame per mostrar les dimensions
+        self.dimensions_comparison_frame = ttk.Frame(obb_comparison_frame)
+        self.dimensions_comparison_frame.pack(fill=tk.X)
+        
+        # Text de les dimensions (inicialment buit)
+        self.dimensions_text = tk.Text(self.dimensions_comparison_frame, height=4, wrap=tk.WORD)
+        self.dimensions_text.insert(tk.END, "📏 Carrega un fitxer STL per veure la comparació de dimensions...")
+        self.dimensions_text.config(state='disabled')
+        self.dimensions_text.pack(fill=tk.X, pady=(0, 10))
+        
+        # Botons d'acció
+        obb_buttons_frame = ttk.Frame(obb_comparison_frame)
+        obb_buttons_frame.pack(fill=tk.X)
+        
+        self.calc_obb_btn = ttk.Button(obb_buttons_frame, text="📐 Calcular OBB", 
+                                      command=self.calculate_obb_dimensions, state='disabled')
+        self.calc_obb_btn.pack(side=tk.LEFT, padx=(0, 10))
+        
+        self.compare_obb_btn = ttk.Button(obb_buttons_frame, text="⚖️ Comparar Visual", 
+                                         command=self.compare_obb_vs_aabb_visual, state='disabled')
+        self.compare_obb_btn.pack(side=tk.LEFT)
     
     def create_unified_optimizer_tab(self):
         """Crea la pestanya d'optimització avançada unificada"""
@@ -470,10 +545,10 @@ class PackAssistOriginalGUI:
         self.margin_entry.pack(side=tk.LEFT, padx=(5, 20))
         
         ttk.Label(self.line3_frame, text="Separació entre pisos:").pack(side=tk.LEFT)
-        self.floor_separation = tk.StringVar(value="10.0")
-        self.floor_entry = ttk.Entry(self.line3_frame, textvariable=self.floor_separation, width=8, state='readonly')
+        self.floor_separation = tk.StringVar(value="2.0")
+        self.floor_entry = ttk.Entry(self.line3_frame, textvariable=self.floor_separation, width=8)
         self.floor_entry.pack(side=tk.LEFT, padx=(5, 5))
-        ttk.Label(self.line3_frame, text="mm (cartró marró)").pack(side=tk.LEFT)
+        ttk.Label(self.line3_frame, text="mm").pack(side=tk.LEFT)
         
         # Quarta línia: Configuració de marge per mode a granel (només visible en mode a granel)
         self.line4_frame = ttk.Frame(advanced_frame)
@@ -532,10 +607,10 @@ class PackAssistOriginalGUI:
         self.results_text.insert(tk.END,
             "🎯 OPTIMITZADOR AVANÇAT AMB MODES D'EMPAQUETAMENT\n\n"
             "MODES DISPONIBLES:\n"
-            "🔸 PISOS ORDENATS: Distribució per pisos amb marge i separació de cartró\n"
+            "🔸 PISOS ORDENATS: Distribució per pisos amb marge i separació configurable\n"
             "   • Peces ordenades en graella per pisos\n"
             "   • Marge configurable al voltant de cada peça\n" 
-            "   • Separació d'1cm entre pisos (cartró 10mm)\n"
+            "   • Separació entre pisos configurable\n"
             "   • Visualització amb STL simplificat\n\n"
             "🔸 A GRANEL: Empaquetament lliure sense restriccions\n"
             "   • Col·lisions exactes amb geometria STL real\n"
@@ -600,7 +675,7 @@ class PackAssistOriginalGUI:
                                         command=self.visualize_3d_direct, state='disabled')
         self.viz_direct_btn.pack(side=tk.LEFT, padx=(0, 10))
         
-        # Visualització amb opcions (mantenim l'original)
+        # Visualització amb opcions (només diàleg d'opcions)
         self.viz_options_btn = ttk.Button(buttons_row1, text="⚙️ Opcions de Visualització", 
                                          command=self.visualize_3d, state='disabled')
         self.viz_options_btn.pack(side=tk.LEFT, padx=(0, 10))
@@ -721,6 +796,157 @@ class PackAssistOriginalGUI:
             self._update_interface_after_import(filepath)
             print("✅ Fitxer carregat amb trimesh directe")
     
+    def calculate_obb_dimensions(self):
+        """Calcula i mostra les dimensions OBB vs AABB"""
+        if not self.original_mesh:
+            messagebox.showwarning("Avís", "Primer carrega un fitxer STL")
+            return
+        
+        try:
+            # Calcular AABB (bounding box tradicional)
+            aabb_bounds = self.original_mesh.bounds
+            aabb_dims = aabb_bounds[1] - aabb_bounds[0]
+            aabb_volume = np.prod(aabb_dims)
+            
+            # Calcular OBB (oriented bounding box)
+            obb_result = self._compute_optimized_obb_fallback(self.original_mesh)
+            obb_dims = obb_result['obb_dimensions']
+            
+            # Convertir a numpy array si és necessari
+            if isinstance(obb_dims, dict):
+                obb_dims = np.array([obb_dims['length'], obb_dims['width'], obb_dims['height']])
+            elif isinstance(obb_dims, list):
+                obb_dims = np.array(obb_dims)
+            
+            obb_volume = np.prod(obb_dims)
+            canonical_mesh = obb_result['canonical_mesh']
+            
+            # Calcular millora
+            volume_improvement = ((aabb_volume - obb_volume) / aabb_volume) * 100 if aabb_volume > 0 else 0
+            
+            # Actualitzar el text de comparació
+            self.dimensions_text.config(state='normal')
+            self.dimensions_text.delete(1.0, tk.END)
+            
+            comparison_text = f"""📐 COMPARACIÓ DE DIMENSIONS:
+
+🔸 BOUNDING BOX TRADICIONAL (AABB):
+   • Dimensions: {aabb_dims[0]:.2f} × {aabb_dims[1]:.2f} × {aabb_dims[2]:.2f} mm
+   • Volum: {aabb_volume:.2f} mm³
+
+🔸 ORIENTED BOUNDING BOX (OBB):
+   • Dimensions: {obb_dims[0]:.2f} × {obb_dims[1]:.2f} × {obb_dims[2]:.2f} mm
+   • Volum: {obb_volume:.2f} mm³
+
+📊 MILLORA:
+   • Reducció de volum: {volume_improvement:.1f}%
+   • L'OBB és {'millor' if volume_improvement > 0 else 'similar o pitjor'} que l'AABB
+   
+💡 NOTA: Un volum menor significa empaquetament més eficient."""
+            
+            self.dimensions_text.insert(tk.END, comparison_text)
+            self.dimensions_text.config(state='disabled')
+            
+            # Habilitar el botó de comparació visual
+            self.compare_obb_btn.config(state='normal')
+            
+            # Guardar les dades per comparació visual
+            self.obb_comparison_data = {
+                'aabb_dims': aabb_dims,
+                'obb_dims': obb_dims,
+                'canonical_mesh': canonical_mesh,
+                'original_mesh': self.original_mesh
+            }
+            
+            print(f"✅ Dimensions calculades: AABB={aabb_dims}, OBB={obb_dims}")
+            
+        except Exception as e:
+            print(f"❌ Error calculant dimensions OBB: {e}")
+            messagebox.showerror("Error", f"Error calculant les dimensions OBB:\n{e}")
+    
+    def compare_obb_vs_aabb_visual(self):
+        """Mostra comparació visual entre OBB i AABB"""
+        if not hasattr(self, 'obb_comparison_data'):
+            messagebox.showwarning("Avís", "Primer calcula les dimensions OBB")
+            return
+        
+        try:
+            import pyvista as pv
+            
+            data = self.obb_comparison_data
+            
+            # Crear visualització
+            plotter = pv.Plotter(shape=(1, 2), window_size=[1400, 700])
+            
+            # Subplot 1: AABB
+            plotter.subplot(0, 0)
+            plotter.add_title("Bounding Box Tradicional (AABB)", font_size=14)
+            
+            # Malla original
+            mesh_original = pv.wrap(data['original_mesh'].vertices)
+            plotter.add_points(mesh_original, color='lightblue', point_size=2, opacity=0.7)
+            
+            # AABB box
+            aabb_bounds = data['original_mesh'].bounds
+            aabb_box = pv.Box(bounds=aabb_bounds.flatten())
+            plotter.add_mesh(aabb_box, style='wireframe', color='red', line_width=3, label='AABB')
+            
+            # Afegir text amb dimensions
+            aabb_dims = data['aabb_dims']
+            # Convertir a array si és un diccionari
+            if isinstance(aabb_dims, dict):
+                aabb_dims = np.array([aabb_dims.get('length', 0), aabb_dims.get('width', 0), aabb_dims.get('height', 0)])
+            
+            plotter.add_text(f"Dimensions: {aabb_dims[0]:.1f} × {aabb_dims[1]:.1f} × {aabb_dims[2]:.1f} mm\n"
+                           f"Volum: {np.prod(aabb_dims):.1f} mm³", 
+                           position='upper_left', font_size=10)
+            
+            # Subplot 2: OBB
+            plotter.subplot(0, 1)
+            plotter.add_title("Oriented Bounding Box (OBB)", font_size=14)
+            
+            # Malla orientada (canònica)
+            canonical_mesh = data['canonical_mesh']
+            mesh_canonical = pv.wrap(canonical_mesh.vertices)
+            plotter.add_points(mesh_canonical, color='lightgreen', point_size=2, opacity=0.7)
+            
+            # OBB box
+            obb_dims = data['obb_dims']
+            # Convertir a array si és un diccionari
+            if isinstance(obb_dims, dict):
+                obb_dims = np.array([obb_dims.get('length', 0), obb_dims.get('width', 0), obb_dims.get('height', 0)])
+            
+            obb_bounds = np.array([
+                [-obb_dims[0]/2, obb_dims[0]/2],
+                [-obb_dims[1]/2, obb_dims[1]/2], 
+                [-obb_dims[2]/2, obb_dims[2]/2]
+            ]).flatten()
+            obb_box = pv.Box(bounds=obb_bounds)
+            plotter.add_mesh(obb_box, style='wireframe', color='green', line_width=3, label='OBB')
+            
+            # Afegir text amb dimensions
+            volume_improvement = ((np.prod(aabb_dims) - np.prod(obb_dims)) / np.prod(aabb_dims)) * 100
+            plotter.add_text(f"Dimensions: {obb_dims[0]:.1f} × {obb_dims[1]:.1f} × {obb_dims[2]:.1f} mm\n"
+                           f"Volum: {np.prod(obb_dims):.1f} mm³\n"
+                           f"Millora: {volume_improvement:.1f}%", 
+                           position='upper_left', font_size=10)
+            
+            # Configurar ambdós subplots
+            for i in range(2):
+                plotter.subplot(0, i)
+                plotter.view_isometric()
+                plotter.add_axes()
+                plotter.camera.zoom(1.2)
+            
+            # Mostrar
+            plotter.show()
+            
+        except ImportError:
+            messagebox.showerror("Error", "PyVista no està disponible per la comparació visual")
+        except Exception as e:
+            print(f"❌ Error en comparació visual: {e}")
+            messagebox.showerror("Error", f"Error en la comparació visual:\n{e}")
+
     def _update_interface_after_import(self, filepath):
         """Actualitza la interfície després d'importar"""
         self.stl_file_path = filepath
@@ -739,6 +965,16 @@ class PackAssistOriginalGUI:
         self.simplify_btn.config(state='normal') 
         self.optimize_btn.config(state='normal')
         
+        # Habilitar botons de la nova secció OBB
+        if hasattr(self, 'calc_obb_btn'):
+            self.calc_obb_btn.config(state='normal')
+        
+        # Habilitar botó OBB si el STL té més de 15 cares
+        if hasattr(self, 'viz_obb_btn') and self.original_mesh and len(self.original_mesh.faces) > 15:
+            self.viz_obb_btn.config(state='normal')
+        elif hasattr(self, 'viz_obb_btn'):
+            self.viz_obb_btn.config(state='disabled')
+        
         print(f"📁 Fitxer carregat: {filename}")
         print(f"✅ Informació de malla actualitzada")
     
@@ -750,50 +986,172 @@ class PackAssistOriginalGUI:
             messagebox.showwarning("Avís", "Primer executa l'optimització")
             return
         
-        # SEMPRE usar la configuració JSON com a MESTRA
-        options = self.get_config_as_options()
+        print("🎯 Iniciant visualització 3D directa...")
         
-        print("🎯 Visualització directa - Configuració JSON MESTRA:")
-        print(f"   Wireframe: {options['show_wireframe']}")
-        print(f"   Etiquetes: {options['show_labels']}")
-        print(f"   Color caixa: {options['container_color']}")
-        print(f"   Background: {options['background_color']}")
-        print(f"   Esquema colors: {options['color_scheme']}")
-        print(f"   Walls enabled: {options.get('container_walls_enabled', True)}")
-        print(f"   Top open: {options.get('container_top_open', True)}")
-        
-        if MODULES_AVAILABLE and hasattr(self, 'visualizer'):
-            # Usar PyVista amb configuració JSON
-            self._show_3d_results_with_pyvista_options(options)
-        else:
-            # Fallback al mètode tradicional
-            self._show_3d_visualization_traditional()
-    
-    def visualize_3d(self):
-        """Visualització 3D amb opcions (mantenim funcionalitat original)"""
-        if not self.optimization_results:
-            messagebox.showwarning("Avís", "Primer executa l'optimització")
+        # Verificar que tenim dades vàlides
+        positions = self.optimization_results.get('positions', [])
+        if not positions:
+            messagebox.showerror("Error", "No hi ha posicions per visualitzar. Executa primer l'optimització.")
             return
         
-        if MODULES_AVAILABLE and hasattr(self, 'visualizer'):
-            # Usar el nou diàleg amb callback millorat
-            def callback(action, options):
-                mesh_to_use = self.simplified_mesh if self.simplified_mesh else self.original_mesh
-                if action == 'visualize':
-                    # Usar PyVista amb opcions personalitzades
-                    self._show_3d_results_with_pyvista_options(options)
-                elif action == 'export':
-                    # Exportació automàtica tradicional
-                    self.export_results()
-                elif action == 'export_manual':
-                    # Exportació manual amb configuració de visualització
-                    self._export_with_visualization_config(options)
+        print(f"✅ Trobades {len(positions)} posicions per visualitzar")
+        
+        # SEMPRE usar la configuració JSON com a MESTRA
+        try:
+            options = self.get_config_as_options()
+            print("🎯 Visualització directa - Configuració JSON MESTRA:")
+            print(f"   Wireframe: {options.get('show_wireframe', True)}")
+            print(f"   Etiquetes: {options.get('show_labels', True)}")
+            print(f"   Color caixa: {options.get('container_color', 'green')}")
+            print(f"   Background: {options.get('background_color', 'white')}")
+            print(f"   Esquema colors: {options.get('color_scheme', 'density')}")
+        except Exception as e:
+            print(f"⚠️ Error carregant configuració JSON: {e}")
+            # Configuració per defecte
+            options = {
+                'show_wireframe': True,
+                'show_labels': True,
+                'show_axes': True,
+                'show_grid': True,
+                'container_color': 'green',
+                'background_color': 'white',
+                'color_scheme': 'density',
+                'piece_opacity': 1.0,
+                'window_size': '1200x900'
+            }
+        
+        # Usar sempre PyVista per visualització directa
+        self._show_3d_results_with_pyvista_direct(options)
+    
+    def visualize_3d(self):
+        """Obre el diàleg d'opcions de visualització"""
+        # Mostrar només el diàleg d'opcions sense fer la visualització
+        self._show_basic_visualization_dialog()
+    
+    def _show_basic_visualization_dialog(self):
+        """Mostra un diàleg de configuració bàsic per a la visualització"""
+        # Crear una finestra de diàleg simple
+        dialog = tk.Toplevel(self.root)
+        dialog.title("⚙️ Opcions de Visualització")
+        dialog.geometry("500x500")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        # Centrar la finestra
+        dialog.geometry("+%d+%d" % (
+            self.root.winfo_rootx() + 50,
+            self.root.winfo_rooty() + 50
+        ))
+        
+        # Crear variables amb valors per defecte o carregats del JSON
+        config = self.get_config_as_options()
+        
+        show_wireframe = tk.BooleanVar(value=config.get('show_wireframe', True))
+        show_labels = tk.BooleanVar(value=config.get('show_labels', True))
+        show_axes = tk.BooleanVar(value=config.get('show_axes', True))
+        show_grid = tk.BooleanVar(value=config.get('show_grid', True))
+        use_gradient = tk.BooleanVar(value=config.get('use_gradient', False))
+        container_color = tk.StringVar(value=config.get('container_color', 'blue'))
+        background_color = tk.StringVar(value=config.get('background_color', 'white'))
+        auto_screenshot = tk.BooleanVar(value=config.get('auto_screenshot', False))
+        auto_stl_export = tk.BooleanVar(value=config.get('auto_stl_export', False))
+        auto_json_export = tk.BooleanVar(value=config.get('auto_json_export', False))
+        auto_csv_export = tk.BooleanVar(value=config.get('auto_csv_export', False))
+        
+        # Crear els widgets del diàleg
+        main_frame = ttk.Frame(dialog, padding="20")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        ttk.Label(main_frame, text="⚙️ Configuració de Visualització 3D", font=('Arial', 14, 'bold')).pack(pady=(0, 15))
+        
+        # Pestanyes per organitzar les opcions
+        notebook = ttk.Notebook(main_frame)
+        notebook.pack(fill=tk.BOTH, expand=True)
+        
+        # Pestanya 1: Visual
+        visual_frame = ttk.Frame(notebook, padding="15")
+        notebook.add(visual_frame, text="🎨 Visual")
+        
+        ttk.Label(visual_frame, text="Opcions visuals:", font=('Arial', 10, 'bold')).pack(anchor=tk.W, pady=(0, 10))
+        ttk.Checkbutton(visual_frame, text="📐 Wireframe del contenidor", variable=show_wireframe).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(visual_frame, text="🏷️ Etiquetes de peces", variable=show_labels).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(visual_frame, text="📏 Eixos de coordenades", variable=show_axes).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(visual_frame, text="📊 Reixa de fons", variable=show_grid).pack(anchor=tk.W, pady=2)
+        
+        # Pestanya 2: Colors
+        colors_frame = ttk.Frame(notebook, padding="15")
+        notebook.add(colors_frame, text="🎨 Colors")
+        
+        # Esquema de colors
+        ttk.Label(colors_frame, text="Esquema de colors:", font=('Arial', 10, 'bold')).pack(anchor=tk.W, pady=(0, 10))
+        ttk.Radiobutton(colors_frame, text="🎨 Colors sòlids", variable=use_gradient, value=False).pack(anchor=tk.W, pady=2)
+        ttk.Radiobutton(colors_frame, text="🌈 Gradient per altura", variable=use_gradient, value=True).pack(anchor=tk.W, pady=2)
+        
+        # Color del contenidor
+        container_color_frame = ttk.LabelFrame(colors_frame, text="Color del contenidor", padding="10")
+        container_color_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Radiobutton(container_color_frame, text="⬛ Negre", variable=container_color, value="black").pack(anchor=tk.W)
+        ttk.Radiobutton(container_color_frame, text="⬜ Blanc", variable=container_color, value="white").pack(anchor=tk.W)
+        ttk.Radiobutton(container_color_frame, text="🟢 Verd", variable=container_color, value="green").pack(anchor=tk.W)
+        ttk.Radiobutton(container_color_frame, text="🔵 Blau", variable=container_color, value="blue").pack(anchor=tk.W)
+        ttk.Radiobutton(container_color_frame, text="🔴 Vermell", variable=container_color, value="red").pack(anchor=tk.W)
+        
+        # Color de fons
+        bg_color_frame = ttk.LabelFrame(colors_frame, text="Color de fons", padding="10")
+        bg_color_frame.pack(fill=tk.X, pady=(10, 0))
+        
+        ttk.Radiobutton(bg_color_frame, text="⬜ Blanc", variable=background_color, value="white").pack(anchor=tk.W)
+        ttk.Radiobutton(bg_color_frame, text="⬛ Negre", variable=background_color, value="black").pack(anchor=tk.W)
+        ttk.Radiobutton(bg_color_frame, text="🌫️ Gris", variable=background_color, value="gray").pack(anchor=tk.W)
+        
+        # Pestanya 3: Exportació
+        export_frame = ttk.Frame(notebook, padding="15")
+        notebook.add(export_frame, text="📤 Exportació")
+        
+        ttk.Label(export_frame, text="Exportació automàtica:", font=('Arial', 10, 'bold')).pack(anchor=tk.W, pady=(0, 10))
+        ttk.Checkbutton(export_frame, text="📸 Capturar screenshot PNG", variable=auto_screenshot).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(export_frame, text="🎯 Exportar STL posicionat", variable=auto_stl_export).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(export_frame, text="📋 Exportar dades JSON", variable=auto_json_export).pack(anchor=tk.W, pady=2)
+        ttk.Checkbutton(export_frame, text="📊 Exportar taula CSV", variable=auto_csv_export).pack(anchor=tk.W, pady=2)
+        
+        # Botons
+        buttons_frame = ttk.Frame(main_frame)
+        buttons_frame.pack(fill=tk.X, pady=(20, 0))
+        
+        def apply_and_visualize():
+            """Aplica la configuració i visualitza"""
+            options = {
+                'show_wireframe': show_wireframe.get(),
+                'show_labels': show_labels.get(),
+                'show_axes': show_axes.get(),
+                'show_grid': show_grid.get(),
+                'color_scheme': 'gradient' if use_gradient.get() else 'density',
+                'use_gradient': use_gradient.get(),
+                'container_color': container_color.get(),
+                'background_color': background_color.get(),
+                'piece_opacity': 1.0,
+                'window_size': '1200x900',
+                'auto_screenshot': auto_screenshot.get(),
+                'auto_stl_export': auto_stl_export.get(),
+                'auto_json_export': auto_json_export.get(),
+                'auto_csv_export': auto_csv_export.get()
+            }
             
-            dialog = VisualizationDialog(self.root, self.optimization_results, callback)
-            dialog.show()
-        else:
-            # Usar mètode tradicional
-            self.visualize_3d_with_options()
+            # Guardar configuració al JSON
+            self._update_json_with_options(options)
+            
+            dialog.destroy()
+            
+            # Si hi ha opcions d'exportació automàtica, mostrar el diàleg d'exportació
+            if auto_screenshot.get() or auto_stl_export.get() or auto_json_export.get() or auto_csv_export.get():
+                self._export_with_visualization_config(options)
+            else:
+                # Visualitzar normalment
+                self._show_3d_results_with_pyvista_options(options)
+        
+        ttk.Button(buttons_frame, text="✅ Visualitzar", command=apply_and_visualize).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(buttons_frame, text="❌ Cancel·lar", command=dialog.destroy).pack(side=tk.LEFT)
     
     def _export_with_visualization_config(self, options):
         """Exporta amb configuració de visualització actual"""
@@ -1099,6 +1457,12 @@ class PackAssistOriginalGUI:
             else:
                 dims = list(box_dims) if hasattr(box_dims, '__iter__') else [100, 100, 100]
             
+            # Assegurar que tenim 3 dimensions
+            if len(dims) < 3:
+                dims.extend([100] * (3 - len(dims)))
+                
+            print(f"🔧 Dimensions contenidor processades: {dims}")
+            
             # Configurar plotter off-screen
             window_size = options.get('window_size', '1200x900')
             width, height = map(int, window_size.split('x'))
@@ -1390,14 +1754,41 @@ class PackAssistOriginalGUI:
         self.root.update()
         
         try:
-            # Crear optimitzador
-            optimizer = PackingOptimizer(container_dims)
+            # Obtenir configuració de separació entre pisos
+            floor_separation = float(self.floor_separation.get()) if hasattr(self, 'floor_separation') else 0.0
             
-            # Usar malla simplificada si està disponible
-            mesh_to_use = self.simplified_mesh if self.simplified_mesh else self.original_mesh
-            
-            # Executar optimització
-            results = optimizer.optimize(mesh_to_use, target_pieces, method)
+            # Decidir quin tipus d'optimitzador usar
+            if method == "bulk" or (hasattr(self, 'use_floor_mode') and not self.use_floor_mode.get()):
+                # Mode a granel
+                optimizer = BulkPackingOptimizer(container_dims)
+                optimizer.set_floor_separation(floor_separation)
+                
+                # Configurar mode de col·lisions
+                pieces_can_touch = getattr(self, 'pieces_can_touch', False)
+                if hasattr(self, 'bulk_margin_var'):
+                    try:
+                        bulk_margin = float(self.bulk_margin_var.get())
+                        optimizer.set_margin(bulk_margin)
+                    except:
+                        optimizer.set_margin(0.0 if pieces_can_touch else 2.0)
+                else:
+                    optimizer.set_margin(0.0 if pieces_can_touch else 2.0)
+                
+                # Usar malla simplificada si està disponible
+                mesh_to_use = self.simplified_mesh if self.simplified_mesh else self.original_mesh
+                
+                # Executar optimització a granel
+                results = optimizer.optimize_bulk(mesh_to_use, target_pieces)
+            else:
+                # Usar optimitzador normal
+                optimizer = NormalPackingOptimizer(container_dims)
+                optimizer.set_floor_separation(floor_separation)
+                
+                # Usar malla simplificada si està disponible
+                mesh_to_use = self.simplified_mesh if self.simplified_mesh else self.original_mesh
+                
+                # Executar optimització normal
+                results = optimizer.optimize(mesh_to_use, target_pieces, method)
             
             if results['success']:
                 self.optimization_results = results
@@ -1411,6 +1802,10 @@ class PackAssistOriginalGUI:
             else:
                 messagebox.showerror("Error", f"Error en l'optimització:\n{results.get('error', 'Error desconegut')}")
             
+        except Exception as e:
+            messagebox.showerror("Error", f"Error durant l'optimització:\n{str(e)}")
+            import traceback
+            traceback.print_exc()
         finally:
             self.optimize_btn.config(state='normal', text="🚀 INICIAR OPTIMITZACIÓ")
     
@@ -1484,6 +1879,63 @@ class PackAssistOriginalGUI:
                 print(f"💾 Resultats guardats: {filename}")
         except Exception as e:
             print(f"Error guardant resultats: {e}")
+    
+    def visualize_obb(self):
+        """Visualitza l'Oriented Bounding Box de la peça si té més de 15 cares"""
+        if not self.original_mesh:
+            messagebox.showwarning("Avís", "Primer carrega un fitxer STL")
+            return
+        
+        # Comprovar que el STL té més de 15 cares
+        if len(self.original_mesh.faces) <= 15:
+            messagebox.showwarning("Avís", "L'OBB només es mostra per peces amb més de 15 cares.")
+            return
+        
+        try:
+            # Calcular OBB
+            obb = self.original_mesh.bounding_box_oriented
+            
+            # Crear una finestra de visualització per l'OBB
+            self._show_obb_visualization(self.original_mesh, obb)
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Error visualitzant OBB: {e}")
+    
+    def _show_obb_visualization(self, mesh, obb):
+        """Mostra la visualització de l'OBB amb la peça dins"""
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            # Crear plotter
+            plotter = pv.Plotter(window_size=(800, 600))
+            plotter.set_background('white')
+            
+            # Afegir la malla original
+            if mesh:
+                # Convertir trimesh a pyvista
+                faces_pv = np.column_stack(([3] * len(mesh.faces), mesh.faces)).flatten()
+                mesh_pv = pv.PolyData(mesh.vertices, faces_pv)
+                plotter.add_mesh(mesh_pv, color='lightblue', show_edges=False, opacity=0.7)
+            
+            # Afegir l'OBB
+            if obb:
+                # Convertir l'OBB a pyvista
+                obb_faces = np.column_stack(([3] * len(obb.faces), obb.faces)).flatten()
+                obb_pv = pv.PolyData(obb.vertices, obb_faces)
+                plotter.add_mesh(obb_pv, color='red', style='wireframe', line_width=3)
+            
+            # Afegir títol i mostrar
+            plotter.add_text("Peça STL amb Oriented Bounding Box (OBB)", position='upper_edge', font_size=12)
+            plotter.add_axes()
+            plotter.show_grid()
+            plotter.camera_position = 'iso'
+            plotter.show()
+            
+        except ImportError:
+            messagebox.showerror("Error", "PyVista no està disponible. Instal·la'l amb: pip install pyvista")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error en la visualització: {e}")
     
     # Mètodes auxiliars (mantenim funcionalitat original)
     
@@ -1704,6 +2156,14 @@ class PackAssistOriginalGUI:
                 self.view_simp_btn.config(state='normal')
                 self.compare_btn.config(state='normal')
                 
+                # Habilitar botó OBB si el STL té més de 15 cares (prioritzem la malla simplificada si està disponible)
+                if hasattr(self, 'viz_obb_btn'):
+                    mesh_to_check = self.simplified_mesh if self.simplified_mesh else self.original_mesh
+                    if mesh_to_check and len(mesh_to_check.faces) > 15:
+                        self.viz_obb_btn.config(state='normal')
+                    else:
+                        self.viz_obb_btn.config(state='disabled')
+                
                 # Missatge d'èxit
                 reduction = self.simplified_mesh_info.get('reduction_ratio', 0)
                 volume_pres = self.simplified_mesh_info.get('volume_preservation', 100)
@@ -1837,12 +2297,332 @@ class PackAssistOriginalGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Error en la comparació:\n{e}")
     
+    def _convert_optimization_results_for_visualization(self, optimization_results):
+        """Converteix els resultats de l'optimitzador al format esperat pel visualitzador"""
+        try:
+            # Extreure dades necessàries
+            positions = optimization_results.get('positions', [])
+            rotations = optimization_results.get('rotations', [])
+            box_dims = optimization_results.get('box_dims', {})
+            pieces_count = optimization_results.get('pieces_count', 0)
+            efficiency = optimization_results.get('efficiency', 0)
+            
+            # Convertir box_dims a llista
+            if isinstance(box_dims, dict):
+                container_dims = [
+                    box_dims.get('length', 100),
+                    box_dims.get('width', 100),
+                    box_dims.get('height', 100)
+                ]
+            else:
+                container_dims = list(box_dims) if hasattr(box_dims, '__iter__') else [100, 100, 100]
+            
+            # Crear items amb posicions i dimensions
+            items = []
+            for i, (pos, rot) in enumerate(zip(positions, rotations)):
+                # Obtenir dimensions de l'objecte si estan disponibles
+                obj_dims = optimization_results.get('obj_dims', {})
+                if isinstance(obj_dims, dict):
+                    dims = [
+                        obj_dims.get('length', 10),
+                        obj_dims.get('width', 10),
+                        obj_dims.get('height', 10)
+                    ]
+                else:
+                    dims = list(obj_dims) if hasattr(obj_dims, '__iter__') else [10, 10, 10]
+                
+                items.append({
+                    'position': pos,
+                    'dimensions': dims,
+                    'rotation': rot
+                })
+            
+            # Crear estructura esperada pel visualitzador
+            converted = {
+                'bins': [
+                    {
+                        'bin': {
+                            'dimensions': container_dims
+                        },
+                        'items': items
+                    }
+                ],
+                'max_objects': pieces_count,
+                'efficiency': efficiency,
+                'used_volume': efficiency * (container_dims[0] * container_dims[1] * container_dims[2]) / 100 if container_dims else 0,
+                'box_volume': container_dims[0] * container_dims[1] * container_dims[2] if container_dims else 0
+            }
+            
+            print(f"🔧 Dades convertides per visualització:")
+            print(f"   • Objectes: {converted['max_objects']}")
+            print(f"   • Eficiència: {converted['efficiency']:.2f}")
+            print(f"   • Dimensions contenidor: {converted['bins'][0]['bin']['dimensions']}")
+            
+            return converted
+            
+        except Exception as e:
+            print(f"⚠️ Error convertint dades per visualització: {e}")
+            # Retornar dades originals si la conversió falla
+            return optimization_results
+    
     # Mètodes de fallback per compatibilitat amb sistema antic
     
     def _show_3d_visualization_traditional(self):
-        """Visualització 3D tradicional (fallback)"""
-        # Implementar visualització tradicional si cal
-        messagebox.showinfo("Info", "Usant visualització tradicional")
+        """Visualització 3D tradicional (fallback) - Implementació real"""
+        print("🎯 Usant visualització tradicional com a fallback...")
+        
+        if not self.optimization_results:
+            messagebox.showerror("Error", "No hi ha resultats d'optimització")
+            return
+        
+        # Obtenir dades
+        positions = self.optimization_results.get('positions', [])
+        rotations = self.optimization_results.get('rotations', [])
+        box_dims = self.optimization_results.get('box_dims', {})
+        
+        if not positions:
+            messagebox.showerror("Error", "No hi ha posicions per visualitzar")
+            return
+        
+        # Intentar usar PyVista directament
+        try:
+            import pyvista as pv
+            self._create_simple_pyvista_visualization(positions, rotations, box_dims)
+        except ImportError:
+            messagebox.showerror("Error", "PyVista no està disponible. Instal·la'l amb: pip install pyvista")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error en visualització tradicional: {e}")
+    
+    def _create_simple_pyvista_visualization(self, positions, rotations, box_dims):
+        """Crea una visualització PyVista simple"""
+        if not PYVISTA_AVAILABLE:
+            messagebox.showerror("Error", "PyVista no està disponible. Instal·la'l amb: pip install pyvista")
+            return
+            
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            print(f"🎮 Creant visualització simple amb {len(positions)} objectes...")
+            
+            # Configurar dimensions del contenidor
+            if isinstance(box_dims, dict):
+                dims = [box_dims.get('length', 100), box_dims.get('width', 100), box_dims.get('height', 100)]
+            else:
+                dims = list(box_dims) if hasattr(box_dims, '__iter__') else [100, 100, 100]
+            
+            # Crear visualitzador
+            plotter = pv.Plotter(window_size=(1200, 900))
+            plotter.set_background('white')
+            plotter.add_axes()
+            plotter.show_grid()
+            
+            # Dibuixar contenidor com wireframe
+            container_bounds = [0, dims[0], 0, dims[1], 0, dims[2]]
+            container_mesh = pv.Cube(bounds=container_bounds)
+            plotter.add_mesh(container_mesh, style='wireframe', color='blue', line_width=3)
+            
+            # Dibuixar objectes com cubs simples
+            colors = ['red', 'green', 'blue', 'yellow', 'orange', 'purple', 'cyan', 'magenta']
+            
+            for i, pos in enumerate(positions):
+                color = colors[i % len(colors)]
+                
+                # Crear un cub petit per representar l'objecte
+                obj_size = 5  # Mida fixa per simplicitat
+                obj_bounds = [
+                    pos[0] - obj_size/2, pos[0] + obj_size/2,
+                    pos[1] - obj_size/2, pos[1] + obj_size/2,
+                    pos[2] - obj_size/2, pos[2] + obj_size/2
+                ]
+                
+                obj_cube = pv.Cube(bounds=obj_bounds)
+                plotter.add_mesh(obj_cube, color=color, opacity=0.8)
+                
+                # Afegir etiqueta
+                plotter.add_point_labels([pos], [f'{i+1}'], point_size=10, font_size=12)
+            
+            # Afegir títol i mostrar
+            plotter.add_text(f"Empaquetament 3D Tradicional: {len(positions)} peces", position='upper_edge', font_size=12)
+            plotter.camera_position = 'iso'
+            
+            print("✅ Visualització tradicional creada")
+            plotter.show(interactive=True, auto_close=False)
+            print("✅ Visualització tradicional tancada")
+            
+        except Exception as e:
+            error_msg = f"Error en visualització tradicional: {e}"
+            print(f"❌ {error_msg}")
+            messagebox.showerror("Error", error_msg)
+    
+    def _show_3d_results_with_pyvista_direct(self, options):
+        """Visualització PyVista directa optimitzada"""
+        # Verificar disponibilitat de PyVista
+        if not PYVISTA_AVAILABLE:
+            messagebox.showerror("Error", "PyVista no està disponible. Instal·la'l amb: pip install pyvista")
+            return
+        
+        try:
+            import pyvista as pv
+            import numpy as np
+            
+            print("🎯 Iniciant visualització PyVista directa...")
+            
+            # Obtenir dades d'optimització
+            positions = self.optimization_results.get('positions', [])
+            rotations = self.optimization_results.get('rotations', [])
+            box_dims = self.optimization_results.get('box_dims', {})
+            
+            if not positions:
+                messagebox.showerror("Error", "No hi ha posicions per visualitzar")
+                return
+            
+            # Configurar dimensions del contenidor
+            if isinstance(box_dims, dict):
+                dims = [box_dims.get('length', 100), box_dims.get('width', 100), box_dims.get('height', 100)]
+            else:
+                dims = list(box_dims) if hasattr(box_dims, '__iter__') else [100, 100, 100]
+            
+            print(f"📦 Contenidor: {dims[0]}x{dims[1]}x{dims[2]}")
+            print(f"📍 Objectes a visualitzar: {len(positions)}")
+            
+            # Configurar finestra
+            window_size = options.get('window_size', '1200x900')
+            width, height = map(int, window_size.split('x'))
+            
+            plotter = pv.Plotter(window_size=(width, height))
+            plotter.set_background(options.get('background_color', 'white'))
+            
+            # Configurar elements visuals
+            if options.get('show_axes', True):
+                plotter.add_axes()
+            if options.get('show_grid', True):
+                plotter.show_grid()
+            
+            # Dibuixar contenidor
+            if options.get('show_wireframe', True):
+                container_bounds = [0, dims[0], 0, dims[1], 0, dims[2]]
+                container_mesh = pv.Cube(bounds=container_bounds)
+                wireframe_color = options.get('container_color', 'blue')
+                plotter.add_mesh(container_mesh, style='wireframe', 
+                               color=wireframe_color, line_width=3, name='container')
+            
+            # Generar colors per les peces
+            color_scheme = options.get('color_scheme', 'density')
+            colors = self._generate_simple_colors(len(positions), color_scheme)
+            
+            # Decidir quina malla usar
+            mesh_to_show = None
+            if hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None:
+                mesh_to_show = self.simplified_mesh
+                print("📐 Usant malla simplificada")
+            elif hasattr(self, 'original_mesh') and self.original_mesh is not None:
+                mesh_to_show = self.original_mesh
+                print("📐 Usant malla original")
+            
+            # Dibuixar objectes
+            for i, (pos, rot) in enumerate(zip(positions, rotations)):
+                color = colors[i]
+                obj_id = i + 1
+                
+                if mesh_to_show is not None and TRIMESH_AVAILABLE:
+                    # Usar la malla real
+                    try:
+                        piece_mesh = mesh_to_show.copy()
+                        
+                        # Aplicar rotació si cal
+                        if any(angle != 0 for angle in rot):
+                            rot_radians = [np.radians(angle) for angle in rot]
+                            transform_matrix = trimesh.transformations.euler_matrix(
+                                rot_radians[0], rot_radians[1], rot_radians[2])
+                            piece_mesh.apply_transform(transform_matrix)
+                        
+                        # Aplicar translació
+                        piece_mesh.apply_translation(pos)
+                        
+                        # Convertir a PyVista
+                        faces_pv = np.column_stack(([3] * len(piece_mesh.faces), piece_mesh.faces)).flatten()
+                        pv_mesh = pv.PolyData(piece_mesh.vertices, faces_pv)
+                        
+                        # Afegir al visualitzador
+                        opacity = options.get('piece_opacity', 1.0)
+                        plotter.add_mesh(pv_mesh, color=color, opacity=opacity, 
+                                       show_edges=options.get('show_edges', False),
+                                       name=f'obj_{obj_id}')
+                        
+                    except Exception as mesh_error:
+                        print(f"⚠️ Error amb malla {obj_id}: {mesh_error}")
+                        # Fallback a cub
+                        self._add_fallback_cube(plotter, pos, color, obj_id, options)
+                else:
+                    # Usar cubs simples
+                    self._add_fallback_cube(plotter, pos, color, obj_id, options)
+                
+                # Afegir etiqueta si cal
+                if options.get('show_labels', True):
+                    plotter.add_point_labels([pos], [f'{obj_id}'], 
+                                           point_size=10, font_size=12,
+                                           name=f'label_{obj_id}')
+            
+            # Configuració final
+            plotter.add_text(f"Empaquetament 3D Directe: {len(positions)} peces", 
+                           position='upper_edge', font_size=14)
+            plotter.camera_position = 'iso'
+            
+            print("✅ Visualització PyVista directa preparada")
+            plotter.show(interactive=True, auto_close=False)
+            print("✅ Visualització PyVista directa completada")
+            
+        except Exception as e:
+            error_msg = f"Error en visualització directa: {e}"
+            print(f"❌ {error_msg}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", error_msg)
+    
+    def _add_fallback_cube(self, plotter, pos, color, obj_id, options):
+        """Afegeix un cub simple com a fallback"""
+        try:
+            import pyvista as pv
+            obj_size = 8  # Mida del cub fallback
+            obj_bounds = [
+                pos[0] - obj_size/2, pos[0] + obj_size/2,
+                pos[1] - obj_size/2, pos[1] + obj_size/2,
+                pos[2] - obj_size/2, pos[2] + obj_size/2
+            ]
+            
+            obj_cube = pv.Cube(bounds=obj_bounds)
+            opacity = options.get('piece_opacity', 1.0)
+            plotter.add_mesh(obj_cube, color=color, opacity=opacity, name=f'cube_{obj_id}')
+        except Exception as cube_error:
+            print(f"⚠️ Error creant cub fallback {obj_id}: {cube_error}")
+    
+    def _generate_simple_colors(self, num_pieces, color_scheme='density'):
+        """Genera colors simples per les peces"""
+        if color_scheme == 'density':
+            # Colors basats en densitat/posició
+            import numpy as np
+            colors = []
+            for i in range(num_pieces):
+                hue = (i * 360 / num_pieces) % 360
+                # Convertir HSV a RGB aproximat
+                if hue < 60:
+                    colors.append('red')
+                elif hue < 120:
+                    colors.append('yellow')
+                elif hue < 180:
+                    colors.append('green')
+                elif hue < 240:
+                    colors.append('cyan')
+                elif hue < 300:
+                    colors.append('blue')
+                else:
+                    colors.append('magenta')
+            return colors
+        else:
+            # Colors fixos
+            base_colors = ['red', 'green', 'blue', 'yellow', 'orange', 'purple', 'cyan', 'magenta', 'brown', 'pink']
+            return [base_colors[i % len(base_colors)] for i in range(num_pieces)]
     
     def visualize_3d_with_options(self):
         """Visualització 3D dels resultats d'optimització amb fallback PyVista"""
@@ -1851,12 +2631,15 @@ class PackAssistOriginalGUI:
             return
         
         try:
+            # Convertir les dades de l'optimitzador al format esperat pel visualitzador
+            converted_results = self._convert_optimization_results_for_visualization(self.optimization_results)
+            
             # Intentar usar el nou sistema de visualització primer
             if MODULES_AVAILABLE and hasattr(self, 'visualizer') and self.visualizer is not None:
                 print("🎯 Intentant visualització amb nou sistema...")
                 try:
                     mesh_to_use = self.simplified_mesh if (hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None) else self.original_mesh
-                    success = self.visualizer.show_direct_3d(results=self.optimization_results, mesh=mesh_to_use)
+                    success = self.visualizer.show_direct_3d(results=converted_results, mesh=mesh_to_use)
                     if success:
                         print("✅ Visualització iniciada amb nou sistema.")
                         return
@@ -1925,9 +2708,12 @@ class PackAssistOriginalGUI:
             print(f"🔧 Configuració final utilitzada: {final_config.get('color_scheme', 'density')} colors, wireframe: {final_config.get('show_wireframe', True)}")
             
             # Verificar que tenim les dades necessàries
-            positions = self.optimization_results.get('positions', [])
-            rotations = self.optimization_results.get('rotations', [])
-            box_dims = self.optimization_results.get('box_dims', {})
+            # Convertir les dades de l'optimitzador al format esperat (PyVista Options)
+            converted_results = self._convert_optimization_results_for_visualization(self.optimization_results)
+            
+            positions = converted_results.get('positions', [])
+            rotations = converted_results.get('rotations', [])
+            box_dims = converted_results.get('box_dims', {})
             
             # Convertir box_dims a llista si és un dict
             if isinstance(box_dims, dict):
@@ -1962,6 +2748,52 @@ class PackAssistOriginalGUI:
                 print(f"📊 Rang X: {min(pos_x):.1f} - {max(pos_x):.1f} (contenidor: 0 - {dims[0]})")
                 print(f"📊 Rang Y: {min(pos_y):.1f} - {max(pos_y):.1f} (contenidor: 0 - {dims[1]})")
                 print(f"📊 Rang Z: {min(pos_z):.1f} - {max(pos_z):.1f} (contenidor: 0 - {dims[2]})")
+                
+                # Verificar posicions vàlides amb les funcions de validació
+                if MODULES_AVAILABLE:
+                    try:
+                        # Obtenir dimensions de l'objecte
+                        if hasattr(self, 'original_mesh') and self.original_mesh:
+                            obj_bounds = self.original_mesh.bounds
+                            obj_dims = [
+                                obj_bounds[1][0] - obj_bounds[0][0],
+                                obj_bounds[1][1] - obj_bounds[0][1],
+                                obj_bounds[1][2] - obj_bounds[0][2]
+                            ]
+                            
+                            # Validar posicions
+                            validation_result = validate_positions_within_container(
+                                positions, 
+                                (dims[0], dims[1], dims[2]),
+                                (obj_dims[0], obj_dims[1], obj_dims[2])
+                            )
+                            
+                            valid_count = sum(validation_result)
+                            invalid_count = len(positions) - valid_count
+                            
+                            if invalid_count > 0:
+                                print(f"⚠️ {invalid_count} posicions fora de límits detectades")
+                                
+                                # Filtrar posicions vàlides
+                                if valid_count > 0:
+                                    filtered_positions, filtered_rotations = filter_valid_positions(
+                                        positions, rotations,
+                                        (dims[0], dims[1], dims[2]),
+                                        (obj_dims[0], obj_dims[1], obj_dims[2])
+                                    )
+                                    
+                                    print(f"✅ Filtrades {valid_count} posicions vàlides")
+                                    positions = filtered_positions
+                                    rotations = filtered_rotations
+                                else:
+                                    print("❌ Cap posició vàlida trobada")
+                                    messagebox.showwarning("Avís", "Cap posició està dins del contenidor")
+                                    return
+                            else:
+                                print("✅ Totes les posicions són vàlides")
+                                
+                    except Exception as e:
+                        print(f"⚠️ Error en validació de posicions: {e}")
             
             # Extreure opcions de visualització des de la configuració final
             show_wireframe = final_config.get('show_wireframe', True)
@@ -2083,20 +2915,30 @@ class PackAssistOriginalGUI:
         """Genera colors per les peces segons l'esquema seleccionat (usa configuració JSON)"""
         num_pieces = len(positions)
         
-        # Usar colors del JSON si estan disponibles
+        # Paleta ampliada per evitar repeticions
+        extended_colors = [
+            "#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#FD79A8", "#FDCB6E", "#6C5CE7", 
+            "#A29BFE", "#74B9FF", "#00B894", "#E17055", "#00CED1", "#FF7675", "#81ECEC", "#FDD835",
+            "#E056FD", "#8E44AD", "#3498DB", "#2ECC71", "#F39C12", "#E74C3C", "#1ABC9C", "#9B59B6",
+            "#34495E", "#16A085", "#27AE60", "#2980B9", "#F1C40F", "#E67E22", "#95A5A6", "#D35400",
+            "#C0392B", "#BDC3C7", "#7F8C8D", "#2C3E50", "#FF9FF3", "#54A0FF", "#5F27CD", "#00D2D3",
+            "#FF9F43", "#C44569", "#F8B500", "#EE5A52", "#0ABDE3", "#006BA6", "#FFDD59", "#C44569"
+        ]
+        
+        # Usar colors del JSON si estan disponibles, sinó usar paleta ampliada
         if piece_colors and isinstance(piece_colors, dict):
             if color_scheme in piece_colors:
                 base_colors = piece_colors[color_scheme]
+                if len(base_colors) < 10:  # Si la paleta del JSON és massa petita, ampliar-la
+                    base_colors.extend(extended_colors[len(base_colors):])
             elif 'density' in piece_colors:
-                base_colors = piece_colors['density']  # Preferir density per defecte
+                base_colors = piece_colors['density']
+                if len(base_colors) < 10:
+                    base_colors.extend(extended_colors[len(base_colors):])
             else:
-                base_colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]
+                base_colors = extended_colors
         else:
-            # Fallback colors
-            if color_scheme == 'density':
-                base_colors = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7", "#FD79A8", "#FDCB6E", "#6C5CE7", "#A29BFE", "#74B9FF"]
-            else:
-                base_colors = ["#DC143C", "#1E90FF", "#228B22", "#FF8C00", "#9370DB", "#D2691E", "#FF1493", "#696969", "#808000", "#00CED1"]
+            base_colors = extended_colors
         
         if color_scheme == 'gradient':
             # Gradient per altura (coordenada Z)
@@ -2115,8 +2957,28 @@ class PackAssistOriginalGUI:
                 colors.append(f'#{r:02x}{g:02x}{b:02x}')
             return colors
             
-        else:  # solid o density - usar paleta del JSON
-            return [base_colors[i % len(base_colors)] for i in range(num_pieces)]
+        elif color_scheme == 'position':
+            # Colors basats en posició espacial per màxima diferenciació
+            colors = []
+            for i, pos in enumerate(positions):
+                # Usar posició + índex per generar color únic
+                x, y, z = pos
+                color_index = int((x * 7 + y * 11 + z * 13 + i * 17) % len(base_colors))
+                colors.append(base_colors[color_index])
+            return colors
+            
+        else:  # solid o density - distribuir millor els colors
+            # Estratègia millor per evitar repeticions adjacents
+            if num_pieces <= len(base_colors):
+                return base_colors[:num_pieces]
+            else:
+                # Per moltes peces, usar distribució intel·ligent
+                colors = []
+                for i in range(num_pieces):
+                    # Intercalar colors per evitar adjacències
+                    color_index = (i * 7) % len(base_colors)  # Multiplicar per nombre primer per millor distribució
+                    colors.append(base_colors[color_index])
+                return colors
 
     def _draw_container_wireframe_pyvista_enhanced(self, plotter, dims, config):
         """Dibuixa el contenidor amb wireframe configurable des del JSON"""
@@ -2296,9 +3158,12 @@ class PackAssistOriginalGUI:
         """Mostra els resultats 3D amb PyVista com a fallback"""
         try:
             # Verificar que tenim les dades necessàries
-            positions = self.optimization_results.get('positions', [])
-            rotations = self.optimization_results.get('rotations', [])
-            box_dims = self.optimization_results.get('box_dims', {})
+            # Convertir les dades de l'optimitzador al format esperat (PyVista Fallback)
+            converted_results = self._convert_optimization_results_for_visualization(self.optimization_results)
+            
+            positions = converted_results.get('positions', [])
+            rotations = converted_results.get('rotations', [])
+            box_dims = converted_results.get('box_dims', {})
             
             # Convertir box_dims a llista si és un dict
             if isinstance(box_dims, dict):
@@ -2638,56 +3503,46 @@ class PackAssistOriginalGUI:
     def get_config_as_options(self):
         """Converteix la configuració JSON a format d'opcions per la visualització"""
         try:
-            if hasattr(self, 'json_config') and self.json_config:
-                config = self.json_config
-                return {
-                    'show_wireframe': config.get('show_wireframe', True),
-                    'show_labels': config.get('show_labels', True),
-                    'show_axes': config.get('show_axes', True),
-                    'show_grid': config.get('show_grid', True),
-                    'show_edges': config.get('show_edges', False),
-                    'color_scheme': config.get('color_scheme', 'density'),
-                    'use_gradient': config.get('color_scheme', 'density') == 'gradient',
-                    'container_color': config.get('wireframe_color', 'blue'),
-                    'piece_opacity': config.get('piece_opacity', 1.0),
-                    'background_color': config.get('background_color', 'white'),
-                    'window_size': config.get('window_size', '1200x900'),
-                    'auto_screenshot': config.get('auto_screenshot', False),
-                    'auto_stl_export': config.get('auto_stl_export', False),
-                    'auto_json_export': config.get('auto_json_export', False),
-                    'auto_csv_export': config.get('auto_csv_export', False),
-                    # Opcions avançades del JSON
-                    'wireframe_line_width': config.get('wireframe_line_width', 4),
-                    'wireframe_opacity': config.get('wireframe_opacity', 1.0),
-                    'container_walls_enabled': config.get('container_walls_enabled', True),
-                    'container_walls_opacity': config.get('container_walls_opacity', 0.15),
-                    'container_top_open': config.get('container_top_open', True),
-                    'piece_colors': config.get('piece_colors', {}),
-                    'camera': config.get('camera', {}),
-                    'lighting': config.get('lighting', {})
-                }
-            else:
-                # Fallback si no hi ha JSON
-                return {
-                    'show_wireframe': True,
-                    'show_labels': True,
-                    'show_axes': True,
-                    'show_grid': True,
-                    'show_edges': False,
-                    'color_scheme': 'density',
-                    'use_gradient': False,
-                    'container_color': 'blue',
-                    'piece_opacity': 1.0,
-                    'background_color': 'white',
-                    'window_size': '1200x900',
-                    'auto_screenshot': False,
-                    'auto_stl_export': False,
-                    'auto_json_export': False,
-                    'auto_csv_export': False
-                }
+            # Carregar configuració JSON si no està carregada
+            if not hasattr(self, 'json_config') or not self.json_config:
+                self.load_config_from_json()
+            
+            config = getattr(self, 'json_config', {}) or {}
+            
+            # Configuració completa amb fallbacks
+            options = {
+                'show_wireframe': config.get('show_wireframe', True),
+                'show_labels': config.get('show_labels', True),
+                'show_axes': config.get('show_axes', True),
+                'show_grid': config.get('show_grid', True),
+                'show_edges': config.get('show_edges', False),
+                'color_scheme': config.get('color_scheme', 'density'),
+                'use_gradient': config.get('color_scheme', 'density') == 'gradient',
+                'container_color': config.get('wireframe_color', 'blue'),
+                'piece_opacity': config.get('piece_opacity', 1.0),
+                'background_color': config.get('background_color', 'white'),
+                'window_size': config.get('window_size', '1200x900'),
+                'auto_screenshot': config.get('auto_screenshot', False),
+                'auto_stl_export': config.get('auto_stl_export', False),
+                'auto_json_export': config.get('auto_json_export', False),
+                'auto_csv_export': config.get('auto_csv_export', False),
+                # Opcions avançades del JSON
+                'wireframe_line_width': config.get('wireframe_line_width', 4),
+                'wireframe_opacity': config.get('wireframe_opacity', 1.0),
+                'container_walls_enabled': config.get('container_walls_enabled', True),
+                'container_walls_opacity': config.get('container_walls_opacity', 0.15),
+                'container_top_open': config.get('container_top_open', True),
+                'piece_colors': config.get('piece_colors', {}),
+                'camera': config.get('camera', {'position': 'iso'}),
+                'lighting': config.get('lighting', {})
+            }
+            
+            print(f"✅ Configuració carregada: wireframe={options['show_wireframe']}, labels={options['show_labels']}")
+            return options
+            
         except Exception as e:
             print(f"❌ Error obtenint configuració: {e}")
-            # Fallback si hi ha error
+            # Fallback robust
             return {
                 'show_wireframe': True,
                 'show_labels': True,
@@ -2703,7 +3558,15 @@ class PackAssistOriginalGUI:
                 'auto_screenshot': False,
                 'auto_stl_export': False,
                 'auto_json_export': False,
-                'auto_csv_export': False
+                'auto_csv_export': False,
+                'wireframe_line_width': 4,
+                'wireframe_opacity': 1.0,
+                'container_walls_enabled': True,
+                'container_walls_opacity': 0.15,
+                'container_top_open': True,
+                'piece_colors': {},
+                'camera': {'position': 'iso'},
+                'lighting': {}
             }
 
     def start_advanced_optimization(self):
@@ -2759,8 +3622,8 @@ class PackAssistOriginalGUI:
                     
                     self.root.after(0, lambda: self._finish_optimization(result))
                     
-                except Exception as e:
-                    self.root.after(0, lambda: self._handle_optimization_error(str(e)))
+                except Exception as exc:
+                    self.root.after(0, lambda: self._handle_optimization_error(str(exc)))
             
             thread = threading.Thread(target=optimization_worker, daemon=True)
             thread.start()
@@ -2798,6 +3661,16 @@ class PackAssistOriginalGUI:
                 self.export_btn.config(state='normal')
             
             print(f"✅ Resultats guardats: {len(result.get('positions', []))} peces col·locades")
+            
+            # Mostrar missatge d'èxit
+            messagebox.showinfo(
+                "✅ Èxit", 
+                f"Optimització completada!\n\n"
+                f"Peces col·locades: {result['pieces_count']}\n"
+                f"Eficiència: {result['efficiency']*100:.2f}%\n"
+                f"Temps: {result.get('execution_time', 0):.2f} segons\n\n"
+                f"Usa la pestanya 'Visualitzar' per veure els resultats."
+            )
         else:
             self.progress_label.config(text="No s'ha trobat solució òptima")
             messagebox.showerror("Error", "No s'ha pogut trobar una solució d'empaquetament òptima")
@@ -2809,119 +3682,683 @@ class PackAssistOriginalGUI:
         self.progress_label.config(text="Error durant l'optimització")
         messagebox.showerror("Error", f"Error durant l'optimització: {error_msg}")
 
+    def _estimate_max_pieces_improved(self, obj_dims, container_dims, margin, floor_separation):
+        """Estimació millorada del nombre màxim de peces considerant orientacions múltiples"""
+        try:
+            # Dimensió objecte amb marge
+            obj_with_margin = obj_dims + (2 * margin)
+            
+            # Provar diferents orientacions per optimitzar
+            orientations = [
+                obj_with_margin,  # Original
+                np.array([obj_with_margin[1], obj_with_margin[0], obj_with_margin[2]]),  # 90° sobre Z
+            ]
+            
+            best_estimation = 0
+            
+            for oriented_dims in orientations:
+                # Peces per pis
+                pieces_x = max(1, int(container_dims['length'] // oriented_dims[0]))
+                pieces_y = max(1, int(container_dims['width'] // oriented_dims[1]))
+                pieces_per_floor = pieces_x * pieces_y
+                
+                # Pisos possibles
+                floors_possible = max(1, int(container_dims['height'] // (oriented_dims[2] + floor_separation)))
+                
+                total_pieces = pieces_per_floor * floors_possible
+                
+                if total_pieces > best_estimation:
+                    best_estimation = total_pieces
+            
+            return max(1, best_estimation)
+        except:
+            # Fallback a estimació bàsica
+            obj_volume = np.prod(obj_dims)
+            container_volume = container_dims['length'] * container_dims['width'] * container_dims['height']
+            return max(1, int((container_volume / obj_volume) * 0.8))
+    
+    def _prepare_final_result(self, result, mesh, start_time, mesh_for_visualization):
+        """Prepara el resultat final per a la visualització"""
+        total_time = time.time() - start_time
+        
+        # Adaptar resultat al format esperat
+        adapted_result = {
+            'positions': result.get('positions', []),
+            'rotations': result.get('rotations', []),
+            'efficiency': result.get('efficiency', 0) / 100,  # Convertir a fracció
+            'total_pieces': result.get('pieces_count', 0),
+            'execution_time': total_time,
+            'mesh': mesh_for_visualization or mesh,
+            'method': result.get('method', 'improved_obb'),
+            'success': result.get('success', False),
+            'detailed_info': {
+                'algorithm_used': result.get('method', 'improved_obb'),
+                'strategy_type': result.get('strategy_type', 'unknown'),
+                'description': result.get('description', 'Sistema OBB millorat'),
+                'strategies_tested': result.get('strategies_tested', 1),
+                'floors_info': result.get('detailed_floors_info', {}),
+                'execution_time': total_time
+            }
+        }
+        
+        return adapted_result
+
     def _unified_advanced_optimization(self, mesh, box_dims, max_pieces=None, iterations=100, 
-                                     use_floor_mode=True, margin=2.0, floor_separation=10.0, 
+                                     use_floor_mode=True, margin=2.0, floor_separation=2.0, 
                                      mesh_for_visualization=None, progress_callback=None):
-        """Optimització unificada amb mode pisos o mode a granel (versió simplificada)"""
+        """Optimització unificada millorada amb separació configurable"""
         import time
         start_time = time.time()
         
         try:
             if progress_callback:
                 mode_name = "PISOS ORDENATS" if use_floor_mode else "A GRANEL"
-                progress_callback(5, f"Iniciant mode {mode_name}...")
+                progress_callback(5, f"Iniciant mode {mode_name} amb separació {floor_separation}mm...")
             
             # Convertir box_dims si és llista
             if isinstance(box_dims, list):
-                box_dims = {
+                box_dims_dict = {
                     'length': box_dims[0],
                     'width': box_dims[1], 
                     'height': box_dims[2]
                 }
-            
-            # Simulació d'optimització (versió de placeholders per evitar dependències complexes)
-            if progress_callback:
-                progress_callback(25, "Analitzant geometria...")
-            
-            # Calcular bounding box de l'objecte
-            bounds = mesh.bounds
-            obj_dims = {
-                'length': bounds[1][0] - bounds[0][0] + (margin * 2 if use_floor_mode else 0),
-                'width': bounds[1][1] - bounds[0][1] + (margin * 2 if use_floor_mode else 0),
-                'height': bounds[1][2] - bounds[0][2] + (margin * 2 if use_floor_mode else 0)
-            }
-            
-            if progress_callback:
-                progress_callback(50, "Calculant distribució...")
-            
-            # Simulació de càlcul de peces que caben
-            if use_floor_mode:
-                floor_height = obj_dims['height'] + floor_separation
-                max_floors = max(1, int(box_dims['height'] / floor_height))
-                pieces_per_row = max(1, int(box_dims['length'] / obj_dims['length']))
-                pieces_per_column = max(1, int(box_dims['width'] / obj_dims['width']))
-                pieces_per_floor = pieces_per_row * pieces_per_column
-                total_possible = pieces_per_floor * max_floors
             else:
-                # Mode a granel - càlcul més complex, simulem
-                max_floors = 1
-                pieces_per_row = max(1, int(box_dims['length'] / obj_dims['length']))
-                pieces_per_column = max(1, int(box_dims['width'] / obj_dims['width']))
-                pieces_per_floor = pieces_per_row * pieces_per_column
-                total_possible = max(1, int((box_dims['length'] * box_dims['width'] * box_dims['height']) / 
-                                          (obj_dims['length'] * obj_dims['width'] * obj_dims['height']) * 0.7))
+                box_dims_dict = box_dims
             
-            if max_pieces:
-                total_to_place = min(total_possible, max_pieces)
+            # Provar primer el nou Advanced 3D Packer basat en research
+            if ADVANCED_3D_PACKER_AVAILABLE:
+                try:
+                    if progress_callback:
+                        progress_callback(15, "Utilitzant Advanced 3D Packer (Bottom-Left-Fill + FFD)...")
+                    
+                    print("🚀 ACTIVANT ADVANCED 3D PACKER")
+                    print("=" * 50)
+                    print("   📚 Basat en algoritmes de research: Bottom-Left-Fill + First-Fit Decreasing")
+                    
+                    # Calcular objectiu de peces
+                    if max_pieces is None:
+                        bounds = mesh.bounds
+                        obj_dims = bounds[1] - bounds[0]
+                        max_pieces = max(1, int(self.container_volume / np.prod(obj_dims)) // 2)
+                    
+                    if progress_callback:
+                        progress_callback(30, f"Executant Bottom-Left-Fill algorithm per {max_pieces} peces...")
+                    
+                    # Executar optimització avançada
+                    result = advanced_3d_pack(
+                        mesh=mesh,
+                        container_dims=(box_dims_dict['length'], box_dims_dict['width'], box_dims_dict['height']),
+                        target_pieces=max_pieces,
+                        margin=margin,
+                        floor_separation=floor_separation if use_floor_mode else 0,
+                        use_floors=use_floor_mode
+                    )
+                    
+                    if result.get('success', False):
+                        if progress_callback:
+                            progress_callback(85, "Advanced 3D Packer completat amb èxit!")
+                        
+                        print(f"✅ ADVANCED 3D PACKER EXITÓS!")
+                        print(f"   • Peces empaquetades: {result.get('pieces_count', 0)}")
+                        print(f"   • Algoritme: {result.get('algorithm_used', 'Bottom-Left-Fill')}")
+                        print(f"   • Eficiència: {result.get('efficiency', 0)*100:.1f}%")
+                        
+                        if progress_callback:
+                            progress_callback(95, "Advanced packing completat!")
+                        
+                        return self._prepare_final_result(result, mesh, start_time, mesh_for_visualization)
+                    else:
+                        print("⚠️ Advanced 3D Packer ha fallat, provant optimitzador robust...")
+                
+                except Exception as e:
+                    print(f"❌ Error en Advanced 3D Packer: {e}")
+                    print("⚠️ Usant optimitzador robust com a fallback...")
+            
+            # Provar el optimitzador robust si està disponible i l'advanced ha fallat
+            if ROBUST_PACKER_AVAILABLE:
+                try:
+                    if progress_callback:
+                        progress_callback(25, "Utilitzant optimitzador 3D robust...")
+                    
+                    print("🚀 ACTIVANT OPTIMITZADOR 3D ROBUST")
+                    print("=" * 50)
+                    
+                    # Inicialitzar optimitzador robust
+                    robust_packer = Robust3DPacker(
+                        container_dims=(box_dims_dict['length'], box_dims_dict['width'], box_dims_dict['height'])
+                    )
+                    
+                    # Configurar paràmetres
+                    robust_packer.margin = margin
+                    robust_packer.collision_tolerance = 0.5  # Tolerància per col·lisions
+                    
+                    # Calcular objectiu de peces
+                    if max_pieces is None:
+                        bounds = mesh.bounds
+                        obj_dims = bounds[1] - bounds[0]
+                        max_pieces = max(1, int(self.container_volume / np.prod(obj_dims)) // 2)
+                    
+                    if progress_callback:
+                        progress_callback(45, f"Executant anàlisi intel·ligent per {max_pieces} peces...")
+                    
+                    # Executar optimització robusta
+                    result = robust_packer.optimize_packing(mesh, max_pieces)
+                    
+                    if result.get('success', False):
+                        if progress_callback:
+                            progress_callback(80, "Optimitzador robust completat amb èxit!")
+                        
+                        # Afegir informació detallada
+                        result['algorithm_analysis'] = result.get('object_analysis', {})
+                        result['optimization_stats'] = result.get('stats', {})
+                        
+                        if progress_callback:
+                            progress_callback(95, "Optimització robusta completada!")
+                        
+                        return self._prepare_final_result(result, mesh, start_time, mesh_for_visualization)
+                    else:
+                        print("⚠️ Optimitzador robust ha fallat, provant sistema tradicional...")
+                
+                except Exception as e:
+                    print(f"❌ Error en optimitzador robust: {e}")
+                    print("⚠️ Usant sistema tradicional com a fallback...")
+            
+            # Utilitzar sistema tradicional si els optimitzadors avançats fallan
+            if MODULES_AVAILABLE:
+                try:
+                    if progress_callback:
+                        progress_callback(15, "Inicialitzant sistema d'optimització tradicional...")
+                    
+                    # Si el robust no està disponible o ha fallat, provar sistema OBB millorat
+                    if IMPROVED_OBB_AVAILABLE and use_floor_mode:
+                        if progress_callback:
+                            progress_callback(25, "Utilitzant sistema OBB millorat per pisos...")
+                        
+                        # Inicialitzar sistema millorat
+                        improved_system = ImprovedOBBPackingSystem(
+                            container_dims=(box_dims_dict['length'], box_dims_dict['width'], box_dims_dict['height'])
+                        )
+                        
+                        # Configurar paràmetres
+                        improved_system.configure_packing_parameters(
+                            margin=margin,
+                            spacing=floor_separation,
+                            multi_orientation=True,
+                            smart_rotation=True
+                        )
+                        
+                        # Calcular objectiu de peces
+                        if max_pieces is None:
+                            bounds = mesh.bounds
+                            obj_dims = bounds[1] - bounds[0]
+                            max_pieces = self._estimate_max_pieces_improved(
+                                obj_dims, box_dims_dict, margin, floor_separation
+                            )
+                        
+                        if progress_callback:
+                            progress_callback(45, f"Optimitzant amb {max_pieces} peces objetivo...")
+                        
+                        # Executar optimització millorada
+                        result = improved_system.optimize_packing_with_floors(mesh, max_pieces)
+                        
+                        if result.get('success', False):
+                            if progress_callback:
+                                progress_callback(80, "Analitzant organització per pisos...")
+                            
+                            # Afegir informació detallada dels pisos
+                            floors_info = improved_system.visualize_floor_organization(result)
+                            result['detailed_floors_info'] = floors_info
+                            
+                            if progress_callback:
+                                progress_callback(95, "Optimització millorada completada!")
+                            
+                            return self._prepare_final_result(result, mesh, start_time, mesh_for_visualization)
+                        else:
+                            print("⚠️ Sistema OBB millorat ha fallat, utilitzant sistema de reserva...")
+                    
+                    if use_floor_mode:
+                        # Mode pisos amb optimitzador normal
+                        optimizer = NormalPackingOptimizer(
+                            container_dims=(box_dims_dict['length'], box_dims_dict['width'], box_dims_dict['height'])
+                        )
+                        optimizer.set_floor_separation(floor_separation)
+                        
+                        # Calcular objectiu de peces considerant els marges
+                        bounds = mesh.bounds
+                        obj_with_margin = bounds[1] - bounds[0] + (2 * margin)
+                        
+                        # Estimar objectiu màxim
+                        pieces_per_floor = int(box_dims_dict['length'] // obj_with_margin[0]) * int(box_dims_dict['width'] // obj_with_margin[1])
+                        floors_possible = int(box_dims_dict['height'] // (obj_with_margin[2] + floor_separation))
+                        target_pieces = max(1, pieces_per_floor * floors_possible)
+                        
+                        if max_pieces:
+                            target_pieces = min(target_pieces, max_pieces)
+                        
+                        if progress_callback:
+                            progress_callback(35, f"Optimitzant {target_pieces} peces amb mode intel·ligent...")
+                        
+                        result = optimizer.optimize(mesh, target_pieces, method="intelligent")
+                        
+                    else:
+                        # Mode a granel amb optimitzador millorat
+                        bulk_optimizer = BulkPackingOptimizer(
+                            container_dims=(box_dims_dict['length'], box_dims_dict['width'], box_dims_dict['height'])
+                        )
+                        bulk_optimizer.set_floor_separation(floor_separation)
+                        
+                        # Configurar mode de col·lisions
+                        pieces_can_touch = getattr(self, 'pieces_can_touch', False)
+                        if hasattr(self, 'bulk_margin_var'):
+                            try:
+                                bulk_margin = float(self.bulk_margin_var.get())
+                                bulk_optimizer.set_margin(bulk_margin)
+                            except:
+                                bulk_optimizer.set_margin(0.0 if pieces_can_touch else 2.0)
+                        else:
+                            bulk_optimizer.set_margin(0.0 if pieces_can_touch else 2.0)
+                        
+                        # Estimar objectiu per mode a granel
+                        bounds = mesh.bounds
+                        obj_dims = bounds[1] - bounds[0]
+                        obj_volume = np.prod(obj_dims)
+                        container_volume = box_dims_dict['length'] * box_dims_dict['width'] * box_dims_dict['height']
+                        
+                        # Eficiència estimada per a granel: 65-75%
+                        target_pieces = max(1, int((container_volume / obj_volume) * 0.7))
+                        
+                        if max_pieces:
+                            target_pieces = min(target_pieces, max_pieces)
+                        
+                        result = bulk_optimizer.optimize_bulk(mesh, target_pieces)
+                    
+                    if progress_callback:
+                        progress_callback(85, "Processant resultats...")
+                    
+                    # Adaptar resultat al format esperat
+                    total_time = time.time() - start_time
+                    
+                    if result.get('success', False):
+                        adapted_result = {
+                            'positions': result.get('positions', []),
+                            'rotations': result.get('rotations', []),
+                            'efficiency': result.get('efficiency', 0) / 100,  # Convertir a fracció
+                            'pieces_count': result.get('pieces_count', 0),
+                            'execution_time': total_time,
+                            'method': result.get('method', 'advanced'),
+                            'floor_separation': floor_separation,
+                            'margin': margin if use_floor_mode else 0,
+                            'mode': 'floor_mode' if use_floor_mode else 'bulk_mode'
+                        }
+                    else:
+                        # Fallback en cas d'error
+                        adapted_result = self._fallback_optimization(mesh, box_dims_dict, max_pieces, use_floor_mode, margin, floor_separation)
+                    
+                    if progress_callback:
+                        progress_callback(100, "Optimització completada!")
+                    
+                    return adapted_result
+                    
+                except ImportError as e:
+                    print(f"⚠️ Mòduls nous no disponibles: {e}")
+                    # Fallback al mètode tradicional
+                    return self._fallback_optimization(mesh, box_dims_dict, max_pieces, use_floor_mode, margin, floor_separation)
+            
             else:
-                total_to_place = total_possible
-                
-            if progress_callback:
-                progress_callback(75, f"Generant {total_to_place} posicions...")
+                # Mòduls no disponibles, usar fallback
+                return self._fallback_optimization(mesh, box_dims_dict, max_pieces, use_floor_mode, margin, floor_separation)
             
-            # Generar posicions simplificades
-            positions = []
-            for i in range(total_to_place):
-                # Posicions simulades en graella
-                row = i % pieces_per_row if use_floor_mode else i % int(box_dims['length'] / obj_dims['length'])
-                col = (i // pieces_per_row) % pieces_per_column if use_floor_mode else (i // int(box_dims['length'] / obj_dims['length'])) % int(box_dims['width'] / obj_dims['width'])
-                floor_level = i // (pieces_per_floor) if use_floor_mode else i // (int(box_dims['length'] / obj_dims['length']) * int(box_dims['width'] / obj_dims['width']))
-                
-                x = row * obj_dims['length'] + obj_dims['length'] / 2
-                y = col * obj_dims['width'] + obj_dims['width'] / 2  
-                z = floor_level * (obj_dims['height'] + floor_separation) + obj_dims['height'] / 2 if use_floor_mode else (floor_level * obj_dims['height'] + obj_dims['height'] / 2)
-                
-                positions.append([x, y, z])
-            
-            if progress_callback:
-                progress_callback(90, "Finalitzant...")
-            
-            # Crear resultat simplificat
-            total_time = time.time() - start_time
-            efficiency = min(1.0, (total_to_place * obj_dims['length'] * obj_dims['width'] * obj_dims['height']) / 
-                            (box_dims['length'] * box_dims['width'] * box_dims['height']))
-            
-            result = {
-                'positions': positions,
-                'rotations': [[0, 0, 0]] * len(positions),  # Sense rotacions per simplicitat
-                'efficiency': efficiency,
-                'method': 'PISOS ORDENATS' if use_floor_mode else 'A GRANEL',
-                'box_dims': box_dims,
-                'obj_dims': obj_dims,
-                'margin': margin,
-                'floor_separation': floor_separation,
-                'total_floors': max_floors if use_floor_mode else 1,
-                'pieces_per_floor': pieces_per_floor if use_floor_mode else total_to_place,
-                'optimization_info': {
-                    'max_pieces': max_pieces,
-                    'iterations': iterations,
-                    'total_time': total_time,
-                    'margin': margin,
-                    'floor_separation': floor_separation
-                }
-            }
-            
-            if progress_callback:
-                progress_callback(100, "Optimització completada!")
-            
-            print(f"✅ Optimització completada: {len(positions)} peces en {total_time:.2f}s")
-            return result
-                
         except Exception as e:
-            print(f"❌ Error en optimització unificada: {str(e)}")
-            if progress_callback:
-                progress_callback(0, f"Error: {str(e)}")
-            return None
+            print(f"❌ Error en optimització: {e}")
+            return self._fallback_optimization(mesh, box_dims_dict, max_pieces, use_floor_mode, margin, floor_separation)
+
+    def _fallback_optimization(self, mesh, box_dims, max_pieces, use_floor_mode, margin, floor_separation):
+        """Optimització de fallback NOVA i SIMPLIFICADA - CRIDA LA FUNCIÓ NOVA"""
+        return self._fallback_optimization_new(mesh, box_dims, max_pieces, use_floor_mode, margin, floor_separation)
+        
+    def _fallback_optimization_new(self, mesh, box_dims, max_pieces, use_floor_mode, margin, floor_separation):
+        """Optimització de fallback NOVA i SIMPLIFICADA"""
+        import time
+        start_time = time.time()
+        
+        print(f"🔄 Usant optimització de fallback NOVA amb separació {floor_separation}mm")
+        
+        # === CALCULAR OBB OPTIMITZAT ===
+        try:
+            obb_result = self._compute_optimized_obb_fallback(mesh)
+            obj_dims = obb_result['final_dims']
+            oriented_mesh = obb_result['oriented_mesh']
+            print(f"✅ Usant dimensions OBB: {obj_dims[0]:.1f} × {obj_dims[1]:.1f} × {obj_dims[2]:.1f}")
+            used_obb = True
+        except Exception as e:
+            print(f"⚠️ Error amb OBB, usant AABB: {e}")
+            bounds = mesh.bounds
+            obj_dims = bounds[1] - bounds[0]
+            oriented_mesh = mesh
+            print(f"✅ Usant dimensions AABB: {obj_dims[0]:.1f} × {obj_dims[1]:.1f} × {obj_dims[2]:.1f}")
+            used_obb = False
+        
+        # === ALGORISME DE BIN PACKING SIMPLE I ROBUST ===
+        print(f"📦 Iniciant algorisme de bin packing robust...")
+        
+        # Dimensions del contenidor
+        container_length = box_dims['length']
+        container_width = box_dims['width'] 
+        container_height = box_dims['height']
+        
+        # Dimensions de la peça (sense marges)
+        piece_length = obj_dims[0]
+        piece_width = obj_dims[1]
+        piece_height = obj_dims[2]
+        
+        print(f"   Contenidor: {container_length} × {container_width} × {container_height}")
+        print(f"   Peça: {piece_length:.1f} × {piece_width:.1f} × {piece_height:.1f}")
+        
+        # Calcular quantes peces caben en cada dimensió (sense margin)
+        pieces_x = int(container_length // piece_length)
+        pieces_y = int(container_width // piece_width)
+        pieces_z = int(container_height // piece_height)
+        
+        max_theoretical_pieces = pieces_x * pieces_y * pieces_z
+        target_pieces = min(max_pieces if max_pieces else max_theoretical_pieces, max_theoretical_pieces)
+        
+        print(f"   Graella teòrica: {pieces_x} × {pieces_y} × {pieces_z} = {max_theoretical_pieces} peces")
+        print(f"   Objectiu: {target_pieces} peces")
+        
+        # === GENERAR POSICIONS AMB BOTTOM-LEFT-FRONT ALGORITHM ===
+        positions = []
+        rotations = []
+        pieces_placed = 0
+        
+        for z in range(pieces_z):
+            for y in range(pieces_y):
+                for x in range(pieces_x):
+                    if pieces_placed >= target_pieces:
+                        break
+                        
+                    # Calcular posició del centre de la peça
+                    pos_x = x * piece_length + piece_length / 2
+                    pos_y = y * piece_width + piece_width / 2
+                    pos_z = z * piece_height + piece_height / 2
+                    
+                    # Verificació ESTRICTA: la peça ha de estar completament dins
+                    max_x = pos_x + piece_length / 2
+                    max_y = pos_y + piece_width / 2
+                    max_z = pos_z + piece_height / 2
+                    
+                    if (max_x <= container_length and 
+                        max_y <= container_width and 
+                        max_z <= container_height):
+                        
+                        positions.append([pos_x, pos_y, pos_z])
+                        rotations.append([0, 0, 0])  # Sense rotació per ara
+                        pieces_placed += 1
+                        
+                        # Debug per les primeres peces
+                        if pieces_placed <= 3:
+                            print(f"      ✅ Peça {pieces_placed}: centre=({pos_x:.1f}, {pos_y:.1f}, {pos_z:.1f}), límits=({max_x:.1f}, {max_y:.1f}, {max_z:.1f})")
+                    else:
+                        print(f"      ❌ Peça en ({pos_x:.1f}, {pos_y:.1f}, {pos_z:.1f}) surtiria del contenidor")
+                        
+                if pieces_placed >= target_pieces:
+                    break
+            if pieces_placed >= target_pieces:
+                break
+        
+        # === CALCULAR RESULTATS ===
+        total_time = time.time() - start_time
+        
+        # Calcular eficiència
+        piece_volume = piece_length * piece_width * piece_height
+        used_volume = len(positions) * piece_volume
+        container_volume = container_length * container_width * container_height
+        efficiency = (used_volume / container_volume) * 100 if container_volume > 0 else 0
+        
+        # Preparar resultat
+        result = {
+            'positions': positions,
+            'rotations': rotations,
+            'efficiency': efficiency / 100,  # Convertir a fracció
+            'pieces_count': len(positions),
+            'execution_time': total_time,
+            'method': f'fallback_{"OBB" if used_obb else "AABB"}_{"floor" if use_floor_mode else "bulk"}_mode',
+            'box_dims': {
+                'length': container_length,
+                'width': container_width,
+                'height': container_height,
+                'volume': container_volume
+            },
+            'obj_dims': {
+                'length': piece_length,
+                'width': piece_width,
+                'height': piece_height,
+                'volume': piece_volume
+            },
+            'used_obb': used_obb,
+            'margin': margin,
+            'floor_separation': floor_separation,
+            'mode': 'floor_mode' if use_floor_mode else 'bulk_mode'
+        }
+        
+        print(f"✅ Optimització de fallback NOVA completada: {len(positions)} peces en {total_time:.2f}s")
+        print(f"📊 Eficiència: {efficiency:.1f}% - Volum utilitzat: {used_volume:.0f}/{container_volume:.0f} mm³")
+        
+        return result
+        """Optimització de fallback quan els mòduls nous no estan disponibles"""
+        import time
+        start_time = time.time()
+        
+        print(f"🔄 Usant optimització de fallback amb separació {floor_separation}mm")
+        
+        # ✨ MILLORA: Usar OBB en lloc d'AABB per dimensions més compactes
+        print("🔍 Calculant Oriented Bounding Box per al fallback...")
+        try:
+            # Calcular OBB optimitzat amb la mateixa lògica que hem implementat
+            obb_result = self._compute_optimized_obb_fallback(mesh)
+            obb_mesh = obb_result['canonical_mesh']
+            obb_dims = obb_result['obb_dimensions']
+            
+            # IMPORTANT: Separar dimensions pures d'OBB de dimensions amb marges
+            obj_dims_pure = {
+                'length': obb_dims[0],
+                'width': obb_dims[1], 
+                'height': obb_dims[2]
+            }
+            
+            obj_dims_with_margin = {
+                'length': obb_dims[0] + (margin * 2 if use_floor_mode else 0),
+                'width': obb_dims[1] + (margin * 2 if use_floor_mode else 0),
+                'height': obb_dims[2] + (margin * 2 if use_floor_mode else 0)
+            }
+            
+            print(f"✅ OBB dimensions pures: {obb_dims[0]:.1f} × {obb_dims[1]:.1f} × {obb_dims[2]:.1f}")
+            print(f"📏 Dimensions amb marge ({margin}mm): {obj_dims_with_margin['length']:.1f} × {obj_dims_with_margin['width']:.1f} × {obj_dims_with_margin['height']:.1f}")
+            mesh_for_positions = obb_mesh  # Usar la malla orientada
+            
+        except Exception as e:
+            print(f"⚠️ Error calculant OBB, usant AABB: {e}")
+            # Fallback a AABB
+            bounds = mesh.bounds
+            obj_dims_pure = {
+                'length': bounds[1][0] - bounds[0][0],
+                'width': bounds[1][1] - bounds[0][1],
+                'height': bounds[1][2] - bounds[0][2]
+            }
+            obj_dims_with_margin = {
+                'length': obj_dims_pure['length'] + (margin * 2 if use_floor_mode else 0),
+                'width': obj_dims_pure['width'] + (margin * 2 if use_floor_mode else 0),
+                'height': obj_dims_pure['height'] + (margin * 2 if use_floor_mode else 0)
+            }
+            mesh_for_positions = mesh
+        
+        # Simulació de càlcul de peces que caben (millorat per OBB)
+        print(f"📊 Càlcul d'empaquetament:")
+        print(f"   Contenidor: {box_dims['length']:.1f} × {box_dims['width']:.1f} × {box_dims['height']:.1f}")
+        print(f"   Objecte pur: {obj_dims_pure['length']:.1f} × {obj_dims_pure['width']:.1f} × {obj_dims_pure['height']:.1f}")
+        print(f"   Objecte amb marges: {obj_dims_with_margin['length']:.1f} × {obj_dims_with_margin['width']:.1f} × {obj_dims_with_margin['height']:.1f}")
+        
+        if use_floor_mode:
+            # USAR dimensions amb marge per calcular quantes caben
+            floor_height = obj_dims_with_margin['height'] + floor_separation
+            max_floors = max(1, int(box_dims['height'] / floor_height))
+            pieces_per_row = max(1, int(box_dims['length'] / obj_dims_with_margin['length']))
+            pieces_per_column = max(1, int(box_dims['width'] / obj_dims_with_margin['width']))
+            pieces_per_floor = pieces_per_row * pieces_per_column
+            total_possible = pieces_per_floor * max_floors
+            
+            print(f"   Mode pisos: {pieces_per_row} × {pieces_per_column} × {max_floors} = {total_possible} peces")
+            
+            # Guardar informació per generar posicions
+            spacing_info = {
+                'pieces_per_row': pieces_per_row,
+                'pieces_per_column': pieces_per_column,
+                'pieces_per_floor': pieces_per_floor,
+                'max_floors': max_floors,
+                'floor_height': floor_height
+            }
+        else:
+            # Mode a granel - provar TOTES les orientacions possibles per maximitzar
+            orientations_to_test = [
+                (obj_dims_with_margin['length'], obj_dims_with_margin['width'], obj_dims_with_margin['height']),   # LWH
+                (obj_dims_with_margin['length'], obj_dims_with_margin['height'], obj_dims_with_margin['width']),   # LHW  
+                (obj_dims_with_margin['width'], obj_dims_with_margin['length'], obj_dims_with_margin['height']),   # WLH
+                (obj_dims_with_margin['width'], obj_dims_with_margin['height'], obj_dims_with_margin['length']),   # WHL
+                (obj_dims_with_margin['height'], obj_dims_with_margin['length'], obj_dims_with_margin['width']),   # HLW
+                (obj_dims_with_margin['height'], obj_dims_with_margin['width'], obj_dims_with_margin['length'])    # HWL
+            ]
+            
+            max_count = 0
+            best_orientation = None
+            best_spacing = None
+            
+            for length, width, height in orientations_to_test:
+                fit_x = int(box_dims['length'] / length)
+                fit_y = int(box_dims['width'] / width)  
+                fit_z = int(box_dims['height'] / height)
+                count = fit_x * fit_y * fit_z
+                
+                print(f"   Orientació {length:.1f}×{width:.1f}×{height:.1f}: {fit_x}×{fit_y}×{fit_z} = {count} peces")
+                
+                if count > max_count:
+                    max_count = count
+                    best_orientation = (length, width, height)
+                    best_spacing = {
+                        'pieces_per_row': fit_x,
+                        'pieces_per_column': fit_y,
+                        'pieces_per_floor': fit_x * fit_y,
+                        'max_floors': fit_z,
+                        'step_x': length,
+                        'step_y': width,
+                        'step_z': height
+                    }
+            
+            total_possible = max_count
+            spacing_info = best_spacing
+            if best_orientation:
+                print(f"   ✅ Millor orientació: {best_orientation[0]:.1f} × {best_orientation[1]:.1f} × {best_orientation[2]:.1f}")
+        
+        if max_pieces:
+            total_to_place = min(total_possible, max_pieces)
+        else:
+            total_to_place = total_possible
+            
+        # Generar posicions correctes dins del contenidor
+        positions = []
+        rotations = []
+        
+        print(f"🎯 Generant {total_to_place} posicions...")
+        
+        for i in range(total_to_place):
+            if use_floor_mode:
+                # Mode pisos: distribució en graella amb marges correctes
+                row = i % spacing_info['pieces_per_row']
+                col = (i // spacing_info['pieces_per_row']) % spacing_info['pieces_per_column']
+                floor_level = i // spacing_info['pieces_per_floor']
+                
+                # IMPORTANT: Usar dimensions amb marge per calcular espaiament, però posició del centre de la peça pura
+                step_x = obj_dims_with_margin['length']
+                step_y = obj_dims_with_margin['width']
+                step_z = spacing_info['floor_height']
+                
+                # Posició del centre de la peça (sense comptar marges en la posició final)
+                x = row * step_x + obj_dims_pure['length'] / 2
+                y = col * step_y + obj_dims_pure['width'] / 2
+                z = floor_level * step_z + obj_dims_pure['height'] / 2
+                
+                # Verificar que està dins del contenidor
+                if (x + obj_dims_pure['length']/2 <= box_dims['length'] and
+                    y + obj_dims_pure['width']/2 <= box_dims['width'] and
+                    z + obj_dims_pure['height']/2 <= box_dims['height']):
+                    
+                    positions.append([x, y, z])
+                    rotations.append([0, 0, 0])  # Sense rotació addicional per ara
+                else:
+                    print(f"⚠️ Posició {i} ({x:.1f}, {y:.1f}, {z:.1f}) fora de límits")
+                    break
+                    
+            else:
+                # Mode a granel: distribució òptima
+                row = i % spacing_info['pieces_per_row']
+                col = (i // spacing_info['pieces_per_row']) % spacing_info['pieces_per_column']
+                floor_level = i // spacing_info['pieces_per_floor']
+                
+                # Usar spacing calculat per la millor orientació
+                step_x = spacing_info['step_x']
+                step_y = spacing_info['step_y']
+                step_z = spacing_info['step_z']
+                
+                # Ajustar dimensions pures segons l'orientació escollida
+                if best_orientation:
+                    piece_dim_x = best_orientation[0] - (margin * 2 if margin > 0 else 0)
+                    piece_dim_y = best_orientation[1] - (margin * 2 if margin > 0 else 0)
+                    piece_dim_z = best_orientation[2] - (margin * 2 if margin > 0 else 0)
+                else:
+                    piece_dim_x = obj_dims_pure['length']
+                    piece_dim_y = obj_dims_pure['width']
+                    piece_dim_z = obj_dims_pure['height']
+                
+                x = row * step_x + piece_dim_x / 2
+                y = col * step_y + piece_dim_y / 2
+                z = floor_level * step_z + piece_dim_z / 2
+                
+                # Verificar que està dins del contenidor
+                if (x + piece_dim_x/2 <= box_dims['length'] and
+                    y + piece_dim_y/2 <= box_dims['width'] and
+                    z + piece_dim_z/2 <= box_dims['height']):
+                    
+                    positions.append([x, y, z])
+                    rotations.append([0, 0, 0])  # Rotació segons orientació
+                else:
+                    print(f"⚠️ Posició {i} ({x:.1f}, {y:.1f}, {z:.1f}) fora de límits")
+                    break
+        
+        # Calcular estadístiques finalment
+        total_time = time.time() - start_time
+        
+        # Usar dimensions pures per calcular eficiència real 
+        obj_volume_pure = obj_dims_pure['length'] * obj_dims_pure['width'] * obj_dims_pure['height']
+        used_volume = len(positions) * obj_volume_pure
+        container_volume = box_dims['length'] * box_dims['width'] * box_dims['height']
+        efficiency = (used_volume / container_volume) * 100 if container_volume > 0 else 0
+        
+        result = {
+            'positions': positions[:max_pieces] if max_pieces else positions,
+            'rotations': rotations[:max_pieces] if max_pieces else rotations,
+            'efficiency': efficiency / 100,  # Convertir a fracció
+            'pieces_count': min(len(positions), max_pieces) if max_pieces else len(positions),
+            'execution_time': total_time,
+            'method': 'fallback_OBB_' + ('floor_mode' if use_floor_mode else 'bulk_mode') if 'obb_dims' in locals() else 'fallback_AABB_' + ('floor_mode' if use_floor_mode else 'bulk_mode'),
+            'box_dims': box_dims,
+            'obj_dims': obj_dims_pure,  # Retornar dimensions pures
+            'used_obb': 'obb_dims' in locals(),  # Indica si s'ha usat OBB
+            'margin': margin if use_floor_mode else 0,
+            'floor_separation': floor_separation,
+            'mode': 'floor_mode' if use_floor_mode else 'bulk_mode'
+        }
+        
+        print(f"✅ Optimització de fallback completada: {len(positions)} peces en {total_time:.2f}s")
+        print(f"📊 Eficiència: {efficiency:.1f}% - Volum utilitzat: {used_volume:.1f}/{container_volume:.1f} mm³")
+        return result
 
     def show_unified_optimization_results(self, result):
         """Mostra els resultats de l'optimització unificada"""
@@ -2943,9 +4380,9 @@ class PackAssistOriginalGUI:
             
             # Resum principal
             self.results_text.insert(tk.END, f"📊 RESUM PRINCIPAL:\n")
-            self.results_text.insert(tk.END, f"   • Peces empaquetades: {len(positions)}\n")
+            self.results_text.insert(tk.END, f"   • Peces empaquetades: {result['pieces_count']}\n")
             self.results_text.insert(tk.END, f"   • Mètode: {result.get('method', 'Desconegut')}\n")
-            self.results_text.insert(tk.END, f"   • Temps total: {optimization_info.get('total_time', 0):.2f} segons\n\n")
+            self.results_text.insert(tk.END, f"   • Temps total: {result.get('execution_time', 0):.2f} segons\n\n")
             
             # Eficiència
             efficiency = result.get('efficiency', 0) * 100
@@ -2960,12 +4397,15 @@ class PackAssistOriginalGUI:
             self.results_text.insert(tk.END, f"   • Objecte: {obj_dims.get('length', 0):.1f} × {obj_dims.get('width', 0):.1f} × {obj_dims.get('height', 0):.1f} mm\n\n")
             
             # Configuració específica segons el mode
-            if result.get('method') == 'PISOS ORDENATS':
+            mode = result.get('mode', 'floor_mode')
+            if mode == 'floor_mode':
                 self.results_text.insert(tk.END, f"🏢 CONFIGURACIÓ PISOS:\n")
-                self.results_text.insert(tk.END, f"   • Pisos utilitzats: {result.get('total_floors', 1)}\n")
-                self.results_text.insert(tk.END, f"   • Peces per pis: {result.get('pieces_per_floor', len(positions))}\n")
-                self.results_text.insert(tk.END, f"   • Marge aplicat: {result.get('margin', 0)}mm\n")
-                self.results_text.insert(tk.END, f"   • Separació pisos: {result.get('floor_separation', 0)}mm\n\n")
+                self.results_text.insert(tk.END, f"   • Separació entre pisos: {result.get('floor_separation', 0)}mm\n")
+                self.results_text.insert(tk.END, f"   • Marge al voltant de la peça: {result.get('margin', 0)}mm\n\n")
+            else:
+                self.results_text.insert(tk.END, f"📦 CONFIGURACIÓ A GRANEL:\n")
+                self.results_text.insert(tk.END, f"   • Separació entre peces: {result.get('floor_separation', 0)}mm\n")
+                self.results_text.insert(tk.END, f"   • Peces poden tocar-se: {'Sí' if result.get('margin', 0) == 0 else 'No'}\n\n")
             
             # Acció següent
             self.results_text.insert(tk.END, "🎯 SEGÜENTS PASSOS:\n")
@@ -2976,8 +4416,119 @@ class PackAssistOriginalGUI:
             
         except Exception as e:
             print(f"Error mostrant resultats: {e}")
-            self.results_text.insert(tk.END, f"Error mostrant resultats: {e}\n")
-            self.results_text.config(state='disabled')
+
+    def _compute_optimized_obb_fallback(self, mesh):
+        """
+        Implementació de fallback per calcular OBB optimitzat
+        Replica la funcionalitat de l'optimitzador OBB sense dependències externes
+        """
+        import trimesh
+        
+        print("   🔍 Calculant OBB optimitzat...")
+        
+        # Calcular AABB inicial per comparació
+        bounds = mesh.bounds
+        initial_dims = bounds[1] - bounds[0]
+        initial_volume = np.prod(initial_dims)
+        
+        print(f"   AABB inicial: {initial_dims[0]:.2f} × {initial_dims[1]:.2f} × {initial_dims[2]:.2f}")
+        
+        best_dims = initial_dims
+        best_volume = initial_volume
+        best_mesh = mesh.copy()
+        
+        # Provar orientacions bàsiques per trobar l'OBB més compacte
+        rotations = [
+            # Orientacions estàndard
+            [0, 0, 0],     # Normal
+            [0, 0, 90],    # Rotar 90° sobre Z
+            [0, 90, 0],    # Rotar 90° sobre Y  
+            [90, 0, 0],    # Rotar 90° sobre X
+            [0, 0, 180],   # Rotar 180° sobre Z
+            [0, 180, 0],   # Rotar 180° sobre Y
+            [180, 0, 0],   # Rotar 180° sobre X
+            # Orientacions combinades més comunes
+            [90, 90, 0],   # Combinació X+Y
+            [90, 0, 90],   # Combinació X+Z
+            [0, 90, 90],   # Combinació Y+Z
+        ]
+        
+        for rx, ry, rz in rotations:
+            try:
+                # Crear matriu de transformació
+                transform = trimesh.transformations.compose_matrix(
+                    angles=[np.radians(rx), np.radians(ry), np.radians(rz)]
+                )
+                
+                # Aplicar transformació
+                test_mesh = mesh.copy()
+                test_mesh.apply_transform(transform)
+                
+                # Calcular noves dimensions (AABB després de la rotació = OBB)
+                test_bounds = test_mesh.bounds
+                test_dims = test_bounds[1] - test_bounds[0]
+                test_volume = np.prod(test_dims)
+                
+                # Si és millor, guardar
+                if test_volume < best_volume:
+                    print(f"      ✨ Millor OBB: [{rx}°,{ry}°,{rz}°] → {test_dims[0]:.1f}×{test_dims[1]:.1f}×{test_dims[2]:.1f}")
+                    best_volume = test_volume
+                    best_dims = test_dims
+                    best_mesh = test_mesh
+                    
+            except Exception as e:
+                continue
+        
+        improvement = ((initial_volume - best_volume) / initial_volume * 100) if initial_volume > 0 else 0
+        print(f"   ✅ OBB final: {best_dims[0]:.2f} × {best_dims[1]:.2f} × {best_dims[2]:.2f} (millora: {improvement:.1f}%)")
+        
+        return {
+            'obb_dimensions': best_dims,
+            'canonical_mesh': best_mesh,
+            'improvement_percentage': improvement
+        }
+    
+    def _calculate_obb_comparison(self, mesh):
+        """Calcula i compara dimensions OBB vs AABB"""
+        try:
+            # Calcular AABB
+            bounds = mesh.bounds
+            aabb_dims = bounds[1] - bounds[0]
+            
+            # Calcular OBB directament amb trimesh
+            obb = mesh.bounding_box_oriented
+            obb_dims = obb.extents
+            
+            # Calcular volums
+            aabb_volume = np.prod(aabb_dims)
+            obb_volume = np.prod(obb_dims)
+            
+            # Calcular eficiència (OBB sempre hauria de ser <= AABB)
+            efficiency = (obb_volume / aabb_volume) * 100
+            
+            return {
+                'aabb_dims': aabb_dims,
+                'obb_dims': obb_dims,
+                'aabb_volume': aabb_volume,
+                'obb_volume': obb_volume,
+                'efficiency': efficiency,
+                'improvement': ((aabb_volume - obb_volume) / aabb_volume) * 100
+            }
+        except Exception as e:
+            print(f"❌ Error calculant dimensions OBB: {e}")
+            # Fallback a només AABB
+            bounds = mesh.bounds
+            aabb_dims = bounds[1] - bounds[0]
+            aabb_volume = np.prod(aabb_dims)
+            
+            return {
+                'aabb_dims': aabb_dims,
+                'obb_dims': aabb_dims,  # Usar AABB com a fallback
+                'aabb_volume': aabb_volume,
+                'obb_volume': aabb_volume,
+                'efficiency': 100.0,
+                'improvement': 0.0
+            }
 
 
 def main():

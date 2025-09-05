@@ -7,9 +7,11 @@ ezdxf>=1.0.0
 nptyping>=2.0.0,<3.0.0
 
 # GUI i sistema
-numpy>=1.21.0
+numpy
 matplotlib>=3.5.0
+pandas>=1.3.0
 tk
+gradio>=4.0.0
 
 # Machine Learning per al generador intel·ligent de caixes
 scikit-learn>=1.0.0
@@ -18,11 +20,11 @@ scipy>=1.7.0
 # Processament de geometria 3D
 trimesh>=3.15.0
 shapely>=1.8.0
-python-stl>=2.16.0
+numpy-stl
 
 # Simplificació de malles
 pymeshlab>=2023.12.post1
-pyfqmr>=1.1.0
+pyfqmr>=0.4.0
 fast-simplification>=0.1.0
 
 # Visualització 3D
@@ -34,6 +36,7 @@ vtk>=9.4.0
 scooby>=0.10.0
 pooch>=1.8.0
 PyQt5>=5.15.0
+open3d>=0.18.0
 
 # Gestió de fitxers
 pathlib2>=2.3.0
@@ -47,3 +50,6 @@ pyinstaller>=5.0.0
 # Desenvolupament i testing
 pytest
 black
+
+# Simulació física 3D
+pybullet>=3.2.6
