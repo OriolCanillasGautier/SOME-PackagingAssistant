@@ -57,6 +57,9 @@ test_*.py
 *_test.py
 tests/temp/
 
+# Development and experimental code
+proves/
+
 # Debug and development files
 debug_*.py
 scratch_*.py
