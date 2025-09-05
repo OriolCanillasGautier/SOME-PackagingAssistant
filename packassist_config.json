@@ -1,12 +1,12 @@
 {
   "show_wireframe": true,
   "show_labels": false,
-  "show_axes": false,
+  "show_axes": true,
   "show_grid": false,
-  "show_edges": false,
+  "show_edges": true,
   "color_scheme": "density",
-  "background_color": "white",
-  "wireframe_color": "blue",
+  "background_color": "black",
+  "wireframe_color": "green",
   "window_size": "1200x900",
   "auto_screenshot": false,
   "auto_stl_export": false,
@@ -17,7 +17,7 @@
   "wireframe_line_width": 4,
   "wireframe_opacity": 1.0,
   "container_walls_enabled": true,
-  "container_walls_opacity": 0.15,
+  "container_walls_opacity": 0.5,
   "container_top_open": true,
   "piece_colors": {
     "solid": [

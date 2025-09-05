@@ -7,6 +7,14 @@ import trimesh
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 
+# Importar el nou mòdul per calcular OBB
+try:
+    from .obb_calculator import get_mesh_info_with_obb
+    OBB_AVAILABLE = True
+except ImportError:
+    OBB_AVAILABLE = False
+    print("⚠️ Mòdul OBB no disponible")
+
 class MeshLoader:
     """Classe per carregar i processar malles 3D"""
     
@@ -85,6 +93,23 @@ class MeshLoader:
         if not mesh:
             return {}
         
+        # Si el mòdul OBB està disponible, utilitzar-lo per obtenir dimensions més precises
+        if OBB_AVAILABLE:
+            try:
+                obb_info = get_mesh_info_with_obb(mesh)
+                # Assegurar compatibilitat amb el format esperat
+                if 'obb_dims' in obb_info:
+                    obb_dims = obb_info['obb_dims']
+                    obb_info['dimensions'] = [
+                        obb_dims['length'],
+                        obb_dims['width'], 
+                        obb_dims['height']
+                    ]
+                return obb_info
+            except Exception as e:
+                print(f"⚠️ Error utilitzant OBB, utilitzant mètode tradicional: {e}")
+        
+        # Mètode tradicional com a fallback
         bounds = mesh.bounds
         dimensions = bounds[1] - bounds[0]
         

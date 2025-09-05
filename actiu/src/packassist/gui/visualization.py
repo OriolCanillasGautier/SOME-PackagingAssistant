@@ -3,11 +3,83 @@ Mòdul de visualització 3D
 """
 
 import numpy as np
+import json
+import os
 from typing import List, Dict, Any, Optional
 import tkinter as tk
 from tkinter import messagebox
 
-from ..utils.config import VISUALIZATION_CONFIG, COLOR_PALETTE
+def load_visualization_config():
+    """Carrega la configuració de visualització des del JSON"""
+    # Buscar el fitxer de configuració
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(current_dir))))
+    config_path = os.path.join(project_root, 'packassist_config.json')
+    
+    # Configuració per defecte
+    default_config = {
+        'max_pieces_for_labels': 100,
+        'max_pieces_for_gradient': 50,
+        'performance_warning_threshold': 100,
+        'show_wireframe': True,
+        'show_labels': False,
+        'show_axes': True,
+        'show_grid': False,
+        'show_edges': True,
+        'color_scheme': 'density',
+        'background_color': 'black',
+        'wireframe_color': 'green',
+        'window_size': '1200x900',
+        'auto_screenshot': False,
+        'auto_stl_export': False,
+        'auto_json_export': False,
+        'auto_csv_export': False,
+        'use_gradient': False,
+        'piece_opacity': 1.0,
+        'wireframe_line_width': 4,
+        'wireframe_opacity': 1.0,
+        'container_walls_enabled': True,
+        'container_walls_opacity': 0.5,
+        'container_top_open': True,
+        'camera': {
+            'position': 'iso',
+            'auto_fit': True
+        },
+        'lighting': {
+            'ambient': 0.3,
+            'diffuse': 0.7
+        }
+    }
+    
+    try:
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                json_config = json.load(f)
+                # Combinar amb la configuració per defecte
+                default_config.update(json_config)
+                print(f"✅ Configuració carregada des de: {config_path}")
+        else:
+            print(f"⚠️  Fitxer de configuració no trobat: {config_path}")
+            print("🔧 Utilitzant configuració per defecte")
+    except Exception as e:
+        print(f"❌ Error carregant configuració: {e}")
+        print("🔧 Utilitzant configuració per defecte")
+    
+    return default_config
+
+# Carregar configuració des del JSON
+VISUALIZATION_CONFIG = load_visualization_config()
+
+# Paletes de colors des de la configuració JSON o per defecte
+COLOR_PALETTE = VISUALIZATION_CONFIG.get('piece_colors', {}).get('solid', [
+    '#DC143C', '#1E90FF', '#228B22', '#FF8C00', '#9370DB', 
+    '#D2691E', '#FF1493', '#696969', '#808000', '#00CED1'
+])
+
+DENSITY_COLORS = VISUALIZATION_CONFIG.get('piece_colors', {}).get('density', [
+    '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', 
+    '#FD79A8', '#FDCB6E', '#6C5CE7', '#A29BFE', '#74B9FF'
+])
 
 class Visualizer3D:
     """Classe per gestionar la visualització 3D"""
@@ -15,8 +87,13 @@ class Visualizer3D:
     def __init__(self):
         self.config = VISUALIZATION_CONFIG
     
+    def reload_config(self):
+        """Recarrega la configuració des del fitxer JSON"""
+        self.config = load_visualization_config()
+        print("🔄 Configuració de visualització recarregada")
+    
     def show_direct_3d(self, results: Dict[str, Any], mesh) -> bool:
-        """Mostra directament la visualització 3D amb defaults intel·ligents"""
+        """Mostra directament la visualització 3D amb configuració del JSON"""
         positions = results.get('positions', [])
         rotations = results.get('rotations', [])
         box_dims = results.get('box_dims', {})
@@ -27,14 +104,15 @@ class Visualizer3D:
         
         num_pieces = len(positions)
         
-        # Defaults intel·ligents
-        show_wireframe = True
-        show_labels = num_pieces <= self.config['max_pieces_for_labels']
-        use_gradient = num_pieces > self.config['max_pieces_for_gradient']
+        # Utilitzar configuració del JSON
+        show_wireframe = self.config.get('show_wireframe', True)
+        show_labels = self.config.get('show_labels', False) and num_pieces <= self.config.get('max_pieces_for_labels', 100)
+        use_gradient = self.config.get('use_gradient', False) or num_pieces > self.config.get('max_pieces_for_gradient', 50)
         
-        print(f"🎮 Visualització directa: {num_pieces} peces")
+        print(f"🎮 Visualització directa (JSON config): {num_pieces} peces")
         print(f"   - Etiquetes: {'Sí' if show_labels else 'No'}")
         print(f"   - Gradient: {'Sí' if use_gradient else 'No'}")
+        print(f"   - Wireframe: {'Sí' if show_wireframe else 'No'}")
         
         return self._render_3d_scene_direct(mesh, positions, rotations, box_dims, 
                                           show_wireframe, show_labels, use_gradient)
@@ -98,48 +176,71 @@ class Visualizer3D:
             import pyvista as pv
             
             num_pieces = len(positions)
-            print(f"🎮 Renderitzant {num_pieces} peces...")
+            print(f"🎮 Renderitzant {num_pieces} peces amb configuració JSON...")
             
             # Optimització per moltes peces
-            if num_pieces > self.config['performance_warning_threshold']:
+            if num_pieces > self.config.get('performance_warning_threshold', 100):
                 response = messagebox.askyesno(
                     "Moltes peces detectades",
                     f"S'han trobat {num_pieces} peces.\n\n"
                     f"Visualitzar totes pot ser lent.\n"
                     f"Vols continuar?\n\n"
                     f"• SÍ: Visualitzar totes\n"
-                    f"• NO: Visualitzar només les primeres {self.config['performance_warning_threshold']}"
+                    f"• NO: Visualitzar només les primeres {self.config.get('performance_warning_threshold', 100)}"
                 )
                 if not response:
-                    positions = positions[:self.config['performance_warning_threshold']]
-                    rotations = rotations[:self.config['performance_warning_threshold']]
-                    num_pieces = self.config['performance_warning_threshold']
+                    threshold = self.config.get('performance_warning_threshold', 100)
+                    positions = positions[:threshold]
+                    rotations = rotations[:threshold]
+                    num_pieces = threshold
             
-            # Crear visualitzador
-            plotter = pv.Plotter(window_size=self.config['default_window_size'])
-            plotter.set_background(self.config['background_color'])
+            # Parsejar mida de finestra des de la configuració JSON
+            window_size_str = self.config.get('window_size', '1200x900')
+            try:
+                width, height = map(int, window_size_str.split('x'))
+                window_size = (width, height)
+            except:
+                window_size = (1200, 900)
             
-            # Afegir contenidor (wireframe)
-            if box_dims and show_wireframe:
+            # Crear visualitzador amb configuració JSON
+            plotter = pv.Plotter(window_size=window_size)
+            plotter.set_background(self.config.get('background_color', 'white'))
+            
+            # Afegir contenidor (wireframe) amb configuració JSON
+            if box_dims and show_wireframe and self.config.get('container_walls_enabled', True):
                 box = pv.Box(bounds=[0, box_dims['length'], 0, box_dims['width'], 0, box_dims['height']])
-                plotter.add_mesh(box, style='wireframe', color='black', line_width=3, opacity=0.5)
+                wireframe_color = self.config.get('wireframe_color', 'black')
+                wireframe_width = self.config.get('wireframe_line_width', 3)
+                wireframe_opacity = self.config.get('wireframe_opacity', 0.5)
+                plotter.add_mesh(box, style='wireframe', color=wireframe_color, 
+                               line_width=wireframe_width, opacity=wireframe_opacity)
             
             # Convertir mesh a PyVista
             base_mesh_pv = self._trimesh_to_pyvista(mesh)
             
-            # Renderitzar peces
-            if num_pieces <= 50 and not use_gradient:
-                self._render_unique_colors(plotter, base_mesh_pv, positions, rotations, show_labels)
-            else:
+            # Renderitzar peces segons l'esquema de colors de la configuració
+            color_scheme = self.config.get('color_scheme', 'solid')
+            if color_scheme == 'density' or use_gradient:
                 self._render_gradient_colors(plotter, base_mesh_pv, positions, rotations, show_labels)
+            else:
+                self._render_unique_colors(plotter, base_mesh_pv, positions, rotations, show_labels)
             
             # Informació i llegenda
             self._add_scene_info(plotter, num_pieces, use_gradient)
             
-            # Configurar vista
-            plotter.camera_position = 'iso'
-            plotter.show_grid()
-            plotter.add_axes()
+            # Configurar vista amb configuració JSON
+            camera_config = self.config.get('camera', {})
+            plotter.camera_position = camera_config.get('position', 'iso')
+            
+            # Afegir elements segons configuració JSON
+            if self.config.get('show_grid', False):
+                plotter.show_grid()
+            if self.config.get('show_axes', True):
+                plotter.add_axes()
+            
+            # Captura automàtica si cal
+            if self.config.get('auto_screenshot', False):
+                self._auto_screenshot(plotter)
             
             # Mostrar
             plotter.show(interactive=True, auto_close=False)
@@ -225,73 +326,22 @@ class Visualizer3D:
         except Exception as e:
             messagebox.showerror("Error", f"Error en la visualització 3D personalitzada:\n{e}")
             return False
-        """Renderitza l'escena 3D"""
-        try:
-            import pyvista as pv
-            
-            num_pieces = len(positions)
-            print(f"🎮 Renderitzant {num_pieces} peces...")
-            
-            # Optimització per moltes peces
-            if num_pieces > self.config['performance_warning_threshold']:
-                response = messagebox.askyesno(
-                    "Moltes peces detectades",
-                    f"S'han trobat {num_pieces} peces.\n\n"
-                    f"Visualitzar totes pot ser lent.\n"
-                    f"Vols continuar?\n\n"
-                    f"• SÍ: Visualitzar totes\n"
-                    f"• NO: Visualitzar només les primeres {self.config['performance_warning_threshold']}"
-                )
-                if not response:
-                    positions = positions[:self.config['performance_warning_threshold']]
-                    rotations = rotations[:self.config['performance_warning_threshold']]
-                    num_pieces = self.config['performance_warning_threshold']
-            
-            # Crear visualitzador
-            plotter = pv.Plotter(window_size=self.config['default_window_size'])
-            plotter.set_background(self.config['background_color'])
-            
-            # Afegir contenidor (wireframe)
-            if box_dims and show_wireframe:
-                box = pv.Box(bounds=[0, box_dims['length'], 0, box_dims['width'], 0, box_dims['height']])
-                plotter.add_mesh(box, style='wireframe', color='black', line_width=3, opacity=0.5)
-            
-            # Convertir mesh a PyVista
-            base_mesh_pv = self._trimesh_to_pyvista(mesh)
-            
-            # Renderitzar peces
-            if num_pieces <= 50 and not use_gradient:
-                self._render_unique_colors(plotter, base_mesh_pv, positions, rotations, show_labels)
-            else:
-                self._render_gradient_colors(plotter, base_mesh_pv, positions, rotations, show_labels)
-            
-            # Informació i llegenda
-            self._add_scene_info(plotter, num_pieces, use_gradient)
-            
-            # Configurar vista
-            plotter.camera_position = 'iso'
-            plotter.show_grid()
-            plotter.add_axes()
-            
-            # Captura automàtica si cal
-            if auto_screenshot:
-                self._auto_screenshot(plotter)
-            
-            # Mostrar
-            plotter.show(interactive=True, auto_close=False)
-            
-            return True
-            
-        except ImportError:
-            messagebox.showerror("Error", "PyVista no està instal·lat.\nInstal·la'l amb: pip install pyvista")
-            return False
-        except Exception as e:
-            messagebox.showerror("Error", f"Error en la visualització 3D:\n{e}")
-            return False
     
     def _render_unique_colors(self, plotter, base_mesh_pv, positions: List, 
                             rotations: List, show_labels: bool):
-        """Renderitza amb colors únics per cada peça (colors sòlids com pestanyes 1 i 2)"""
+        """Renderitza amb colors únics per cada peça utilitzant la configuració JSON"""
+        # Utilitzar paleta de colors de la configuració JSON
+        color_scheme = self.config.get('color_scheme', 'solid')
+        piece_colors = self.config.get('piece_colors', {})
+        
+        if color_scheme == 'density':
+            colors = piece_colors.get('density', DENSITY_COLORS)
+        else:  # solid o qualsevol altre
+            colors = piece_colors.get('solid', COLOR_PALETTE)
+        
+        piece_opacity = self.config.get('piece_opacity', 1.0)
+        show_edges = self.config.get('show_edges', False)
+        
         for i, (pos, rot) in enumerate(zip(positions, rotations)):
             piece_mesh = base_mesh_pv.copy()
             
@@ -301,21 +351,28 @@ class Visualizer3D:
             # Aplicar translació
             piece_mesh = piece_mesh.translate(pos, inplace=False)
             
-            # Color únic sòlid (com pestanyes 1 i 2)
-            color_index = i % len(COLOR_PALETTE)
-            color = COLOR_PALETTE[color_index]
+            # Color únic des de la paleta de configuració
+            color_index = i % len(colors)
+            color = colors[color_index]
             
-            # Afegir malla amb colors sòlids
-            plotter.add_mesh(piece_mesh, color=color, opacity=1.0, show_edges=False)
+            # Afegir malla amb configuració JSON
+            plotter.add_mesh(piece_mesh, color=color, opacity=piece_opacity, 
+                           show_edges=show_edges)
             
-            # Etiquetes cada 5 peces per no saturar
+            # Etiquetes cada 5 peces per no saturar (si estan habilitades)
             if show_labels and i % 5 == 0:
                 plotter.add_point_labels([pos], [f"P{i+1}"], point_size=6, font_size=8)
     
     def _render_gradient_colors(self, plotter, base_mesh_pv, positions: List,
                               rotations: List, show_labels: bool):
-        """Renderitza amb gradient de colors basat en altura"""
-        # Calcular rang d'altures
+        """Renderitza amb gradient de colors utilitzant la configuració JSON"""
+        # Utilitzar colors de densitat de la configuració JSON
+        piece_colors = self.config.get('piece_colors', {})
+        density_colors = piece_colors.get('density', DENSITY_COLORS)
+        piece_opacity = self.config.get('piece_opacity', 1.0)
+        show_edges = self.config.get('show_edges', False)
+        
+        # Calcular rang d'altures per al gradient
         z_positions = [pos[2] for pos in positions]
         z_min, z_max = min(z_positions), max(z_positions)
         z_range = z_max - z_min if z_max > z_min else 1
@@ -329,14 +386,16 @@ class Visualizer3D:
             # Aplicar translació
             piece_mesh = piece_mesh.translate(pos, inplace=False)
             
-            # Color basat en altura (gradient blau->vermell)
+            # Color basat en altura utilitzant la paleta de densitat
             height_ratio = (pos[2] - z_min) / z_range
-            color = [height_ratio, 0.2, 1.0 - height_ratio]
+            color_index = int(height_ratio * (len(density_colors) - 1))
+            color = density_colors[color_index]
             
-            # Afegir malla
-            plotter.add_mesh(piece_mesh, color=color, opacity=0.6, show_edges=False)
+            # Afegir malla amb configuració JSON
+            plotter.add_mesh(piece_mesh, color=color, opacity=piece_opacity, 
+                           show_edges=show_edges)
             
-            # Etiquetes cada 20 peces
+            # Etiquetes cada 20 peces (si estan habilitades)
             if show_labels and i % 20 == 0:
                 plotter.add_point_labels([pos], [f"{i+1}"], point_size=4, font_size=6)
     

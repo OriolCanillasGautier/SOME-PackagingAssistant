@@ -19,7 +19,7 @@ try:
         SimplifiedMesh
     )
     MESH_SIMPLIFICATION_AVAILABLE = True
-    print("✅ Sistema de simplificació de malla disponible")
+    print("[OK] Sistema de simplificació de malla disponible")
 except ImportError as e:
     MESH_SIMPLIFICATION_AVAILABLE = False
     print(f"⚠️ Sistema de simplificació no disponible: {e}")

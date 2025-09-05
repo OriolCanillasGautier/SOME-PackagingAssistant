@@ -1,8 +1,22 @@
 """
-Core package initialization
+Mòdul principal del nucli de PackAssist
 """
 
 from .mesh_loader import MeshLoader
-from .optimization import PackingOptimizer, BoundingBox
+from .mesh_simplifiers import get_mesh_simplifier
+from .optimization import PackingOptimizer
 from .export import ResultsExporter
-from .mesh_simplifiers import simplify_mesh_pymeshlab, simplify_mesh_trimesh
+from .validation_utils import validate_positions_within_container, filter_valid_positions
+from ..optimizers import OBBOptimizer, BulkPackingOptimizer, NormalPackingOptimizer
+
+__all__ = [
+    'MeshLoader',
+    'get_mesh_simplifier',
+    'PackingOptimizer',
+    'ResultsExporter',
+    'validate_positions_within_container',
+    'filter_valid_positions',
+    'OBBOptimizer',
+    'BulkPackingOptimizer',
+    'NormalPackingOptimizer'
+]
