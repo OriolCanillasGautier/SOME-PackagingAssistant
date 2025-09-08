@@ -294,7 +294,30 @@ with gr.Blocks(
         secondary_hue="gray",
         neutral_hue="slate"
     ),
+    analytics_enabled=False,
     css="""
+    /* Ocultar footer de Gradio completament */
+    .gradio-container footer,
+    .footer,
+    .gradio-footer,
+    [data-testid="footer"],
+    .gradio-app footer,
+    footer,
+    .built-with {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    
+    /* Ocultar enllaços d'API i configuració */
+    .gradio-link,
+    .api-link,
+    .config-link {
+        display: none !important;
+    }
+    
     /* Variables de color */
     :root {
         --bg-primary: #1a1a1a;
@@ -368,20 +391,36 @@ with gr.Blocks(
         transform: translateY(-1px) !important;
     }
     
-    /* Checkbox i slider arreglats */
-    .gradio-checkbox input[type="checkbox"] {
-        appearance: auto !important;
+    /* Checkbox arreglat amb ID específic */
+    #rotation-checkbox-gradio input[type="checkbox"] {
+        appearance: checkbox !important;
         -webkit-appearance: checkbox !important;
-        width: 18px !important;
-        height: 18px !important;
+        -moz-appearance: checkbox !important;
+        width: 20px !important;
+        height: 20px !important;
         accent-color: var(--accent-blue) !important;
+        background: var(--bg-secondary) !important;
+        border: 2px solid var(--accent-blue) !important;
+        border-radius: 4px !important;
+        cursor: pointer !important;
+        margin-right: 8px !important;
     }
     
-    .gradio-checkbox label {
+    #rotation-checkbox-gradio input[type="checkbox"]:checked {
+        background: var(--accent-blue) !important;
+        border-color: var(--accent-blue) !important;
+    }
+    
+    #rotation-checkbox-gradio label {
         color: var(--text-primary) !important;
         display: flex !important;
         align-items: center !important;
-        gap: 8px !important;
+        cursor: pointer !important;
+        font-weight: 500 !important;
+    }
+    
+    #rotation-checkbox-gradio {
+        margin: 10px 0 !important;
     }
     
     .gradio-slider {
@@ -486,9 +525,9 @@ with gr.Blocks(
 ) as demo:
     
     gr.Markdown("""
-    <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #3b82f6, #1e40af); border-radius: 15px; margin-bottom: 30px; box-shadow: 0 8px 25px rgba(59, 130, 246, 0.3);">
-        <h1 style="color: white; margin: 0; font-size: 36px; font-weight: 800;">📦 Calculadora de Capacitat de Peces</h1>
-        <p style="color: rgba(255, 255, 255, 0.9); margin: 10px 0 0 0; font-size: 18px;">Càlcul basat en l'Excel - Oriol Canillas</p>
+    <div style="text-align: center; padding: 20px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; margin-bottom: 25px;">
+        <h1 style="color: var(--text-primary); margin: 0; font-size: 28px; font-weight: 700;">📦 Calculadora de Capacitat de Peces</h1>
+        <p style="color: var(--text-secondary); margin: 8px 0 0 0; font-size: 16px; opacity: 0.8;">Càlcul precis i eficient</p>
     </div>
     """, elem_classes=["main-container"])
     
@@ -503,9 +542,7 @@ with gr.Blocks(
                             label="STL", 
                             file_types=[".stl", ".STL"],
                             file_count="single",
-                            show_label=True,
-                            elem_classes=["stl-upload"],
-                            container=False
+                            elem_classes=["stl-upload"]
                         )
                     else:
                         stl_upload = gr.File(visible=False)
@@ -534,7 +571,8 @@ with gr.Blocks(
                 allow_rotation = gr.Checkbox(
                     value=True, 
                     label="Permetre rotacions",
-                    interactive=True
+                    interactive=True,
+                    elem_id="rotation-checkbox-gradio"
                 )
                 safety_factor = gr.Slider(
                     minimum=0.5, maximum=1.0, value=DEFAULT_SAFETY_FACTOR, step=0.05,
@@ -580,4 +618,9 @@ with gr.Blocks(
     )
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.launch(
+        show_api=False,
+        show_error=True,
+        inbrowser=True,
+        quiet=False
+    )
