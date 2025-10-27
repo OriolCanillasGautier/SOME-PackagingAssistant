@@ -41,6 +41,11 @@ if __name__ == "__main__":
         md_file = os.path.splitext(pdf_file)[0] + ".md"
         md_path = os.path.join(output_dir, md_file)
         
+        # Comprovar si el fitxer markdown ja existeix
+        if os.path.exists(md_path):
+            print(f"Saltant {pdf_file} - ja està convertit: {md_file}")
+            continue
+        
         print(f"Convertint {pdf_file} a {md_file}...")
         pdf_to_markdown(pdf_path, md_path)
         print(f"Conversió completada: {md_file}")

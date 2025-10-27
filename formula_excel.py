@@ -353,6 +353,54 @@ with gr.Blocks(
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3) !important;
     }
     
+    /* Secció objecte amb accent blau */
+    .objecte-section {
+        border-left: 4px solid var(--accent-blue) !important;
+        background: linear-gradient(135deg, var(--bg-card), rgba(59, 130, 246, 0.05)) !important;
+    }
+    
+    /* Secció caixa amb accent verd */
+    .caixa-section {
+        border-left: 4px solid var(--accent-green) !important;
+        background: linear-gradient(135deg, var(--bg-card), rgba(16, 185, 129, 0.05)) !important;
+    }
+    
+    /* Forms diferents per cada secció */
+    .objecte-section .form {
+        border: 1px solid rgba(59, 130, 246, 0.2) !important;
+        border-radius: 8px !important;
+        padding: 15px !important;
+        background: rgba(59, 130, 246, 0.02) !important;
+    }
+    
+    .caixa-section .form {
+        border: 1px solid rgba(16, 185, 129, 0.2) !important;
+        border-radius: 8px !important;
+        padding: 15px !important;
+        background: rgba(16, 185, 129, 0.02) !important;
+    }
+    
+    /* Inputs amb colors temàtics */
+    .objecte-section input:focus {
+        border-color: var(--accent-blue) !important;
+        box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3) !important;
+    }
+    
+    .caixa-section input:focus {
+        border-color: var(--accent-green) !important;
+        box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.3) !important;
+    }
+    
+    /* Secció càlcul amb accent groc */
+    .calcul-section {
+        border-left: 4px solid #fbbf24 !important;
+        background: linear-gradient(135deg, var(--bg-card), rgba(251, 191, 36, 0.05)) !important;
+    }
+    
+    .calcul-section .gradio-slider input[type="range"] {
+        accent-color: #fbbf24 !important;
+    }
+    
     /* Capçaleres */
     h1, h2, h3, h4, h5, h6 {
         color: var(--text-primary) !important;
@@ -391,38 +439,6 @@ with gr.Blocks(
         transform: translateY(-1px) !important;
     }
     
-    /* Checkbox arreglat amb ID específic */
-    #rotation-checkbox-gradio input[type="checkbox"] {
-        appearance: checkbox !important;
-        -webkit-appearance: checkbox !important;
-        -moz-appearance: checkbox !important;
-        width: 20px !important;
-        height: 20px !important;
-        accent-color: var(--accent-blue) !important;
-        background: var(--bg-secondary) !important;
-        border: 2px solid var(--accent-blue) !important;
-        border-radius: 4px !important;
-        cursor: pointer !important;
-        margin-right: 8px !important;
-    }
-    
-    #rotation-checkbox-gradio input[type="checkbox"]:checked {
-        background: var(--accent-blue) !important;
-        border-color: var(--accent-blue) !important;
-    }
-    
-    #rotation-checkbox-gradio label {
-        color: var(--text-primary) !important;
-        display: flex !important;
-        align-items: center !important;
-        cursor: pointer !important;
-        font-weight: 500 !important;
-    }
-    
-    #rotation-checkbox-gradio {
-        margin: 10px 0 !important;
-    }
-    
     .gradio-slider {
         color: var(--text-primary) !important;
     }
@@ -431,54 +447,54 @@ with gr.Blocks(
         accent-color: var(--accent-blue) !important;
     }
     
-    /* Botó d'STL compacte i horitzontal */
-    .gradio-file, .stl-upload {
+    /* Botó STL compacte */
+    .stl-upload {
+        max-height: 45px !important;
+        min-height: 45px !important;
+        max-width: 100px !important;
         background: var(--bg-secondary) !important;
         border: 1px solid var(--accent-blue) !important;
         border-radius: 6px !important;
-        color: var(--text-primary) !important;
-        padding: 8px 12px !important;
-        max-height: 40px !important;
-        min-height: 40px !important;
-        width: 100% !important;
-        max-width: 120px !important;
     }
     
-    /* Ocultar tot el contingut innecessari del file upload */
-    .gradio-file .file-info,
-    .gradio-file .upload-text,
-    .gradio-file .file-preview,
-    .gradio-file > div > div:first-child {
-        display: none !important;
+    /* Control específic del component file */
+    .stl-upload .block {
+        max-height: 45px !important;
+        min-height: 45px !important;
+        background: var(--bg-secondary) !important;
+        border: 1px solid var(--accent-blue) !important;
+        border-radius: 6px !important;
     }
     
-    /* Fer que el botó sembli un botó normal */
-    .gradio-file {
-        display: flex !important;
-        align-items: center !important;
-        justify-content: center !important;
-        cursor: pointer !important;
-        font-size: 12px !important;
+    /* Label del STL més petit */
+    .stl-upload label {
+        font-size: 11px !important;
         font-weight: 600 !important;
-        text-align: center !important;
+        color: var(--accent-blue) !important;
+        padding: 2px 4px !important;
     }
     
-    .gradio-file:hover {
-        background: var(--accent-blue) !important;
-        color: white !important;
+    /* Botó interior més compacte */
+    .stl-upload button {
+        font-size: 10px !important;
+        padding: 4px 8px !important;
+        min-height: 30px !important;
+        max-height: 30px !important;
+        background: transparent !important;
+        border: none !important;
     }
     
-    /* Ocultar el text d'ajuda del File upload */
-    .stl-upload .file-preview, 
-    .stl-upload .upload-text,
-    .gradio-file .file-preview,
-    .gradio-file .upload-text,
-    .gradio-file .wrap > div:last-child {
+    /* Ocultar icones i text innecessari */
+    .stl-upload .icon-wrap,
+    .stl-upload .or,
+    .stl-upload button > div > span:first-child {
         display: none !important;
     }
     
-    .gradio-file .wrap {
-        min-height: auto !important;
+    /* Només mostrar el text principal */
+    .stl-upload button .wrap {
+        font-size: 10px !important;
+        line-height: 1.2 !important;
     }
     
     /* Àrea de resultats */
@@ -521,18 +537,30 @@ with gr.Blocks(
     hr {
         border-color: var(--border-color) !important;
     }
+    
+    /* Ajustar títol caixa per igualar alçada del botó STL */
+    .caixa-title {
+        margin-bottom: 20px !important; /* Reduït per millor equilibri */
+        padding-bottom: 0 !important;
+    }
+    
+    /* Millor alineació del botó STL */
+    .stl-upload {
+        align-self: flex-start !important; /* Alinear al principi */
+        margin-top: 8px !important; /* Petit ajust vertical */
+    }
     """
 ) as demo:
     
     gr.Markdown("""
-    <div style="text-align: center; padding: 20px; background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; margin-bottom: 25px;">
-        <h1 style="color: var(--text-primary); margin: 0; font-size: 28px; font-weight: 700;">📦 Calculadora de Capacitat de Peces</h1>
-        <p style="color: var(--text-secondary); margin: 8px 0 0 0; font-size: 16px; opacity: 0.8;">Càlcul precis i eficient</p>
+    <div style="text-align: center; padding: 30px; background: linear-gradient(135deg, #3b82f6, #1e40af); border-radius: 15px; margin-bottom: 30px; box-shadow: 0 8px 25px rgba(59, 130, 246, 0.3);">
+        <h1 style="color: white; margin: 0; font-size: 36px; font-weight: 800;">📦 Calculadora de Capacitat de Peces</h1>
+        <p style="color: rgba(255, 255, 255, 0.9); margin: 10px 0 0 0; font-size: 18px;">Càlcul basat en l'Excel - Oriol Canillas</p>
     </div>
     """, elem_classes=["main-container"])
     
     with gr.Row():
-        with gr.Column(scale=1, elem_classes=["input-section"]):
+        with gr.Column(scale=1, elem_classes=["input-section", "objecte-section"]):
             with gr.Row():
                 with gr.Column(scale=3):
                     gr.Markdown("### 📏 **Dimensions de l'Objecte** (mm)")
@@ -542,7 +570,9 @@ with gr.Blocks(
                             label="STL", 
                             file_types=[".stl", ".STL"],
                             file_count="single",
-                            elem_classes=["stl-upload"]
+                            elem_classes=["stl-upload"],
+                            container=False,
+                            height=45
                         )
                     else:
                         stl_upload = gr.File(visible=False)
@@ -555,8 +585,8 @@ with gr.Blocks(
             # Missatge d'estat per STL
             stl_status = gr.Markdown("", visible=STL_SUPPORT)
         
-        with gr.Column(scale=1, elem_classes=["input-section"]):
-            gr.Markdown("### 📦 **Dimensions de la Caixa** (mm)")
+        with gr.Column(scale=1, elem_classes=["input-section", "caixa-section"]):
+            gr.Markdown("### 📦 **Dimensions de la Caixa** (mm)", elem_classes=["caixa-title"])
             
             box_l = gr.Number(value=1000, label="Llargada (mm)", precision=1, minimum=0.1)
             box_w = gr.Number(value=450, label="Amplada (mm)", precision=1, minimum=0.1)
@@ -564,23 +594,17 @@ with gr.Blocks(
             max_weight = gr.Number(value=60.0, label="Pes màxim (kg)", precision=1, minimum=0.1)
     
     with gr.Row():
-        with gr.Column(elem_classes=["input-section"]):
+        with gr.Column(elem_classes=["input-section", "calcul-section"]):
             gr.Markdown("### ⚙️ **Opcions de Càlcul**")
             
             with gr.Row():
-                allow_rotation = gr.Checkbox(
-                    value=True, 
-                    label="Permetre rotacions",
-                    interactive=True,
-                    elem_id="rotation-checkbox-gradio"
-                )
                 safety_factor = gr.Slider(
                     minimum=0.5, maximum=1.0, value=DEFAULT_SAFETY_FACTOR, step=0.05,
                     label="Factor de seguretat",
-                    interactive=True
+                    interactive=True,
+                    scale=2
                 )
-    
-    calculate_btn = gr.Button("🔍 CALCULAR CAPACITAT", variant="primary", size="lg")
+                calculate_btn = gr.Button("🔍 CALCULAR CAPACITAT", variant="primary", size="lg", scale=1)
     
     with gr.Row():
         with gr.Column(elem_classes=["result-box"]):
@@ -610,17 +634,17 @@ with gr.Blocks(
     
     # Connectar el botó
     calculate_btn.click(
-        fn=lambda ol, ow, oh, ow_kg, bl, bw, bh, max_kg, rotate, safety: calcular_empaquetatge_precis(
-            ol, ow, oh, ow_kg, bl, bw, bh, max_kg, rotate, safety
+        fn=lambda ol, ow, oh, ow_kg, bl, bw, bh, max_kg, safety: calcular_empaquetatge_precis(
+            ol, ow, oh, ow_kg, bl, bw, bh, max_kg, True, safety  # Sempre permetre rotacions
         )[0],  # Només retornem el text del resum
-        inputs=[obj_l, obj_w, obj_h, obj_weight, box_l, box_w, box_h, max_weight, allow_rotation, safety_factor],
+        inputs=[obj_l, obj_w, obj_h, obj_weight, box_l, box_w, box_h, max_weight, safety_factor],
         outputs=[results]
     )
 
 if __name__ == "__main__":
     demo.launch(
-        show_api=False,
+        show_api=True,
         show_error=True,
-        inbrowser=True,
+        inbrowser=False,
         quiet=False
     )

@@ -61,15 +61,6 @@ except ImportError as e:
     ADVANCED_3D_PACKER_AVAILABLE = False
     MODULES_AVAILABLE = False
 
-# Intentar importar el nou optimitzador basat en recerca
-try:
-    from research_based_packer import pack_with_research_algorithms, ResearchBasedPacker
-    RESEARCH_PACKER_AVAILABLE = True
-    print("✅ Research-Based Packer disponible")
-except ImportError as e:
-    print(f"⚠️ Research-Based Packer no disponible: {e}")
-    RESEARCH_PACKER_AVAILABLE = False
-
 # Imports tradicionals com backup
 try:
     import trimesh
@@ -288,9 +279,6 @@ class PackAssistOriginalGUI:
         
         # Pes de la peça per al càlcul Excel (kg)
         self.piece_weight = 1.0  # Valor per defecte
-        
-        # Variables adicionals pel sistema
-        self.container_volume = 0.0  # Volum del contenidor
         
         # Inicialitzar mòduls nous si estan disponibles
         if MODULES_AVAILABLE:
@@ -806,11 +794,6 @@ class PackAssistOriginalGUI:
         ttk.Radiobutton(methods_frame, text="🤖 Robust 3D (híbrid, orientacions múltiples)", 
                        variable=self.optimization_method, value="robust").pack(anchor=tk.W, pady=2)
         
-        # Afegir opció Research-Based si està disponible
-        if RESEARCH_PACKER_AVAILABLE:
-            ttk.Radiobutton(methods_frame, text="🔬 Research-Based (objectes sòlids, algoritmes paper)", 
-                           variable=self.optimization_method, value="research").pack(anchor=tk.W, pady=2)
-        
         # Botó d'optimització
         self.optimize_btn = ttk.Button(main_frame, text="🚀 Iniciar Optimització Avançada", 
                                       command=self.start_advanced_optimization, state='disabled')
@@ -1091,34 +1074,6 @@ class PackAssistOriginalGUI:
                 print("⚠️ OBB calculat però sense malla canònica")
         except Exception as e:
             print(f"⚠️ Error aplicant OBB automàtic: {e}")
-
-    def _update_mesh_info(self):
-        """Actualitza la informació de la malla després de modificacions"""
-        if hasattr(self, 'original_mesh') and self.original_mesh is not None:
-            try:
-                bounds = self.original_mesh.bounds
-                dims = bounds[1] - bounds[0]
-                volume = float(self.original_mesh.volume) if hasattr(self.original_mesh, 'volume') else np.prod(dims)
-                area = float(self.original_mesh.area) if hasattr(self.original_mesh, 'area') else 0
-                
-                self.original_mesh_info = {
-                    'vertices': len(self.original_mesh.vertices),
-                    'faces': len(self.original_mesh.faces),
-                    'volume': volume,
-                    'area': area,
-                    'mesh': self.original_mesh,
-                    'bounds': bounds,
-                    'dimensions': {
-                        'width': float(dims[0]),
-                        'depth': float(dims[1]), 
-                        'height': float(dims[2])
-                    },
-                    'is_watertight': self.original_mesh.is_watertight if hasattr(self.original_mesh, 'is_watertight') else False
-                }
-                
-                print(f"✅ Informació de malla actualitzada: {len(self.original_mesh.vertices)} vèrtexs")
-            except Exception as e:
-                print(f"⚠️ Error actualitzant informació de malla: {e}")
     
     def calculate_obb_dimensions(self):
         """Calcula i mostra les dimensions OBB vs AABB"""
@@ -3936,16 +3891,6 @@ class PackAssistOriginalGUI:
             max_pieces = None
             if self.limit_pieces.get():
                 max_pieces = int(self.max_pieces_var.get())
-            else:
-                # Si no hi ha límit, estimar un nombre raonable per al research packer
-                container_volume = box_dims[0] * box_dims[1] * box_dims[2]
-                if hasattr(self, 'original_mesh') and self.original_mesh:
-                    bounds = self.original_mesh.bounds
-                    piece_dims = bounds[1] - bounds[0]
-                    piece_volume = piece_dims[0] * piece_dims[1] * piece_dims[2]
-                    max_pieces = int(container_volume / piece_volume * 2)  # Estimació conservadora
-                else:
-                    max_pieces = 100  # Valor per defecte
             
             iterations = 100  # Valor fix, ja no configurable per l'usuari
             use_floor_mode = self.use_floor_mode.get()
@@ -4231,111 +4176,6 @@ class PackAssistOriginalGUI:
                 'method': 'excel'
             }
 
-    def _calculate_with_research_method(self, mesh, box_dims, max_pieces, margin, progress_callback, start_time, mesh_for_visualization):
-        """Calcula l'empaquetament usant algoritmes de recerca per objectes sòlids"""
-        try:
-            if not RESEARCH_PACKER_AVAILABLE:
-                raise Exception("Research-Based Packer no disponible")
-                
-            if progress_callback:
-                progress_callback(10, "Calculant amb algoritmes de recerca...")
-            
-            # Obtenir dimensions del contenidor
-            if isinstance(box_dims, list):
-                container_dims = tuple(box_dims)
-                box_l, box_w, box_h = box_dims[0], box_dims[1], box_dims[2]
-                print(f"   📦 Box_dims (llista): {box_dims}")
-            else:
-                container_dims = (box_dims['length'], box_dims['width'], box_dims['height'])
-                box_l, box_w, box_h = box_dims['length'], box_dims['width'], box_dims['height']
-                print(f"   📦 Box_dims (dict): length={box_l}, width={box_w}, height={box_h}")
-            
-            # Assegurar-nos que usem malla simplificada si està disponible
-            mesh_to_use = mesh_for_visualization if mesh_for_visualization is not None else mesh
-            print(f"   🔬 Usant malla {'simplificada' if mesh_for_visualization is not None else 'original'}")
-            
-            if progress_callback:
-                progress_callback(30, "Executant algoritmes de recerca per objectes sòlids...")
-            
-            # Validar max_pieces
-            if max_pieces is None or max_pieces <= 0:
-                # Estimar un nombre raonable
-                container_volume = box_l * box_w * box_h
-                bounds = mesh_to_use.bounds
-                piece_dims = bounds[1] - bounds[0]
-                piece_volume = piece_dims[0] * piece_dims[1] * piece_dims[2]
-                max_pieces = max(1, int(container_volume / piece_volume * 0.8))  # Estimació conservadora
-                print(f"   📊 Estimació automàtica: {max_pieces} peces màxim")
-            
-            print(f"   🎯 Research Method - Contenidor: {box_l:.2f} × {box_w:.2f} × {box_h:.2f}")
-            print(f"   🎯 Research Method - Objectiu: {max_pieces} peces")
-            
-            # Executar algoritme de recerca
-            research_result = pack_with_research_algorithms(
-                mesh=mesh_to_use,
-                container_dimensions=container_dims,
-                target_pieces=max_pieces,
-                margin=margin,
-                strategy="hybrid"  # Usar estratègia híbrida
-            )
-            
-            if not research_result.get('success', False):
-                raise Exception(f"Error en Research Packer: {research_result.get('error', 'Unknown error')}")
-            
-            pieces_count = research_result.get('pieces_count', 0)
-            efficiency = research_result.get('efficiency', 0.0)
-            
-            if progress_callback:
-                progress_callback(90, f"Research completat: {pieces_count} peces")
-            
-            print(f"   ✅ Research Method completat: {pieces_count} peces, eficiència: {efficiency:.1f}%")
-            print(f"   📦 Dimensions contenidor retornades: [{box_l}, {box_w}, {box_h}]")
-            print(f"   🔬 Algoritme utilitzat: {research_result.get('algorithm_used', 'Research-Based')}")
-            
-            # Convertir resultats Research al format esperat
-            positions = research_result.get('positions', [])
-            rotations = research_result.get('rotations', [])
-            
-            if len(rotations) < len(positions):
-                rotations = [[0, 0, 0]] * len(positions)  # Objectes sòlids sense rotació
-            
-            execution_time = time.time() - start_time
-            
-            result = {
-                'success': True,
-                'positions': positions,
-                'rotations': rotations,
-                'pieces_count': pieces_count,
-                'efficiency': efficiency / 100.0 if efficiency > 1 else efficiency,  # Normalitzar si cal
-                'execution_time': execution_time,
-                'algorithm_used': research_result.get('algorithm_used', 'Research-Based'),
-                'method': 'research',
-                'container_dimensions': [box_l, box_w, box_h],
-                'used_volume': research_result.get('used_volume', 0),
-                'total_volume': research_result.get('total_volume', box_l * box_w * box_h),
-                'margin_used': margin,
-                'strategy_type': 'solid_objects'
-            }
-            
-            if progress_callback:
-                progress_callback(100, f"Research completat: {pieces_count} peces")
-            
-            return self._prepare_final_result(result, mesh_to_use, start_time, mesh_for_visualization)
-        
-        except Exception as e:
-            if progress_callback:
-                progress_callback(100, f"Error en mètode Research: {str(e)}")
-            return {
-                'success': False,
-                'error': f"Error en mètode Research: {str(e)}",
-                'positions': [],
-                'rotations': [],
-                'efficiency': 0,
-                'execution_time': time.time() - start_time,
-                'algorithm_used': 'Research-Based (error)',
-                'method': 'research'
-            }
-
     def _prepare_final_result(self, result, mesh, start_time, mesh_for_visualization):
         """Prepara el resultat final per a la visualització"""
         total_time = time.time() - start_time
@@ -4380,11 +4220,6 @@ class PackAssistOriginalGUI:
             if optimization_method == "excel":
                 print("🎯 MÈTODE EXCEL SELECCIONAT - Iniciant càlcul...")
                 return self._calculate_with_excel_method(mesh, box_dims, max_pieces, margin, progress_callback, start_time, mesh_for_visualization)
-            
-            # Si el mètode és Research-Based, usar algoritmes de recerca
-            if optimization_method == "research":
-                print("🔬 MÈTODE RESEARCH-BASED SELECCIONAT - Objectes sòlids...")
-                return self._calculate_with_research_method(mesh, box_dims, max_pieces, margin, progress_callback, start_time, mesh_for_visualization)
             
             if progress_callback:
                 mode_name = "PISOS ORDENATS" if use_floor_mode else "A GRANEL"
@@ -4659,8 +4494,8 @@ class PackAssistOriginalGUI:
         # === CALCULAR OBB OPTIMITZAT ===
         try:
             obb_result = self._compute_optimized_obb_fallback(mesh)
-            obj_dims = obb_result['obb_dimensions']  # Usar el nom correcte
-            oriented_mesh = obb_result['canonical_mesh']  # Usar el nom correcte
+            obj_dims = obb_result['final_dims']
+            oriented_mesh = obb_result['oriented_mesh']
             print(f"✅ Usant dimensions OBB: {obj_dims[0]:.1f} × {obj_dims[1]:.1f} × {obj_dims[2]:.1f}")
             used_obb = True
         except Exception as e:
