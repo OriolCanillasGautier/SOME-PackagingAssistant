@@ -201,7 +201,7 @@ def calcular_empaquetatge_excel(obj_l, obj_w, obj_h, obj_weight, box_l, box_w, b
     print(f"   🏆 Millor orientació: {best_config['name'] if best_config else 'Cap'}")
     print(f"   📐 Distribució òptima: {best_config['distribution'] if best_config else 'N/A'}")
     
-    # Generar posicions exactes segons la distribució calculada (SENSE centrat per evitar solapaments)
+    # Generar posicions exactes segons la distribució calculada (USANT CANTONADA INFERIOR com a origen de cada peça)
     positions = []
     if best_config:
         dist_parts = best_config["distribution"].split("×")
@@ -218,22 +218,22 @@ def calcular_empaquetatge_excel(obj_l, obj_w, obj_h, obj_weight, box_l, box_w, b
             piece_count = 0
             level_counts = {}  # Comptar peces per nivell
             
-            # Generar posicions des de (0,0,0) sense offset per evitar problemes
+            # Generar posicions des de (0,0,0) com a CANTONADA (no centre) per alinear amb translació directa de la malla
             for k in range(fit_h):  # Alçada primer (Z)
                 level_count = 0
                 for j in range(fit_w):  # Amplada (Y)
                     for i in range(fit_l):  # Llargada (X)
                         if piece_count < real_fit:  # No superar el límit calculat
-                            # Posició simple: centre de cada "cel·la" de la graella
-                            x = i * piece_l + piece_l/2
-                            y = j * piece_w + piece_w/2  
-                            z = k * piece_h + piece_h/2
+                            # Posició de la cantonada inferior esquerra davantera de cada "cel·la" (compat amb translació directa)
+                            x = i * piece_l
+                            y = j * piece_w
+                            z = k * piece_h
                             positions.append([x, y, z])
                             piece_count += 1
                             level_count += 1
                 level_counts[k] = level_count
                 if level_count > 0:
-                    print(f"      Nivell {k}: {level_count} peces a Z={k * piece_h + piece_h/2:.1f}")
+                    print(f"      Nivell {k}: {level_count} peces a Z={k * piece_h:.1f}")
             
             print(f"   ✅ {piece_count} posicions generades en {len([k for k, c in level_counts.items() if c > 0])} nivells")
     
@@ -792,24 +792,23 @@ class PackAssistOriginalGUI:
         method_frame = ttk.LabelFrame(advanced_frame, text="Mètode d'Optimització", padding="10")
         method_frame.pack(fill=tk.X, pady=(15, 0))
         
-        self.optimization_method = tk.StringVar(value="advanced")
+        self.optimization_method = tk.StringVar(value="excel")
         
         methods_frame = ttk.Frame(method_frame)
         methods_frame.pack(fill=tk.X)
         
-        ttk.Radiobutton(methods_frame, text="🧮 Excel Formula (ràpid, orientacions bàsiques)", 
-                       variable=self.optimization_method, value="excel").pack(anchor=tk.W, pady=2)
-        
-        ttk.Radiobutton(methods_frame, text="🚀 Avançat 3D (complet, col·lisions reals)", 
-                       variable=self.optimization_method, value="advanced").pack(anchor=tk.W, pady=2)
-        
-        ttk.Radiobutton(methods_frame, text="🤖 Robust 3D (híbrid, orientacions múltiples)", 
-                       variable=self.optimization_method, value="robust").pack(anchor=tk.W, pady=2)
-        
-        # Afegir opció Research-Based si està disponible
-        if RESEARCH_PACKER_AVAILABLE:
-            ttk.Radiobutton(methods_frame, text="🔬 Research-Based (objectes sòlids, algoritmes paper)", 
-                           variable=self.optimization_method, value="research").pack(anchor=tk.W, pady=2)
+        ttk.Radiobutton(
+            methods_frame,
+            text="🧮 Excel Formula (ràpid)",
+            variable=self.optimization_method,
+            value="excel"
+        ).pack(anchor=tk.W, pady=2)
+        ttk.Radiobutton(
+            methods_frame,
+            text="🧱 Malla Real (STL reduït, col·lisions)",
+            variable=self.optimization_method,
+            value="mesh_exact"
+        ).pack(anchor=tk.W, pady=2)
         
         # Botó d'optimització
         self.optimize_btn = ttk.Button(main_frame, text="🚀 Iniciar Optimització Avançada", 
@@ -2860,14 +2859,23 @@ class PackAssistOriginalGUI:
             color_scheme = options.get('color_scheme', 'density')
             colors = self._generate_simple_colors(len(positions), color_scheme)
             
-            # Decidir quina malla usar
+            # Decidir quina malla usar: prioritzar la malla preparada específicament pels resultats
             mesh_to_show = None
-            if hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None:
-                mesh_to_show = self.simplified_mesh
-                print("📐 Usant malla simplificada")
-            elif hasattr(self, 'original_mesh') and self.original_mesh is not None:
-                mesh_to_show = self.original_mesh
-                print("📐 Usant malla original")
+            try:
+                res_mesh = self.optimization_results.get('mesh', None)
+                if res_mesh is not None:
+                    mesh_to_show = res_mesh
+                    print("📐 Usant malla dels resultats (pre-orientada)")
+            except Exception:
+                mesh_to_show = None
+
+            if mesh_to_show is None:
+                if hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None:
+                    mesh_to_show = self.simplified_mesh
+                    print("📐 Usant malla simplificada")
+                elif hasattr(self, 'original_mesh') and self.original_mesh is not None:
+                    mesh_to_show = self.original_mesh
+                    print("📐 Usant malla original")
             
             # Dibuixar objectes
             for i, (pos, rot) in enumerate(zip(positions, rotations)):
@@ -3022,17 +3030,17 @@ class PackAssistOriginalGUI:
                 'show_wireframe': True,
                 'show_labels': True,
                 'show_axes': True,
-                'show_grid': True,
-                'show_edges': False,
+                'show_grid': False,
+                'show_edges': True,
                 'color_scheme': 'density',
-                'background_color': 'white',
+                'background_color': 'black',
                 'piece_opacity': 1.0,
                 'window_size': '1200x900',
-                'wireframe_color': 'blue',
-                'wireframe_line_width': 4,
+                'wireframe_color': 'green',
+                'wireframe_line_width': 3,
                 'wireframe_opacity': 1.0,
-                'container_walls_enabled': True,
-                'container_walls_opacity': 0.15,
+                'container_walls_enabled': False,
+                'container_walls_opacity': 0.10,
                 'container_top_open': True
             }
             
@@ -3078,8 +3086,18 @@ class PackAssistOriginalGUI:
             import pyvista as pv
             import numpy as np
             
-            # Decidir quina malla usar per visualitzar
-            mesh_to_show = self.simplified_mesh if (hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None) else self.original_mesh
+            # Decidir quina malla usar per visualitzar: prioritzar la malla dels resultats si està disponible (pre-orientada)
+            mesh_to_show = None
+            try:
+                res_mesh = self.optimization_results.get('mesh', None)
+                if res_mesh is not None:
+                    mesh_to_show = res_mesh
+                    print("📐 Usant malla dels resultats (pre-orientada) per a visualització amb opcions")
+            except Exception:
+                mesh_to_show = None
+
+            if mesh_to_show is None:
+                mesh_to_show = self.simplified_mesh if (hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None) else self.original_mesh
             if not mesh_to_show:
                 print("❌ ERROR: No hi ha malla carregada per visualitzar")
                 messagebox.showwarning("Avís", "No hi ha malla carregada per visualitzar")
@@ -3528,8 +3546,17 @@ class PackAssistOriginalGUI:
             import pyvista as pv
             import numpy as np
             
-            # Decidir quina malla usar per visualitzar
-            mesh_to_show = self.simplified_mesh if (hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None) else self.original_mesh
+            # Decidir quina malla usar per visualitzar: prioritzar la malla dels resultats si està disponible (pre-orientada)
+            mesh_to_show = None
+            try:
+                res_mesh = self.optimization_results.get('mesh', None)
+                if res_mesh is not None:
+                    mesh_to_show = res_mesh
+                    print("📐 Usant malla dels resultats (pre-orientada) per al fallback PyVista")
+            except Exception:
+                mesh_to_show = None
+            if mesh_to_show is None:
+                mesh_to_show = self.simplified_mesh if (hasattr(self, 'simplified_mesh') and self.simplified_mesh is not None) else self.original_mesh
             if not mesh_to_show:
                 print("❌ ERROR: No hi ha malla carregada per visualitzar")
                 messagebox.showwarning("Avís", "No hi ha malla carregada per visualitzar")
@@ -4163,16 +4190,90 @@ class PackAssistOriginalGUI:
             num_pieces = excel_result.get('num_pieces', 0)
             best_orientation = excel_result.get('best_orientation', {})
             
-            # Crear rotacions basades en la millor orientació trobada
-            # IMPORTANT: Com que usem malla OBB alineada, NO cal rotar adicionalment
-            rotation = [0, 0, 0]  # La malla OBB ja està en l'orientació correcta
-            
-            # DEBUG: Mostrar orientació seleccionada però sense aplicar rotacions
-            if best_orientation:
-                orientation_name = best_orientation.get('name', '')
-                print(f"   🔄 Orientació Excel: {orientation_name} → Malla OBB ja orientada, rotació: {rotation}")
-            
-            rotations = [rotation] * num_pieces
+            # Adaptar la malla de visualització a l'orientació Excel escollida i normalitzar min→(0,0,0)
+            # Això garanteix que els passos de graella (piece_dims_oriented) coincideixin amb les dimensions de la malla al llarg de X,Y,Z
+            rotation = [0, 0, 0]
+            if best_orientation and mesh_for_visualization is not None and TRIMESH_AVAILABLE:
+                try:
+                    import numpy as np
+                    import trimesh
+
+                    piece_dims_oriented = best_orientation.get('dimensions', obj_dims.tolist()) if best_orientation else obj_dims.tolist()
+                    obj_dims_list = obj_dims.tolist() if hasattr(obj_dims, 'tolist') else list(obj_dims)
+
+                    # Mapes de permutació possibles i les rotacions necessàries (combinacions de 90°)
+                    perm_candidates = [
+                        obj_dims_list,                                   # (x, y, z) → cap rotació
+                        [obj_dims_list[0], obj_dims_list[2], obj_dims_list[1]],  # (x, z, y) → RotX +90
+                        [obj_dims_list[1], obj_dims_list[0], obj_dims_list[2]],  # (y, x, z) → RotZ +90
+                        [obj_dims_list[1], obj_dims_list[2], obj_dims_list[0]],  # (y, z, x) → RotZ +90; després RotX +90
+                        [obj_dims_list[2], obj_dims_list[0], obj_dims_list[1]],  # (z, x, y) → RotZ +90; després RotY +90
+                        [obj_dims_list[2], obj_dims_list[1], obj_dims_list[0]],  # (z, y, x) → RotY +90
+                    ]
+
+                    def approx_equal(a, b, tol=1e-3):
+                        return all(abs(float(x) - float(y)) <= tol for x, y in zip(a, b))
+
+                    # Trobar quin permutació coincideix amb les dimensions orientades
+                    perm_index = None
+                    for idx, cand in enumerate(perm_candidates):
+                        if approx_equal(cand, piece_dims_oriented):
+                            perm_index = idx
+                            break
+
+                    # Preparar malla de visualització
+                    if perm_index is not None:
+                        print(f"   🔄 Reorientant malla per a la permutació #{perm_index} → dims {piece_dims_oriented}")
+                        # Copiar per no modificar referències originals
+                        aligned_mesh = mesh_for_visualization.copy()
+
+                        # Aplicar rotacions segons permutació
+                        if perm_index == 1:
+                            # RotX +90
+                            Rx = trimesh.transformations.euler_matrix(np.radians(90), 0, 0)
+                            aligned_mesh.apply_transform(Rx)
+                            rotation = [90, 0, 0]
+                        elif perm_index == 2:
+                            # RotZ +90
+                            Rz = trimesh.transformations.euler_matrix(0, 0, np.radians(90))
+                            aligned_mesh.apply_transform(Rz)
+                            rotation = [0, 0, 90]
+                        elif perm_index == 3:
+                            # RotZ +90; després RotX +90
+                            Rz = trimesh.transformations.euler_matrix(0, 0, np.radians(90))
+                            Rx = trimesh.transformations.euler_matrix(np.radians(90), 0, 0)
+                            aligned_mesh.apply_transform(Rz)
+                            aligned_mesh.apply_transform(Rx)
+                            rotation = [90, 0, 90]
+                        elif perm_index == 4:
+                            # RotZ +90; després RotY +90
+                            Rz = trimesh.transformations.euler_matrix(0, 0, np.radians(90))
+                            Ry = trimesh.transformations.euler_matrix(0, np.radians(90), 0)
+                            aligned_mesh.apply_transform(Rz)
+                            aligned_mesh.apply_transform(Ry)
+                            rotation = [0, 90, 90]
+                        elif perm_index == 5:
+                            # RotY +90
+                            Ry = trimesh.transformations.euler_matrix(0, np.radians(90), 0)
+                            aligned_mesh.apply_transform(Ry)
+                            rotation = [0, 90, 0]
+                        else:
+                            rotation = [0, 0, 0]
+
+                        # Normalitzar perquè la cantonada min sigui (0,0,0)
+                        bmin = aligned_mesh.bounds[0]
+                        aligned_mesh.apply_translation(-bmin)
+
+                        # Actualitzar la malla de visualització preparada
+                        mesh_for_visualization = aligned_mesh
+                        print("   📐 Malla orientada i normalitzada per a visualització (min→0,0,0)")
+                    else:
+                        print("   ⚠️ No s'ha identificat permutació exacta; es manté orientació OBB actual")
+                except Exception as ori_e:
+                    print(f"   ⚠️ Error reorientant malla per visualització: {ori_e}")
+
+            # Rotacions per peça: ja hem pre-orientat la malla, així que no cal rotar cada instància
+            rotations = [[0, 0, 0]] * num_pieces
             
             # Calcular eficiència
             efficiency = excel_result.get('efficiency', 0) / 100.0  # Convertir percentatge a decimal
@@ -4336,6 +4437,228 @@ class PackAssistOriginalGUI:
                 'method': 'research'
             }
 
+    def _calculate_with_exact_mesh_method(self, mesh, box_dims, max_pieces, margin, progress_callback, start_time, mesh_for_visualization):
+        """Empaquetament amb malla STL real (simplificada), graella i col·lisions bàsiques.
+        - Selecciona orientació òptima via Excel (dims OBB) per fit L×W×H
+        - Pre-orienta i normalitza la malla de visualització segons l'orientació escollida
+        - Genera posicions de graella (cantonada) i valida bounds i col·lisions bàsiques
+        - Fallback: si no hi ha col·lisions disponibles, confia en graella sense solapament per dims
+        """
+        try:
+            import time
+            if progress_callback:
+                progress_callback(10, "Calculant orientació òptima (Excel) amb OBB…")
+
+            # Usar malla simplificada si està disponible
+            mesh_viz = mesh_for_visualization if mesh_for_visualization is not None else mesh
+
+            # Calcular OBB i dimensions
+            obb_result = self._compute_optimized_obb_fallback(mesh_viz)
+            obb_mesh = obb_result.get('canonical_mesh', mesh_viz)
+            obj_dims = obb_result.get('obb_dimensions', (0, 0, 0))
+
+            # Dimensions del contenidor
+            if isinstance(box_dims, list):
+                box_l, box_w, box_h = box_dims
+            else:
+                box_l, box_w, box_h = box_dims['length'], box_dims['width'], box_dims['height']
+
+            # Pes per peça per a Excel
+            obj_weight = getattr(self, 'piece_weight', 1.0)
+            max_weight = (max_pieces or 1000000) * obj_weight
+
+            # Excel per triar orientació i distribució
+            excel_result = calcular_empaquetatge_excel(
+                obj_l=float(obj_dims[0]), obj_w=float(obj_dims[1]), obj_h=float(obj_dims[2]), obj_weight=obj_weight,
+                box_l=float(box_l), box_w=float(box_w), box_h=float(box_h), max_weight=float(max_weight),
+                allow_rotation=True, safety_factor=1.0
+            )
+            if not excel_result.get('success', False):
+                raise Exception(excel_result.get('error', 'Excel failed'))
+
+            best_orientation = excel_result.get('best_orientation', {})
+            distribution = best_orientation.get('distribution', '0×0×0')
+            dims_oriented = best_orientation.get('dimensions', [float(obj_dims[0]), float(obj_dims[1]), float(obj_dims[2])])
+
+            # Pre-orientar malla per a visualització segons orientació triada
+            mesh_prepared = obb_mesh.copy()
+            try:
+                import numpy as np
+                import trimesh
+
+                base_dims = [float(obj_dims[0]), float(obj_dims[1]), float(obj_dims[2])]
+                targets = [float(d) for d in dims_oriented]
+
+                perm_candidates = [
+                    base_dims,
+                    [base_dims[0], base_dims[2], base_dims[1]],
+                    [base_dims[1], base_dims[0], base_dims[2]],
+                    [base_dims[1], base_dims[2], base_dims[0]],
+                    [base_dims[2], base_dims[0], base_dims[1]],
+                    [base_dims[2], base_dims[1], base_dims[0]],
+                ]
+                def approx_equal(a,b,tol=1e-3):
+                    return all(abs(float(x)-float(y))<=tol for x,y in zip(a,b))
+                perm_index = next((i for i,c in enumerate(perm_candidates) if approx_equal(c, targets)), 0)
+
+                if perm_index == 1:
+                    Rx = trimesh.transformations.euler_matrix(np.radians(90), 0, 0)
+                    mesh_prepared.apply_transform(Rx)
+                elif perm_index == 2:
+                    Rz = trimesh.transformations.euler_matrix(0, 0, np.radians(90))
+                    mesh_prepared.apply_transform(Rz)
+                elif perm_index == 3:
+                    Rz = trimesh.transformations.euler_matrix(0, 0, np.radians(90))
+                    Rx = trimesh.transformations.euler_matrix(np.radians(90), 0, 0)
+                    mesh_prepared.apply_transform(Rz); mesh_prepared.apply_transform(Rx)
+                elif perm_index == 4:
+                    Rz = trimesh.transformations.euler_matrix(0, 0, np.radians(90))
+                    Ry = trimesh.transformations.euler_matrix(0, np.radians(90), 0)
+                    mesh_prepared.apply_transform(Rz); mesh_prepared.apply_transform(Ry)
+                elif perm_index == 5:
+                    Ry = trimesh.transformations.euler_matrix(0, np.radians(90), 0)
+                    mesh_prepared.apply_transform(Ry)
+
+                # Normalitzar min a (0,0,0)
+                bmin = mesh_prepared.bounds[0]
+                mesh_prepared.apply_translation(-bmin)
+            except Exception as e:
+                print(f"⚠️ Error orientant malla exacta: {e}")
+
+            if progress_callback:
+                progress_callback(40, "Generant graella i comprovant col·lisions…")
+
+            # Generar posicions a partir de la distribució Excel (cantonada)
+            fit_l, fit_w, fit_h = [int(x) for x in distribution.split('×')] if '×' in distribution else (0,0,0)
+            L, W, H = dims_oriented
+            positions = []
+            rotations = []
+
+            # Opcional: gestor de col·lisions (si disponible)
+            collision_available = False
+            cmgr = None
+            try:
+                from trimesh.collision import CollisionManager
+                cmgr = CollisionManager()
+                collision_available = True
+            except Exception:
+                collision_available = False
+
+            # Utilitat: crear còpia transformada segons posició i si es mira
+            def transformed_copy(base_mesh, pos, mirrored=False):
+                m = base_mesh.copy()
+                if mirrored:
+                    try:
+                        import numpy as np, trimesh
+                        Rz = trimesh.transformations.euler_matrix(0, 0, np.radians(180))
+                        m.apply_transform(Rz)
+                    except Exception:
+                        pass
+                    # Compensació per mantenir dins de la cel·la (min→0,0,0 després del gir)
+                    m.apply_translation([L, W, 0])
+                m.apply_translation(pos)
+                return m
+
+            # Determinar si podem posar parelles mirall dins la mateixa cel·la (benefici per triangles)
+            pair_mode = False
+            if collision_available:
+                try:
+                    tm = CollisionManager()
+                    a = transformed_copy(mesh_prepared, [0,0,0], mirrored=False)
+                    b = transformed_copy(mesh_prepared, [0,0,0], mirrored=True)
+                    tm.add_object('a', a)
+                    # Si NO col·lisionen entre ells a la mateixa cel·la, podem provar col·locar-ne 2 per cel·la
+                    pair_mode = not tm.in_collision_single(b)
+                    print(f"   🔎 Mode parella-mirall: {'activat' if pair_mode else 'desactivat'}")
+                except Exception as e:
+                    print(f"   ⚠️ No s'ha pogut avaluar parelles mirall: {e}")
+                    pair_mode = False
+
+            placed_count = 0
+            total_target = fit_l * fit_w * fit_h
+            for k in range(fit_h):
+                for j in range(fit_w):
+                    for i in range(fit_l):
+                        if max_pieces and placed_count >= max_pieces:
+                            break
+
+                        # Posició base de la cel·la
+                        cell_pos = [i*L, j*W, k*H]
+
+                        # Helper per intentar col·locar una peça (mirrored opcional)
+                        def try_place(mirrored):
+                            nonlocal placed_count
+                            if max_pieces and placed_count >= max_pieces:
+                                return False
+
+                            # Posició efectiva: si es mirall, la translació local ja inclourà [L,W,0]
+                            pos = list(cell_pos)
+
+                            # Bounds check (mateix per mirall i normal perquè offset local està contemplat)
+                            if pos[0] + L > box_l or pos[1] + W > box_w or pos[2] + H > box_h:
+                                return False
+
+                            allow = True
+                            if collision_available:
+                                tmesh = transformed_copy(mesh_prepared, pos, mirrored=mirrored)
+                                if cmgr.in_collision_single(tmesh):
+                                    allow = False
+                                else:
+                                    cmgr.add_object(f"m{placed_count}", tmesh)
+                            # else: grid separation avoids overlap by construction
+
+                            if allow:
+                                # Rotació per visualització: si mirall, 180° Z, i posició amb compensació ja incorporada
+                                if mirrored:
+                                    positions.append([cell_pos[0] + L, cell_pos[1] + W, cell_pos[2]])
+                                    rotations.append([0,0,180])
+                                else:
+                                    positions.append(cell_pos)
+                                    rotations.append([0,0,0])
+                                placed_count += 1
+                                return True
+                            return False
+
+                        # Intentar col·locar peça(s) en aquesta cel·la
+                        placed_once = try_place(False)
+                        if pair_mode:
+                            try_place(True)
+
+            efficiency = (placed_count * (L*W*H)) / (box_l*box_w*box_h) if box_l*box_w*box_h > 0 else 0.0
+
+            execution_time = time.time() - start_time
+            result = {
+                'success': True,
+                'positions': positions,
+                'rotations': rotations,
+                'pieces_count': placed_count,
+                'efficiency': efficiency,
+                'execution_time': execution_time,
+                'algorithm_used': 'Exact Mesh Grid',
+                'method': 'mesh_exact',
+                'container_dimensions': [box_l, box_w, box_h],
+                'piece_dimensions': [L, W, H],
+                'best_orientation': best_orientation,
+                'theoretical_pieces': total_target,
+                'safety_factor': 1.0,
+            }
+
+            return self._prepare_final_result(result, mesh_prepared, start_time, mesh_prepared)
+
+        except Exception as e:
+            if progress_callback:
+                progress_callback(100, f"Error en Malla Real: {str(e)}")
+            return {
+                'success': False,
+                'error': f"Error en Malla Real: {str(e)}",
+                'positions': [],
+                'rotations': [],
+                'efficiency': 0,
+                'execution_time': time.time() - start_time,
+                'algorithm_used': 'Exact Mesh Grid (error)',
+                'method': 'mesh_exact'
+            }
+
     def _prepare_final_result(self, result, mesh, start_time, mesh_for_visualization):
         """Prepara el resultat final per a la visualització"""
         total_time = time.time() - start_time
@@ -4344,7 +4667,7 @@ class PackAssistOriginalGUI:
         adapted_result = {
             'positions': result.get('positions', []),
             'rotations': result.get('rotations', []),
-            'efficiency': result.get('efficiency', 0) / 100,  # Convertir a fracció
+            'efficiency': result.get('efficiency', 0),  # Ja esperat com a fracció
             'total_pieces': result.get('pieces_count', 0),
             'execution_time': total_time,
             'mesh': mesh_for_visualization or mesh,
@@ -4370,21 +4693,30 @@ class PackAssistOriginalGUI:
 
     def _unified_advanced_optimization(self, mesh, box_dims, max_pieces=None, iterations=100, 
                                      use_floor_mode=True, margin=2.0, floor_separation=2.0, 
-                                     mesh_for_visualization=None, progress_callback=None, optimization_method="advanced"):
+                                     mesh_for_visualization=None, progress_callback=None, optimization_method="excel"):
         """Optimització unificada millorada amb separació configurable"""
         import time
         start_time = time.time()
         
         try:
-            # Si el mètode és Excel, usar la fórmula de càlcul Excel
-            if optimization_method == "excel":
+            # Compatibilitat: definir box_dims_dict per referències internes (encara que no s'usin)
+            if isinstance(box_dims, list):
+                box_dims_dict = {
+                    'length': box_dims[0],
+                    'width': box_dims[1],
+                    'height': box_dims[2]
+                }
+            else:
+                box_dims_dict = box_dims
+
+            # Triar mètode segons selecció
+            method = optimization_method or (self.optimization_method.get() if hasattr(self, 'optimization_method') else 'excel')
+            if method == 'mesh_exact':
+                print("🧱 MÈTODE MALLA REAL SELECCIONAT - Iniciant càlcul...")
+                return self._calculate_with_exact_mesh_method(mesh, box_dims, max_pieces, margin, progress_callback, start_time, mesh_for_visualization)
+            else:
                 print("🎯 MÈTODE EXCEL SELECCIONAT - Iniciant càlcul...")
                 return self._calculate_with_excel_method(mesh, box_dims, max_pieces, margin, progress_callback, start_time, mesh_for_visualization)
-            
-            # Si el mètode és Research-Based, usar algoritmes de recerca
-            if optimization_method == "research":
-                print("🔬 MÈTODE RESEARCH-BASED SELECCIONAT - Objectes sòlids...")
-                return self._calculate_with_research_method(mesh, box_dims, max_pieces, margin, progress_callback, start_time, mesh_for_visualization)
             
             if progress_callback:
                 mode_name = "PISOS ORDENATS" if use_floor_mode else "A GRANEL"
