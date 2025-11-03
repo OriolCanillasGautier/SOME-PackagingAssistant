@@ -1,169 +1,61 @@
-# 🚀 PackAssist - Intelligent 3D Packaging Assistant
+# SOME-PackagingAssistant (Gradio-only)
 
-**A unified and powerful application to optimize 3D part packaging with advanced algorithms and visualization**
+Single-file Gradio app that performs exact, axis-aligned carton/box packing. Interactive 3D viewer is intentionally excluded.
 
-## ✨ What does PackAssist do?
+## Features
+- Exact "Excel" style packing: origin at (0,0,0), base at Z=0, axis-aligned grid.
+- Safety percent in the Box section: scales the usable box dimensions (50–100%).
+- Optional STL upload to auto-detect item dimensions via oriented bounding box (trimesh).
+- Quantity and optional weight limit (max box weight).
+- Concise summary table with best orientation, counts per axis, total placed, and fill%.
 
-PackAssist is an **intelligent and user-friendly** application that helps you calculate how many 3D parts fit inside a box optimally, with advanced visualization and mesh processing capabilities.
+## Quickstart (Windows, PowerShell)
 
-### 🎯 Key Features
-- **3D Packaging Optimization** with multiple advanced algorithms
-- **STL/STP File Support** for complex 3D geometries
-- **Mesh Simplification** ultra-fast with multiple algorithms
-- **3D Visualization** with PyVista and matplotlib  
-- **Advanced GUI** with threading for performance
-- **Oriented Bounding Box (OBB)** for optimal dimensions calculation
-- **Export Capabilities** for images, data, and positioned STL files
+```pwsh
+# From repo root
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r .\gradio\requirements.txt
 
-## 🚀 How to Run
-
-```bash
-python packassist.py
+# Run the app
+.\.venv\Scripts\python.exe .\app.py
 ```
 
-## 📁 Project Structure
+## One-click on Windows (.bat)
 
-```
-SOME-PackagingAssistant/
-├── 🚀 packassist.py                 # Main application with enhanced GUI
-├── 📄 requirements.txt              # Dependencies
-├── 📄 packassist_config.json        # Visualization configuration
-├── 📄 LICENSE                       # License
-├── 📄 README.md                     # This file
-│
-├── 📁 actiu/                        # ✅ ACTIVE CODE AND DATA
-│   ├── src/packassist/              # Core modules
-│   │   ├── core/                    # Core functionality modules
-│   │   ├── gui/                     # GUI components
-│   │   ├── optimizers/              # Advanced packing algorithms
-│   │   └── utils/                   # Utility functions
-│   ├── boxes/                       # Box definitions
-│   ├── data/                        # Project data
-│   ├── objects/                     # 3D objects
-│   └── results/                     # Calculation results
-│
-├── 📁 documentacio/                 # 📖 COMPLETE DOCUMENTATION
-└── 📁 proves/                       # Test scripts
-```
+If you prefer not to type commands, double‑click `scripts/run_windows.bat`. It will:
+- create `.venv` if missing,
+- upgrade pip and install dependencies from `gradio/requirements.txt`,
+- and start the app with that environment.
 
-## 🔧 Main Features
+## CI package (GitHub Actions)
+This branch includes a workflow that packages a simple “runner” ZIP with:
+- `app.py`, `README.md`, `requirements.txt` (copied from `gradio/requirements.txt`), and `scripts/run_windows.bat`.
 
-### ✅ Fully Operational:
-- **Advanced 3D Packaging** with optimized algorithms
-- **Multi-algorithm Mesh Simplification** (PyMeshLab, PyVista, Trimesh, pyfqmr)
-- **3D Visualization** with PyVista and matplotlib
-- **STL/STP Support** for complex geometries
-- **Threading** for responsive GUI performance
-- **Oriented Bounding Box (OBB)** for optimal dimensions calculation
-- **Export Capabilities** (Images, JSON, CSV, positioned STL)
+Every push to the `Gradio` branch uploads an artifact named `packassist-gradio-windows-runner` you can download from the workflow run.
 
-### 🎯 Advanced Optimization Algorithms:
-- **Floor Mode**: Organized floor-based packing with configurable margins and separation
-- **Bulk Mode**: Free-form packing with collision detection
-- **Intelligent Packing**: Advanced algorithms for optimal arrangement
-- **OBB Integration**: Oriented Bounding Box for better packaging efficiency
+The app will print a local Gradio URL (usually http://127.0.0.1:7860). Open it in your browser.
 
-## 📦 Installation
+## Usage notes
+- Units are millimeters. STL units are assumed to be millimeters.
+- Safety percent reduces the available internal dimensions uniformly: usable_dim = box_dim * (safety/100).
+- Orientation search tries all 6 permutations of the item dimensions and picks the one with the highest capacity.
+- If both weight per item and max box weight are provided, the final placed count is capped by weight.
 
-```bash
-# 1. Clone repository
-git clone https://github.com/OriolCanillasGautier/SOME-PackagingAssistant.git
-cd SOME-PackagingAssistant
+## Limitations
+- No external interactive 3D viewer. If you later want a 3D view, we can add a separate lightweight preview or integrate PyVista screenshots.
+- No complex heuristics beyond grid packing; irregular shapes are approximated by their oriented bounding box for placement.
 
-# 2. Create virtual environment (recommended)
-python -m venv packassist_env
-source packassist_env/bin/activate  # Linux/Mac
-# or
-packassist_env\Scripts\activate     # Windows
+## Troubleshooting
+- If the app fails to start due to missing packages, re-run the install step:
+  ```pwsh
+  .\.venv\Scripts\python.exe -m pip install -r .\gradio\requirements.txt
+  ```
+- If STL fails to load, ensure the file is valid and `trimesh` is installed (it is included in `gradio/requirements.txt`).
 
-# 3. Install dependencies
-pip install -r requirements.txt
+## Project layout
+- `app.py` — Single-file Gradio application with packing logic and UI.
+- `gradio/requirements.txt` — Dependency list used for the app.
+- `gradio/interactive_viewer.py` — Not used in this Gradio-only mode.
 
-# 4. Run
-python packassist.py
-```
-
-## 🎮 Quick Usage
-
-### Basic Packaging Workflow:
-1. **📂 Import** an STL file of your part
-2. **🔧 Simplify** the mesh (optional) with integrated 3D viewer
-3. **📦 Configure** box dimensions and packing parameters
-4. **⚡ Calculate** optimal packaging with advanced algorithms
-5. **🎮 Visualize** the result in 3D with customizable options
-
-### Packing Modes:
-- **Floor Mode**: Organized grid-based packing with configurable floor separation and margins
-- **Bulk Mode**: Free-form packing with collision detection and configurable piece spacing
-
-## 🧠 Intelligent Features
-
-### Oriented Bounding Box (OBB)
-The OBB functionality automatically calculates the optimal orientation of parts for better packaging efficiency. This is enabled by default when loading STL meshes.
-
-### Mesh Simplification
-Ultra-fast mesh simplification with multiple algorithms:
-- **PyMeshLab**: Fastest simplification with high quality
-- **Trimesh**: Built-in simplification algorithms
-- **PyVista**: Visualization-based simplification
-- **pyfqmr**: Fast quadric mesh reduction
-
-### Advanced Packing Algorithms
-Multiple packing strategies for different use cases:
-- **Intelligent Mode**: Advanced algorithms for optimal arrangement
-- **Grid Mode**: Structured grid-based packing
-- **Random Mode**: Randomized packing for testing
-
-## 📦 Main Dependencies
-
-- `pymeshlab` - Ultra-fast mesh simplification
-- `pyvista` - Advanced 3D visualization
-- `matplotlib` - Graphics and visualization
-- `tkinter` - Graphical interface (included with Python)
-- `trimesh` - Mesh processing
-- `numpy` - Numerical calculations
-- `cadquery` - CAD operations
-- `py3dbp` - 3D bin packing algorithm
-- `open3d` - Optional Oriented Bounding Box calculation
-- `pybullet` - Physics simulation for collision detection
-
-## 💡 Configuration
-
-The application uses `packassist_config.json` for visualization settings:
-- **Color schemes**: Density-based or solid colors
-- **Wireframe settings**: Container visualization options
-- **Camera settings**: Default viewing angles
-- **Lighting**: Ambient and diffuse lighting controls
-
-## 📤 Export Capabilities
-
-- **Images**: 3D screenshots in PNG format
-- **JSON Data**: Complete results with positions and rotations
-- **CSV Tables**: Tabular data for spreadsheet import
-- **Positioned STL**: STL files with parts in calculated positions
-
-## 🆘 Troubleshooting
-
-```bash
-# If there are errors:
-1. Check virtual environment: source packassist_env/bin/activate (Linux/Mac) or packassist_env\Scripts\activate (Windows)
-2. Install dependencies: pip install -r requirements.txt  
-3. Run application: python packassist.py
-4. Check documentation in documentacio/ for more details
-```
-
-## 📚 Additional Documentation
-
-See the `documentacio/` folder for detailed technical documentation:
-- `STRUCTURE.md` - Complete project structure details
-- `MESH_SIMPLIFICATION_README.md` - Mesh simplification guide
-- `informe_obb_integration.md` - OBB integration report
-
-## 📞 Support
-
-- **Documentation**: `documentacio/` folder
-- **Issues**: Report on GitHub repository
-
----
-
-**✨ Advanced 3D packaging system with intelligent optimization algorithms ✨**
