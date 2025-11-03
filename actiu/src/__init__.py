@@ -1,3 +1,0 @@
-"""
-Actiu src package initialization
-"""

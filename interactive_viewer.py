@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+"""
+Copy of the interactive PyVista/Qt viewer used by the Gradio app.
+Placed under gradio/ so we can package it alongside app.py.
+The build script places this file at tools/interactive_viewer.py in the build
+so formula_excel.py can find it via its existing path logic.
+"""
 import argparse
 import json
 import os
@@ -10,7 +16,6 @@ except Exception:
     print("[viewer] numpy is required", file=sys.stderr)
     sys.exit(1)
 
-# Optional deps
 TRIMESH_SUPPORT = False
 try:
     import trimesh
@@ -24,8 +29,8 @@ except Exception as e:
     print(f"[viewer] pyvista is required: {e}", file=sys.stderr)
     sys.exit(1)
 
-# Helpers for STL alignment
 import numpy as _np
+
 
 def _load_trimesh(path: str):
     if not TRIMESH_SUPPORT:
@@ -93,11 +98,9 @@ def build_scene(plotter, box_dims, piece_dims, distribution, stl_path=None, use_
     except Exception:
         pass
 
-    # Container wireframe
     box = pv.Cube(center=(bl/2, bw/2, bh/2), x_length=bl, y_length=bw, z_length=bh)
     plotter.add_mesh(box, style='wireframe', color='#22c55e', line_width=3, name='box')
 
-    # STL preload if requested
     stl_mesh_pv = None
     if use_stl and stl_path and os.path.exists(stl_path) and TRIMESH_SUPPORT:
         tm = _load_trimesh(stl_path)
@@ -155,7 +158,6 @@ def main():
     use_stl = bool(cfg.get('use_stl', False))
     title = cfg.get('title', 'PackAssist - Visor 3D')
 
-    # Try BackgroundPlotter first if available to keep UI responsive
     try:
         import pyvistaqt as pvqt
         plotter = pvqt.BackgroundPlotter(title=title, window_size=(1200, 900), show=True)
@@ -163,7 +165,6 @@ def main():
         if hasattr(plotter, 'app'):
             plotter.app.exec_()
         else:
-            # Fallback idle loop
             import time
             while plotter.app_window.isVisible():
                 time.sleep(0.1)
@@ -171,7 +172,6 @@ def main():
     except Exception:
         pass
 
-    # Fallback to standard Plotter (blocking in this separate process)
     p = pv.Plotter(window_size=(1200, 900))
     p.add_title(title)
     build_scene(p, box_dims, piece_dims, distribution, stl_path, use_stl)
