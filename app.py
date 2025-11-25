@@ -1,24 +1,28 @@
 #!/usr/bin/env python3
 import gradio as gr
 import numpy as np
-import pandas as pd
 from typing import Tuple, Optional, List
-from decimal import Decimal, ROUND_HALF_UP
-import math
+from decimal import Decimal
 import tempfile
 import os
-import threading
 import sys
 import json
 import subprocess
  
 # Visualització 3D (Plotly) - opcional (ja no s'utilitza a la UI, però el deixem per fallback si cal)
 PLOTLY_SUPPORT = False
+go = None
 try:
-    import plotly.graph_objects as go
-    PLOTLY_SUPPORT = True
+    import importlib
+    import importlib.util
+    if importlib.util.find_spec("plotly.graph_objects") is not None:
+        go = importlib.import_module("plotly.graph_objects")
+        PLOTLY_SUPPORT = True
+    else:
+        PLOTLY_SUPPORT = False
 except Exception:
     PLOTLY_SUPPORT = False
+    go = None
 
 # Constants per defecte
 # Per defecte, mode exacte (sense marge de seguretat)
@@ -316,7 +320,7 @@ def _build_packing_plot(box_dims: Tuple[float, float, float],
                         limit_draw: int = 300,
                         stl_path: Optional[str] = None,
                         use_stl: bool = False,
-                        stl_limit: int = 20) -> Optional["go.Figure"]:
+                        stl_limit: int = 20) -> Optional[object]:
     """Crea una figura Plotly amb la caixa i les peces empaquetades com cuboides.
     Si no hi ha suport Plotly, retorna None.
     """
@@ -509,6 +513,15 @@ def _launch_interactive_viewer(box_dims: Tuple[float, float, float],
                                title: str = "PackAssist - Visor 3D") -> str:
     """Obre una finestra interactiva en un procés independent (robust per Qt) idèntica a l'escriptori.
     Aquesta versió busca l'script interactiu a diverses rutes (interactive_viewer.py a l'arrel o tools/)."""
+    # En mode empaquetat (PyInstaller), no disposem d'un intèrpret Python general per executar l'script extern.
+    # Evitem intentar-ho per evitar errors i informem a l'usuari.
+    try:
+        if getattr(sys, "frozen", False):
+            return ("ℹ️ El visor interactiu està desactivat en el mode EXE empaquetat. "
+                    "Executa l'aplicació des del codi font per obrir el visor, o demana'ns "
+                    "una versió empaquetada específica del visor.")
+    except Exception:
+        pass
     # Comprovació prèvia de PyVista (evitar obrir procés si no hi ha suport)
     if not PYVISTA_SUPPORT:
         return "ℹ️ PyVista no està instal·lat. Instala-ho amb: pip install pyvista pyvistaqt vtk"
