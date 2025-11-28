@@ -1,0 +1,4 @@
+.github/
+.venv/
+__pycache__/
+.venv.7z

@@ -1,6 +1,7 @@
 gradio
 numpy
 pandas
+plotly
 trimesh[easy]
 pyvista
 pyvistaqt
