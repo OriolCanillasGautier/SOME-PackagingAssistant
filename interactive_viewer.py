@@ -16,12 +16,15 @@ except Exception:
     print("[viewer] numpy is required", file=sys.stderr)
     sys.exit(1)
 
-TRIMESH_SUPPORT = False
-try:
-    import trimesh
-    TRIMESH_SUPPORT = True
-except Exception:
-    TRIMESH_SUPPORT = False
+from mesh_utils import (
+    STL_SUPPORT,
+    apply_permutation,
+    canonicalize_to_obb,
+    guess_perm_for_dims,
+    load_trimesh,
+)
+
+TRIMESH_SUPPORT = STL_SUPPORT
 
 try:
     import pyvista as pv
@@ -30,61 +33,6 @@ except Exception as e:
     sys.exit(1)
 
 import numpy as _np
-
-
-def _load_trimesh(path: str):
-    if not TRIMESH_SUPPORT:
-        return None
-    try:
-        m = trimesh.load(path, force='mesh')
-        if m is None or not hasattr(m, 'vertices'):
-            return None
-        if hasattr(m, 'is_empty') and m.is_empty:
-            return None
-        return m
-    except Exception:
-        return None
-
-
-def _canonicalize_to_obb(mesh):
-    m = mesh.copy()
-    obb = m.bounding_box_oriented
-    T = obb.primitive.transform
-    m.apply_transform(_np.linalg.inv(T))
-    mins = m.bounds[0]
-    m.apply_translation(-mins)
-    extents = tuple(float(e) for e in obb.primitive.extents)
-    return _np.asarray(m.vertices), _np.asarray(m.faces), extents
-
-
-def _perm_matrix(ix: int, iy: int, iz: int):
-    M = _np.zeros((3,3))
-    M[0, ix] = 1.0
-    M[1, iy] = 1.0
-    M[2, iz] = 1.0
-    return M
-
-
-def _apply_permutation(V: _np.ndarray, perm):
-    M = _perm_matrix(*perm)
-    V2 = (M @ V.T).T
-    mins = V2.min(axis=0)
-    return V2 - mins
-
-
-def _guess_perm_for_dims(source_extents, target_dims):
-    from itertools import permutations
-    s = _np.array(source_extents)
-    t = _np.array(target_dims)
-    best = (0,1,2)
-    best_err = 1e18
-    for perm in permutations([0,1,2]):
-        cand = s[list(perm)]
-        err = float(_np.sum((_np.array(cand) - t)**2))
-        if err < best_err:
-            best_err = err
-            best = perm
-    return best
 
 
 def build_scene(plotter, box_dims, piece_dims, distribution, stl_path=None, use_stl=False):
@@ -103,12 +51,12 @@ def build_scene(plotter, box_dims, piece_dims, distribution, stl_path=None, use_
 
     stl_mesh_pv = None
     if use_stl and stl_path and os.path.exists(stl_path) and TRIMESH_SUPPORT:
-        tm = _load_trimesh(stl_path)
+        tm = load_trimesh(stl_path)
         if tm is not None:
             try:
-                V, F, ext = _canonicalize_to_obb(tm)
-                perm = _guess_perm_for_dims(ext, piece_dims)
-                V = _apply_permutation(V, perm)
+                V, F, ext = canonicalize_to_obb(tm)
+                perm = guess_perm_for_dims(ext, piece_dims)
+                V = apply_permutation(V, perm)
                 faces = _np.hstack([_np.full((F.shape[0],1), 3, dtype=_np.int64), F]).ravel()
                 stl_mesh_pv = pv.PolyData(V, faces)
             except Exception:
