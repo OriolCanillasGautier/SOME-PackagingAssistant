@@ -1,12 +1,10 @@
+#!/usr/bin/env python3
+import base64
 import gradio as gr
 import numpy as np
-import pandas as pd
 from typing import Tuple, Optional, List
-from decimal import Decimal, ROUND_HALF_UP
-import math
 import tempfile
 import os
-import threading
 import sys
 import json
 import subprocess
@@ -14,45 +12,82 @@ from functools import lru_cache
  
 # Visualització 3D (Plotly) - opcional (ja no s'utilitza a la UI, però el deixem per fallback si cal)
 PLOTLY_SUPPORT = False
+go = None
+pio = None
 try:
-    import plotly.graph_objects as go
-    PLOTLY_SUPPORT = True
+    import importlib
+    import importlib.util
+    if importlib.util.find_spec("plotly.graph_objects") is not None:
+        go = importlib.import_module("plotly.graph_objects")
+        try:
+            pio = importlib.import_module("plotly.io")
+        except Exception:
+            pio = None
+        PLOTLY_SUPPORT = True
+    else:
+        PLOTLY_SUPPORT = False
 except Exception:
     PLOTLY_SUPPORT = False
+    go = None
+    pio = None
 
-                # Trobar distribució òptima per aquest nombre d'unitats
-                best_dist = optimize_by_weight(fit_l, fit_w, fit_h, max_by_weight)
-                if best_dist and best_dist[3] > best_fit:
-                    best_fit = best_dist[3]
-                    best_config = {
-                        "name": f"{orientation_names[i]} (Limitat per pes)",
-                        "dimensions": (float(ol), float(ow), float(oh)),
-                        "units": best_dist[3],
-                        "distribution": f"{best_dist[0]}×{best_dist[1]}×{best_dist[2]}",
-                        "weight": float(best_dist[3] * obj_weight_d),
-                        "vol_efficiency": (best_dist[3] * vol_obj / vol_box * 100),
-                        "weight_efficiency": (float(best_dist[3] * obj_weight_d) / float(max_weight_d) * 100),
-                        "fits_weight": True,
-                        "limited_by": "weight"
-                    }
-    
-    if best_fit == 0:
-        debug = create_debug_info(all_orientations, float(max_weight_d), float(obj_weight_d))
-        return f"❌ No cap cap unitat a la caixa.\n\n{debug}", {}
-    
-    # Aplicar factor de seguretat
-    real_fit = max(1, int(Decimal(str(best_fit)) * Decimal(str(safety_factor))))
-    
-    # Generar resum
-    summary = create_summary(best_fit, real_fit, best_config, safety_factor, all_orientations)
-    
-    return summary, {
-        "theoretical_units": best_fit,
-        "real_units": real_fit,
-        "best_orientation": best_config,
-        "all_orientations": all_orientations
-    }
+# Constants i utilitats compartides
+from packing_core import DEFAULT_SAFETY_FACTOR, calcular_empaquetatge_precis
+from mesh_utils import (
+    STL_SUPPORT,
+    apply_permutation,
+    canonicalize_to_obb,
+    guess_perm_for_dims,
+    load_trimesh,
+    processar_stl_upload,
+)
 
+
+def _load_trimesh_cached(path: str):
+    """Carrega l'STL usant una petita memòria cau basada en l'mtime."""
+    if not STL_SUPPORT:
+        return None
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        mtime = -1.0
+    return _load_trimesh_with_stamp(path, mtime)
+
+
+@lru_cache(maxsize=8)
+def _load_trimesh_with_stamp(path: str, mtime: float):
+    return load_trimesh(path)
+
+
+def _figure_to_fullscreen_link(fig) -> str:
+    if not (PLOTLY_SUPPORT and pio and fig is not None):
+        return ""
+    try:
+        html = pio.to_html(fig, include_plotlyjs="cdn", full_html=True)
+        encoded = base64.b64encode(html.encode("utf-8")).decode("ascii")
+        data_uri = f"data:text/html;base64,{encoded}"
+        return (
+            f'<a class="fullscreen-link" href="{data_uri}" target="_blank" '
+            f'rel="noopener">Pantalla completa 🔎</a>'
+        )
+    except Exception:
+        return ""
+
+# PyVista per a vistes "exactes" tipus Visualizer3D (imatges estàtiques)
+PYVISTA_SUPPORT = False
+try:
+    import pyvista as pv
+    PYVISTA_SUPPORT = True
+except Exception:
+    PYVISTA_SUPPORT = False
+
+PYVISTA_QT_SUPPORT = False
+if PYVISTA_SUPPORT:
+    try:
+        import pyvistaqt  # type: ignore
+        PYVISTA_QT_SUPPORT = True
+    except Exception:
+        PYVISTA_QT_SUPPORT = False
 
 # --- Utilitats de visualització 3D -----------------------------------------------------------
 def _make_cuboid_edges(x: float, y: float, z: float, dx: float, dy: float, dz: float):
@@ -88,7 +123,7 @@ def _build_packing_plot(box_dims: Tuple[float, float, float],
                         limit_draw: int = 300,
                         stl_path: Optional[str] = None,
                         use_stl: bool = False,
-                        stl_limit: int = 20) -> Optional["go.Figure"]:
+                        stl_limit: int = 200) -> Optional[object]:
     """Crea una figura Plotly amb la caixa i les peces empaquetades com cuboides.
     Si no hi ha suport Plotly, retorna None.
     """
@@ -180,7 +215,8 @@ def _build_packing_plot(box_dims: Tuple[float, float, float],
         ),
         margin=dict(l=0, r=0, t=30, b=0),
         title=f"Vista 3D — {min(total_units, limit_draw)} de {total_units} peces visibles",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        height=420
     )
 
     return fig
@@ -298,7 +334,22 @@ def _launch_interactive_viewer(box_dims: Tuple[float, float, float],
                                stl_path: Optional[str] = None,
                                use_stl: bool = False,
                                title: str = "PackAssist - Visor 3D") -> str:
-    """Obre una finestra interactiva en un procés independent (robust per Qt) idèntica a l'escriptori."""
+    """Obre una finestra interactiva en un procés independent (robust per Qt) idèntica a l'escriptori.
+    Aquesta versió busca l'script interactiu a diverses rutes (interactive_viewer.py a l'arrel o tools/)."""
+    # En mode empaquetat (PyInstaller), no disposem d'un intèrpret Python general per executar l'script extern.
+    # Evitem intentar-ho per evitar errors i informem a l'usuari.
+    try:
+        if getattr(sys, "frozen", False):
+            return ("ℹ️ El visor interactiu està desactivat en el mode EXE empaquetat. "
+                    "Executa l'aplicació des del codi font per obrir el visor, o demana'ns "
+                    "una versió empaquetada específica del visor.")
+    except Exception:
+        pass
+    # Comprovació prèvia de PyVista (evitar obrir procés si no hi ha suport)
+    if not PYVISTA_SUPPORT:
+        return "ℹ️ PyVista no està instal·lat. Instala-ho amb: pip install pyvista pyvistaqt vtk"
+    if not PYVISTA_QT_SUPPORT:
+        return "ℹ️ PyVistaQt o els plugins de Qt no estan disponibles en aquest equip. Revisa la instal·lació (pip install pyvistaqt) o usa la vista incrustada."
     # Preparar dades en un JSON temporal
     try:
         data = {
@@ -314,28 +365,37 @@ def _launch_interactive_viewer(box_dims: Tuple[float, float, float],
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f)
 
-        # Localitzar l'script del visor
-        script_path = os.path.join(os.path.dirname(__file__), "tools", "interactive_viewer.py")
-        if not os.path.exists(script_path):
-            return "❌ No s'ha trobat l'script del visor (tools/interactive_viewer.py)."
+        # Localitzar l'script del visor (preferir arrel, després tools/)
+        base_dir = os.path.dirname(__file__)
+        candidates = [
+            os.path.join(base_dir, "interactive_viewer.py"),
+            os.path.join(base_dir, "tools", "interactive_viewer.py"),
+        ]
+        script_path = None
+        for c in candidates:
+            if os.path.exists(c):
+                script_path = c
+                break
+        if not script_path:
+            return "❌ No s'ha trobat l'script del visor (interactive_viewer.py)."
 
         # Llançar procés independent
         python_exe = sys.executable
         subprocess.Popen([python_exe, script_path, "--data", json_path], close_fds=True)
-        return "✅ Visor interactiu obert en una finestra nova (procés separat)"
+        return "Visor interactiu obert en una finestra nova"
     except Exception as e:
         return f"❌ No s'ha pogut obrir el visor interactiu: {e}"
 
 
 def _open_interactive_viewer(ol: float, ow: float, oh: float, ow_kg: float,
                              bl: float, bw: float, bh: float, max_kg: float,
-                             stl_file, safety_percent: int):
+                             stl_file, safety_percent: int, allow_rotation: bool):
     """Handler de Gradio: calcula i obre el visor interactiu idèntic a l'escriptori."""
     try:
         safety = max(0.5, min(1.0, float(safety_percent) / 100.0))
     except Exception:
         safety = 1.0
-    summary, data = calcular_empaquetatge_precis(ol, ow, oh, ow_kg, bl, bw, bh, max_kg, True, safety)
+    summary, data = calcular_empaquetatge_precis(ol, ow, oh, ow_kg, bl, bw, bh, max_kg, allow_rotation, safety)
     if not data or not data.get("best_orientation"):
         return summary + "\n\nℹ️ No hi ha dades per visualitzar.", ""
     dims = data["best_orientation"]["dimensions"]
@@ -349,16 +409,17 @@ def _open_interactive_viewer(ol: float, ow: float, oh: float, ow_kg: float,
 def _compute_plot_and_views_from_inputs(ol: float, ow: float, oh: float, ow_kg: float,
                                         bl: float, bw: float, bh: float, max_kg: float,
                                         stl_file, safety: float,
-                                        gen_views: bool, use_stl_views: bool):
+                                        gen_views: bool, use_stl_views: bool,
+                                        allow_rotation: bool = True):
     """Antiga signatura: es manté per compatibilitat, però la UI només usarà un mode simplificat."""
-    summary, data = calcular_empaquetatge_precis(ol, ow, oh, ow_kg, bl, bw, bh, max_kg, True, safety)
+    summary, data = calcular_empaquetatge_precis(ol, ow, oh, ow_kg, bl, bw, bh, max_kg, allow_rotation, safety)
     gallery = []
     if PYVISTA_SUPPORT and data and data.get("best_orientation"):
         dims = data["best_orientation"]["dimensions"]
         nx, ny, nz = [int(p) for p in data["best_orientation"]["distribution"].split("×")]
         stl_path = getattr(stl_file, 'name', None) if stl_file else None
         total_units = nx * ny * nz
-        use_mesh = bool(STL_SUPPORT and stl_path and total_units <= 60)
+        use_mesh = bool(STL_SUPPORT and stl_path and stl_visual_limit > 0)
         try:
             gallery = _build_packing_views_pyvista((bl, bw, bh), tuple(dims), (nx, ny, nz),
                                                    stl_path=stl_path, use_stl=use_mesh)
@@ -368,16 +429,94 @@ def _compute_plot_and_views_from_inputs(ol: float, ow: float, oh: float, ow_kg: 
         summary += "\n\nℹ️ Per a vistes exactes tipus Visualizer3D, instal·la 'pyvista' (pip install pyvista)."
     return summary, None, gallery
 
-def _compute_summary_and_views_single_mode(ol: float, ow: float, oh: float, ow_kg: float,
-                                           bl: float, bw: float, bh: float, max_kg: float,
-                                           stl_file, safety_percent: int):
-    """Mode únic: permet ajustar el percentatge de seguretat (50–100%). Retorna només el resum."""
+
+def _compute_summary_and_inline_plot(ol: float, ow: float, oh: float, ow_kg: float,
+                                     bl: float, bw: float, bh: float, max_kg: float,
+                                     stl_file, safety_percent: int, allow_rotation: bool,
+                                     stl_visual_limit: float):
+    """Calcula la solució i construeix una vista 3D incrustada (Plotly) per al navegador."""
     try:
         safety = max(0.5, min(1.0, float(safety_percent) / 100.0))
     except Exception:
         safety = 1.0
-    summary, data = calcular_empaquetatge_precis(ol, ow, oh, ow_kg, bl, bw, bh, max_kg, True, safety)
+
+    summary, data = calcular_empaquetatge_precis(ol, ow, oh, ow_kg, bl, bw, bh, max_kg, allow_rotation, safety)
+
+    inline_plot = None
+    status_msg = ""
+    fullscreen_link = ""
+
+    if data and data.get("best_orientation"):
+        dims = data["best_orientation"]["dimensions"]
+        distribution_text = data["best_orientation"].get("distribution", "0×0×0")
+        try:
+            nx, ny, nz = (int(part) for part in distribution_text.split("×"))
+        except Exception:
+            nx = ny = nz = 0
+
+        stl_path = getattr(stl_file, "name", None) if stl_file else None
+        total_units = nx * ny * nz
+        use_mesh = bool(STL_SUPPORT and stl_path and total_units <= 60)
+
+        if PLOTLY_SUPPORT:
+            try:
+                inline_plot = _build_packing_plot(
+                    (bl, bw, bh), tuple(dims), (nx, ny, nz),
+                    stl_path=stl_path if use_mesh else None,
+                    use_stl=use_mesh,
+                    stl_limit=int(max(0, stl_visual_limit)),
+                )
+                if inline_plot is not None:
+                    status_msg = "✅ Vista 3D incrustada al navegador. Usa el botó inferior per obrir el visor PyVista opcional."
+                else:
+                    status_msg = "ℹ️ Plotly no està disponible. Instal·la'l amb: pip install plotly."
+            except Exception as exc:
+                status_msg = f"⚠️ Error renderitzant la vista 3D: {exc}"
+        else:
+            status_msg = "ℹ️ Plotly no està disponible. Instal·la'l amb: pip install plotly."
+    else:
+        status_msg = "ℹ️ Cap configuració vàlida per visualitzar. Revisa les dimensions i el pes."
+
+    fullscreen_component = gr.update(value="", visible=False)
+    if inline_plot is not None:
+        fullscreen_link = _figure_to_fullscreen_link(inline_plot)
+        fullscreen_component = gr.update(value=fullscreen_link, visible=bool(fullscreen_link))
+
+    return summary, inline_plot, status_msg, fullscreen_component
+
+
+def _compute_summary_and_views_single_mode(ol: float, ow: float, oh: float, ow_kg: float,
+                                           bl: float, bw: float, bh: float, max_kg: float,
+                                           stl_file, safety_percent: int, allow_rotation: bool,
+                                           stl_visual_limit: float):
+    """Mode únic: permet ajustar el percentatge de seguretat (50–100%). Retorna només el resum."""
+    summary, _, _, _ = _compute_summary_and_inline_plot(
+        ol, ow, oh, ow_kg, bl, bw, bh, max_kg,
+        stl_file, safety_percent, allow_rotation, stl_visual_limit,
+    )
     return summary
+
+
+def _open_viewer_only_status(ol: float, ow: float, oh: float, ow_kg: float,
+                             bl: float, bw: float, bh: float, max_kg: float,
+                             stl_file, safety_percent: int, allow_rotation: bool):
+    """Obre el visor interactiu i retorna només l'estat, sense modificar el resum."""
+    try:
+        safety = max(0.5, min(1.0, float(safety_percent) / 100.0))
+    except Exception:
+        safety = 1.0
+    # Reutilitzem el càlcul per obtenir la millor distribució
+    _, data = calcular_empaquetatge_precis(ol, ow, oh, ow_kg, bl, bw, bh, max_kg, allow_rotation, safety)
+    if not data or not data.get("best_orientation"):
+        return "ℹ️ Cap configuració vàlida per visualitzar. Revisa les dimensions i el pes."
+    if not PYVISTA_QT_SUPPORT:
+        return "ℹ️ PyVistaQt no està disponible en aquest equip. Fes servir la vista incrustada o instal·la pyvistaqt/Qt."
+    dims = data["best_orientation"]["dimensions"]
+    nx, ny, nz = [int(p) for p in data["best_orientation"]["distribution"].split("×")]
+    stl_path = getattr(stl_file, 'name', None) if stl_file else None
+    use_mesh = bool(STL_SUPPORT and stl_path and (nx*ny*nz) <= 100)
+    status = _launch_interactive_viewer((bl, bw, bh), tuple(dims), (nx, ny, nz), stl_path=stl_path, use_stl=use_mesh)
+    return status
 
 
 
@@ -415,14 +554,27 @@ with gr.Blocks(
     
     /* Variables de color */
     :root {
-        --bg-primary: #1a1a1a;
-        --bg-secondary: #2d2d2d;
-        --bg-card: #363636;
-        --text-primary: #ffffff;
-        --text-secondary: #cccccc;
-        --accent-blue: #3b82f6;
-        --accent-green: #10b981;
-        --border-color: #4a5568;
+        --bg-primary: #f8fafc;
+        --bg-secondary: #ffffff;
+        --bg-card: #e2e8f0;
+        --text-primary: #111827;
+        --text-secondary: #334155;
+        --accent-blue: #2563eb;
+        --accent-green: #059669;
+        --border-color: #cbd5f5;
+    }
+
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #2d2d2d;
+            --bg-card: #363636;
+            --text-primary: #ffffff;
+            --text-secondary: #cccccc;
+            --accent-blue: #3b82f6;
+            --accent-green: #10b981;
+            --border-color: #4a5568;
+        }
     }
     
     /* Fons principal */
@@ -644,6 +796,21 @@ with gr.Blocks(
         align-self: flex-start !important; /* Alinear al principi */
         margin-top: 8px !important; /* Petit ajust vertical */
     }
+
+    .fullscreen-link {
+        display: inline-block;
+        margin-top: 6px;
+        padding: 6px 12px;
+        border-radius: 8px;
+        background: var(--accent-blue);
+        color: white !important;
+        text-decoration: none;
+        font-weight: 600;
+    }
+
+    .fullscreen-link:hover {
+        opacity: 0.9;
+    }
     """
 ) as demo:
     
@@ -676,9 +843,19 @@ with gr.Blocks(
             obj_w = gr.Number(value=67, label="Amplada (mm)", precision=2, minimum=0.01)  
             obj_h = gr.Number(value=50, label="Alçada (mm)", precision=2, minimum=0.01)
             obj_weight = gr.Number(value=0.100, label="Pes (kg)", precision=4, minimum=0.001)
+            allow_rotation = gr.Checkbox(value=True, label="Permet girar l'objecte (6 orientacions)")
+            stl_visual_limit = gr.Slider(
+                minimum=10,
+                maximum=600,
+                value=200,
+                step=10,
+                label="Límit de peces STL visibles (Plotly)",
+                interactive=True,
+            )
             
             # Missatge d'estat per STL
             stl_status = gr.Markdown("", visible=STL_SUPPORT)
+
         
         with gr.Column(scale=1, elem_classes=["input-section", "caixa-section"]):
             gr.Markdown("### 📦 **Dimensions de la Caixa** (mm)", elem_classes=["caixa-title"])
@@ -705,12 +882,17 @@ with gr.Blocks(
     with gr.Row():
         with gr.Column(elem_classes=["result-box"]):
             results = gr.Markdown("", label="Resultats")
-    
-    # (galeria eliminada per simplificar la UI)
-    # Estat del visor interactiu
+            viewer_plot = gr.Plot(label="Vista 3D incrustada", height=480)
+            viewer_status = gr.Markdown(
+                "ℹ️ Calcula per veure la vista 3D incrustada."
+                + (" Si prefereixes el visor PyVista en finestra separada, prem el botó inferior." if PYVISTA_QT_SUPPORT else " PyVistaQt no està disponible en aquest equip."),
+                visible=True,
+            )
+            viewer_fullscreen_link = gr.HTML("", visible=False)
+
     with gr.Row():
         with gr.Column():
-            viewer_status = gr.Markdown(visible=True)
+            open_viewer_btn = gr.Button("🖼️ Obrir visor 3D (PyVista)", variant="secondary", visible=PYVISTA_SUPPORT and PYVISTA_QT_SUPPORT)
     
     # Informació de les dades carregades
     gr.Markdown("""
@@ -719,9 +901,11 @@ with gr.Blocks(
     1. **Introdueix les dimensions** del teu objecte i la caixa en **mil·límetres**
     2. **O puja un fitxer STL** per extreure dimensions automàticament
     3. **Especifica el pes** de l'objecte i la capacitat màxima de la caixa
-    4. **Activa les rotacions** si l'objecte es pot orientar de diferents maneres
-    5. **Ajusta el percentatge de seguretat** a la secció de la **caixa** (100% = exacte, 85% = marge)
-    6. **Fes clic a Calcular** per obtenir el resultat i s'obrirà el visor interactiu en una finestra nova.
+    4. **Activa o desactiva “Permet girar”** segons si vols provar totes les orientacions
+    5. **Ajusta el percentatge de seguretat** (aplica un factor al resultat final; 85% = més marge)
+    6. **Defineix el límit de peces STL** visibles al Plotly si treballes amb malles (per defecte 200)
+    7. **Fes clic a Calcular** per obtenir el resum i una vista 3D interactiva al navegador (Plotly)
+    8. **Prem "Obrir visor 3D (PyVista)"** si vols la finestra externa (requereix PyVista + PyVistaQt amb plugins Qt)
     
     La calculadora provarà totes les orientacions possibles i et donarà la millor solució considerant tant les dimensions com el pes.
     """)
@@ -733,20 +917,26 @@ with gr.Blocks(
             inputs=[stl_upload],
             outputs=[obj_l, obj_w, obj_h, stl_status]
         )
+
     
     # Connectar el botó (mode únic)
     calculate_btn.click(
-        fn=_compute_summary_and_views_single_mode,
-        inputs=[obj_l, obj_w, obj_h, obj_weight, box_l, box_w, box_h, max_weight, stl_upload, safety_percent],
-        outputs=[results]
+        fn=_compute_summary_and_inline_plot,
+        inputs=[
+            obj_l, obj_w, obj_h, obj_weight,
+            box_l, box_w, box_h, max_weight,
+            stl_upload, safety_percent, allow_rotation, stl_visual_limit,
+        ],
+        outputs=[results, viewer_plot, viewer_status, viewer_fullscreen_link]
     )
-    # Obrir automàticament el visor interactiu després de calcular
-    calculate_btn.click(
-        fn=_open_interactive_viewer,
-        inputs=[obj_l, obj_w, obj_h, obj_weight, box_l, box_w, box_h, max_weight, stl_upload, safety_percent],
-        outputs=[results, viewer_status]
+
+    # Botó opcional per obrir el visor interactiu basat en PyVista
+    open_viewer_btn.click(
+        fn=_open_viewer_only_status,
+        inputs=[obj_l, obj_w, obj_h, obj_weight, box_l, box_w, box_h, max_weight, stl_upload, safety_percent, allow_rotation],
+        outputs=[viewer_status]
     )
-    # (El botó manual per obrir el visor s'ha eliminat; el visor s'obre automàticament després de calcular.)
+    # (El visor PyVista és opcional; la vista Plotly incrustada funciona encara que PyVista no estigui instal·lat.)
 
 if __name__ == "__main__":
     demo.launch(
