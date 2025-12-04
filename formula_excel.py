@@ -10,6 +10,7 @@ import threading
 import sys
 import json
 import subprocess
+from functools import lru_cache
  
 # Visualització 3D (Plotly) - opcional (ja no s'utilitza a la UI, però el deixem per fallback si cal)
 PLOTLY_SUPPORT = False
@@ -19,234 +20,6 @@ try:
 except Exception:
     PLOTLY_SUPPORT = False
 
-# Constants per defecte
-# Per defecte, mode exacte (sense marge de seguretat)
-DEFAULT_SAFETY_FACTOR = 1.0
-
-# Verificar si trimesh està disponible per processar STL
-STL_SUPPORT = False
-try:
-    import trimesh
-    # Test bàsic per verificar que funciona
-    test_mesh = trimesh.creation.box()
-    _ = test_mesh.bounds
-    STL_SUPPORT = True
-except ImportError:
-    STL_SUPPORT = False
-    print("ℹ️ Trimesh no està instal·lat. Per suport STL: pip install trimesh[easy]")
-except Exception:
-    STL_SUPPORT = False
-    print("⚠️ Trimesh instal·lat però amb problemes. Funcionalitat STL desactivada.")
-
-# PyVista per a vistes "exactes" tipus Visualizer3D (imatges estàtiques)
-PYVISTA_SUPPORT = False
-try:
-    import pyvista as pv
-    PYVISTA_SUPPORT = True
-except Exception:
-    PYVISTA_SUPPORT = False
-
-# --- Geometria i transformacions auxiliars (trimesh) -----------------------------------------
-import numpy as _np
-def _load_trimesh(path: str):
-    if not STL_SUPPORT:
-        return None
-    try:
-        m = trimesh.load(path, force='mesh')
-        if m is None or not hasattr(m, 'vertices'):
-            return None
-        if hasattr(m, 'is_empty') and m.is_empty:
-            return None
-        return m
-    except Exception:
-        return None
-
-def _canonicalize_to_obb(mesh) -> Tuple[_np.ndarray, _np.ndarray, Tuple[float, float, float]]:
-    """Retorna (V, F, extents) on la malla està alineada als eixos segons l'OBB i min→(0,0,0)."""
-    # Copiar
-    m = mesh.copy()
-    # Oriented bounding box
-    obb = m.bounding_box_oriented
-    T = obb.primitive.transform  # 4x4, obb-local -> world
-    # Portar la malla a coordenades OBB locals (alineat amb eixos)
-    m.apply_transform(_np.linalg.inv(T))
-    # Traslladar perquè min estigui a 0,0,0 i base sobre Z=0
-    mins = m.bounds[0]
-    m.apply_translation(-mins)
-    extents = tuple(float(e) for e in obb.primitive.extents)
-    return _np.asarray(m.vertices), _np.asarray(m.faces), extents
-
-def _perm_matrix(ix: int, iy: int, iz: int) -> _np.ndarray:
-    """Matriu 3x3 que permuta els eixos segons (ix,iy,iz)."""
-    M = _np.zeros((3,3))
-    M[0, ix] = 1.0
-    M[1, iy] = 1.0
-    M[2, iz] = 1.0
-    return M
-
-def _apply_permutation(V: _np.ndarray, perm: Tuple[int,int,int]) -> _np.ndarray:
-    M = _perm_matrix(*perm)
-    V2 = (M @ V.T).T
-    # Després de permutar, desplaçar min→0 de nou
-    mins = V2.min(axis=0)
-    return V2 - mins
-
-def _guess_perm_for_dims(source_extents: Tuple[float,float,float], target_dims: Tuple[float,float,float]) -> Tuple[int,int,int]:
-    """Troba la permutació d'índexs de source_extents que més s'assembla a target_dims."""
-    from itertools import permutations
-    s = _np.array(source_extents)
-    t = _np.array(target_dims)
-    best = (0,1,2)
-    best_err = 1e18
-    for perm in permutations([0,1,2]):
-        cand = s[list(perm)]
-        err = float(_np.sum((_np.array(cand) - t)**2))
-        if err < best_err:
-            best_err = err
-            best = perm
-    return best
-
-
-def extreure_dimensions_stl(file_path: str) -> Tuple[float, float, float]:
-    """
-    Extreu les dimensions d'un fitxer STL.
-    Retorna (llargada, amplada, alçada) en mm.
-    """
-    if not STL_SUPPORT:
-        raise ValueError("Trimesh no està disponible")
-    
-    try:
-        # Carregar el mesh
-        mesh = trimesh.load(file_path)
-        
-        if mesh is None or not hasattr(mesh, 'bounds'):
-            raise ValueError("El fitxer STL no s'ha pogut carregar")
-        
-        if hasattr(mesh, 'is_empty') and mesh.is_empty:
-            raise ValueError("El fitxer STL està buit")
-            
-        # Obtenir dimensions del bounding box
-        bounds = mesh.bounds
-        if bounds is None or len(bounds) != 2 or len(bounds[0]) != 3:
-            raise ValueError("No s'han pogut calcular les dimensions")
-            
-        dimensions = bounds[1] - bounds[0]  # max - min per cada eix
-        
-        if any(dim <= 0 for dim in dimensions):
-            raise ValueError("Les dimensions calculades no són vàlides")
-        
-        # Retornar dimensions (assumint que estan en mm)
-        return float(dimensions[0]), float(dimensions[1]), float(dimensions[2])
-    
-    except Exception as e:
-        raise ValueError(f"Error processant STL: {str(e)}")
-
-
-def processar_stl_upload(stl_file):
-    """Processa un fitxer STL pujat i retorna les dimensions en mm."""
-    if stl_file is None or not STL_SUPPORT:
-        return None, None, None, "No s'ha pujat cap fitxer STL o trimesh no està disponible"
-    
-    try:
-        # Extreure dimensions del STL
-        stl_l, stl_w, stl_h = extreure_dimensions_stl(stl_file.name)
-        
-        # Convertir de mm a mm (ja estan en mm, però assegurem precisió)
-        return (
-            round(stl_l, 2),
-            round(stl_w, 2), 
-            round(stl_h, 2),
-            f"✅ Dimensions extretes: {stl_l:.2f}×{stl_w:.2f}×{stl_h:.2f} mm"
-        )
-    except Exception as e:
-        return None, None, None, f"❌ Error: {str(e)}"
-
-def calcular_empaquetatge_precis(
-    obj_l: float, obj_w: float, obj_h: float, obj_weight: float,
-    box_l: float, box_w: float, box_h: float, max_weight: float,
-    allow_rotation: bool = True, safety_factor: float = DEFAULT_SAFETY_FACTOR
-) -> Tuple[str, dict]:
-    """
-    Calcula amb alta precisió quantes unitats caben en una caixa.
-    Retorna el resultat formatejat i un diccionari amb les dades.
-    """
-    
-    # Validacions bàsiques
-    if any(v <= 0 for v in [obj_l, obj_w, obj_h, obj_weight, box_l, box_w, box_h, max_weight]):
-        return "❌ Tots els valors han de ser majors que 0.", {}
-    
-    if obj_weight > max_weight:
-        return "❌ El pes d'una sola unitat supera la capacitat màxima de la caixa.", {}
-    
-    # Usar Decimal per màxima precisió
-    obj_dims = [Decimal(str(obj_l)), Decimal(str(obj_w)), Decimal(str(obj_h))]
-    box_dims = [Decimal(str(box_l)), Decimal(str(box_w)), Decimal(str(box_h))]
-    obj_weight_d = Decimal(str(obj_weight))
-    max_weight_d = Decimal(str(max_weight))
-    
-    # Generar totes les orientacions possibles si està permès
-    if allow_rotation:
-        orientations = [
-            (obj_dims[0], obj_dims[1], obj_dims[2]),  # Original
-            (obj_dims[0], obj_dims[2], obj_dims[1]),  # Rotar Y
-            (obj_dims[1], obj_dims[0], obj_dims[2]),  # Rotar Z
-            (obj_dims[1], obj_dims[2], obj_dims[0]),  # Rotar XY
-            (obj_dims[2], obj_dims[0], obj_dims[1]),  # Rotar XZ
-            (obj_dims[2], obj_dims[1], obj_dims[0]),  # Rotar YZ
-        ]
-        orientation_names = [
-            "Original (L×W×H)",
-            "Rotació Y (L×H×W)", 
-            "Rotació Z (W×L×H)",
-            "Rotació XY (W×H×L)",
-            "Rotació XZ (H×L×W)",
-            "Rotació YZ (H×W×L)"
-        ]
-    else:
-        orientations = [(obj_dims[0], obj_dims[1], obj_dims[2])]
-        orientation_names = ["Original (L×W×H)"]
-    
-    best_fit = 0
-    best_config = None
-    all_orientations = []
-    
-    for i, (ol, ow, oh) in enumerate(orientations):
-        # Calcular quantes unitats caben per cada dimensió
-        fit_l = int(box_dims[0] // ol) if ol <= box_dims[0] else 0
-        fit_w = int(box_dims[1] // ow) if ow <= box_dims[1] else 0  
-        fit_h = int(box_dims[2] // oh) if oh <= box_dims[2] else 0
-        
-        total_units = fit_l * fit_w * fit_h
-        total_weight = float(total_units * obj_weight_d)
-        
-        # Calcular eficiències
-        vol_obj = float(ol * ow * oh)
-        vol_box = float(box_dims[0] * box_dims[1] * box_dims[2])
-        vol_efficiency = (total_units * vol_obj / vol_box * 100) if vol_box > 0 else 0
-        weight_efficiency = (total_weight / float(max_weight_d) * 100) if max_weight_d > 0 else 0
-        
-        orientation_data = {
-            "name": orientation_names[i],
-            "dimensions": (float(ol), float(ow), float(oh)),
-            "units": total_units,
-            "distribution": f"{fit_l}×{fit_w}×{fit_h}",
-            "weight": total_weight,
-            "vol_efficiency": vol_efficiency,
-            "weight_efficiency": weight_efficiency,
-            "fits_weight": total_weight <= float(max_weight_d)
-        }
-        all_orientations.append(orientation_data)
-        
-        # Comprovar si aquesta orientació és millor
-        if total_units > 0 and total_weight <= float(max_weight_d):
-            if total_units > best_fit:
-                best_fit = total_units
-                best_config = orientation_data.copy()
-        
-        # Si supera el pes, calcular màxim per pes
-        elif total_units > 0:
-            max_by_weight = int(max_weight_d // obj_weight_d)
-            if max_by_weight > best_fit:
                 # Trobar distribució òptima per aquest nombre d'unitats
                 best_dist = optimize_by_weight(fit_l, fit_w, fit_h, max_by_weight)
                 if best_dist and best_dist[3] > best_fit:
@@ -333,6 +106,18 @@ def _build_packing_plot(box_dims: Tuple[float, float, float],
     fig.add_trace(go.Scatter3d(x=cx, y=cy, z=cz, mode="lines",
                                line=dict(color="black", width=4), name="Caixa"))
 
+    mesh_payload = None
+    if use_stl and stl_path and STL_SUPPORT:
+        mesh_obj = _load_trimesh_cached(stl_path)
+        if mesh_obj is not None:
+            try:
+                V, F, ext = canonicalize_to_obb(mesh_obj)
+                perm = guess_perm_for_dims(ext, piece_dims)
+                V = apply_permutation(V, perm)
+                mesh_payload = (V, F)
+            except Exception:
+                mesh_payload = None
+
     # Peces: si es pot, usar STL fins a stl_limit, si no, arestes de cuboide
     drawn = 0
     for iz in range(nz):
@@ -341,26 +126,38 @@ def _build_packing_plot(box_dims: Tuple[float, float, float],
                 if drawn >= limit_draw:
                     break
                 x0, y0, z0 = ix * pl, iy * pw, iz * ph
-                if use_stl and stl_path and drawn < stl_limit and STL_SUPPORT:
+                if mesh_payload is not None and drawn < stl_limit:
                     try:
-                        tm = _load_trimesh(stl_path)
-                        if tm is not None:
-                            V, F, ext = _canonicalize_to_obb(tm)
-                            perm = _guess_perm_for_dims(ext, piece_dims)
-                            V = _apply_permutation(V, perm)
-                            Vt = V + _np.array([x0, y0, z0])
-                            i, j, k = F[:,0], F[:,1], F[:,2]
-                            fig.add_trace(go.Mesh3d(x=Vt[:,0], y=Vt[:,1], z=Vt[:,2], i=i, j=j, k=k,
-                                                    color="#3b82f6", opacity=0.8, name="Peça" if drawn==0 else None,
-                                                    showlegend=(drawn==0)))
-                        else:
-                            raise ValueError("mesh load failed")
+                        V, F = mesh_payload
+                        Vt = V + np.array([x0, y0, z0])
+                        i, j, k = F[:, 0], F[:, 1], F[:, 2]
+                        fig.add_trace(
+                            go.Mesh3d(
+                                x=Vt[:, 0],
+                                y=Vt[:, 1],
+                                z=Vt[:, 2],
+                                i=i,
+                                j=j,
+                                k=k,
+                                color="#3b82f6",
+                                opacity=0.8,
+                                name="Peça" if drawn == 0 else None,
+                                showlegend=(drawn == 0),
+                            )
+                        )
                     except Exception:
                         px, py, pz = _make_cuboid_edges(x0, y0, z0, pl, pw, ph)
-                        fig.add_trace(go.Scatter3d(x=px, y=py, z=pz, mode="lines",
-                                                   line=dict(color="#3b82f6", width=2),
-                                                   name="Peça" if drawn == 0 else None,
-                                                   showlegend=(drawn == 0)))
+                        fig.add_trace(
+                            go.Scatter3d(
+                                x=px,
+                                y=py,
+                                z=pz,
+                                mode="lines",
+                                line=dict(color="#3b82f6", width=2),
+                                name="Peça" if drawn == 0 else None,
+                                showlegend=(drawn == 0),
+                            )
+                        )
                 else:
                     px, py, pz = _make_cuboid_edges(x0, y0, z0, pl, pw, ph)
                     fig.add_trace(go.Scatter3d(x=px, y=py, z=pz, mode="lines",
@@ -427,22 +224,17 @@ def _build_packing_views_pyvista(box_dims: Tuple[float, float, float],
 
     # Carregar STL i alinear a OBB si s'ha de fer servir
     stl_mesh_pv = None
-    obb_ext = None
     if use_stl and stl_path and os.path.exists(stl_path) and STL_SUPPORT:
-        tm = _load_trimesh(stl_path)
-        if tm is not None:
+        mesh_obj = _load_trimesh_cached(stl_path)
+        if mesh_obj is not None:
             try:
-                V, F, ext = _canonicalize_to_obb(tm)
-                # Ajustar a l'orientació Excel (piece_dims)
-                perm = _guess_perm_for_dims(ext, piece_dims)
-                V = _apply_permutation(V, perm)
-                # Crear PolyData
-                faces = _np.hstack([_np.full((F.shape[0],1), 3, dtype=_np.int64), F]).ravel()
+                V, F, ext = canonicalize_to_obb(mesh_obj)
+                perm = guess_perm_for_dims(ext, piece_dims)
+                V = apply_permutation(V, perm)
+                faces = np.hstack([np.full((F.shape[0], 1), 3, dtype=np.int64), F]).ravel()
                 stl_mesh_pv = pv.PolyData(V, faces)
-                obb_ext = (float(V[:,0].max()), float(V[:,1].max()), float(V[:,2].max()))
             except Exception:
                 stl_mesh_pv = None
-                obb_ext = None
 
     # Afegir peces
     drawn = 0
@@ -587,91 +379,6 @@ def _compute_summary_and_views_single_mode(ol: float, ow: float, oh: float, ow_k
     summary, data = calcular_empaquetatge_precis(ol, ow, oh, ow_kg, bl, bw, bh, max_kg, True, safety)
     return summary
 
-
-def optimize_by_weight(max_l: int, max_w: int, max_h: int, target_units: int) -> Optional[Tuple[int, int, int, int]]:
-    """Troba la millor distribució per un nombre màxim d'unitats."""
-    best_dist = None
-    best_score = 0
-    
-    for l in range(1, max_l + 1):
-        for w in range(1, max_w + 1):
-            h = min(max_h, target_units // (l * w))
-            if h >= 1:
-                units = l * w * h
-                if units <= target_units:
-                    # Prioritzar menys alçada i més unitats
-                    score = units - h * 0.01
-                    if score > best_score:
-                        best_score = score
-                        best_dist = (l, w, h, units)
-    
-    return best_dist
-
-
-def create_debug_info(orientations: list, max_weight: float, obj_weight: float) -> str:
-    """Crea informació de debug quan no cap res."""
-    debug = "📋 **Orientacions provades:**\n"
-    max_by_weight = int(max_weight / obj_weight) if obj_weight > 0 else 0
-    
-    for ori in orientations:
-        status = "✅" if ori["fits_weight"] else "⚖️"
-        debug += f"   {status} **{ori['name']}**: {ori['units']} unitats ({ori['distribution']}) - Pes: {ori['weight']:.2f}kg\n"
-    
-    debug += f"\n💡 **Diagnòstic:**\n"
-    debug += f"   • Capacitat màxima: {max_weight:.1f} kg\n"
-    debug += f"   • Pes per unitat: {obj_weight:.3f} kg\n"
-    debug += f"   • Màxim teòric per pes: {max_by_weight} unitats\n"
-    
-    if any(ori["units"] > 0 for ori in orientations):
-        if max_by_weight > 0:
-            debug += f"\n✅ **Solució**: {max_by_weight} unitats limitades per pes"
-        else:
-            debug += f"\n❌ **Problema**: El pes individual és massa alt"
-    else:
-        debug += f"\n❌ **Problema**: Les dimensions són massa grans per la caixa"
-    
-    return debug
-
-
-def create_summary(theoretical: int, real: int, config: dict, safety: float, all_orientations: list) -> str:
-    """Crea el resum final dels resultats."""
-    
-    # Informació principal
-    summary = f"""
-# 📦 RESULTATS
-
-## 🎯 **Resultat Principal**
-- **Unitats teòriques màximes:** {theoretical}**(per volum)**
-- **Unitats reals (seguretat {safety:.0%}):** {real}
-- **Orientació òptima:** {config['name']}
-- **Distribució:** {config['distribution']} (L×W×H)
-
-## ⚖️ **Anàlisi de Pes i Volum**
-- **Pes total:** {config['weight']:.2f} kg
-- **Eficiència volumètrica:** {config.get('vol_efficiency', 0):.1f}%
-- **Eficiència de pes:** {config.get('weight_efficiency', 0):.1f}%
-
-## 📐 **Dimensions de l'Orientació Òptima**
-- **Llargada:** {config['dimensions'][0]:.2f} cm
-- **Amplada:** {config['dimensions'][1]:.2f} cm  
-- **Alçada:** {config['dimensions'][2]:.2f} cm
-"""
-
-    # Factor limitant
-    if config.get('limited_by') == 'weight':
-        summary += "\n⚖️ **Factor limitant:** PES (no dimensions)\n"
-    
-    # Taula de comparació d'orientacions
-    if len(all_orientations) > 1:
-        summary += "\n## 📊 **Comparació d'Orientacions**\n"
-        summary += "| Orientació | Unitats | Distribució | Pes (kg) | Vol (%) | Pes (%) |\n"
-        summary += "|------------|---------|-------------|----------|---------|----------|\n"
-        
-        for ori in all_orientations:
-            status = "✅" if ori["fits_weight"] else "❌"
-            summary += f"| {status} {ori['name']} | {ori['units']} | {ori['distribution']} | {ori['weight']:.1f} | {ori['vol_efficiency']:.1f} | {ori['weight_efficiency']:.1f} |\n"
-    
-    return summary
 
 
 # Interfície Gradio simplificada i elegant

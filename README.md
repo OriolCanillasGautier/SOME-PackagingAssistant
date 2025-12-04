@@ -1,13 +1,14 @@
-# SOME-PackagingAssistant (Gradio-only)
+# SOME-PackagingAssistant (Gradio UI)
 
-Single-file Gradio app that performs exact, axis-aligned carton/box packing. Interactive 3D viewer is intentionally excluded.
+Single-file Gradio app that replicates the Excel-based packing calculator with inline 3D preview and optional PyVista viewer.
 
 ## Features
 - Exact "Excel" style packing: origin at (0,0,0), base at Z=0, axis-aligned grid.
-- Safety percent in the Box section: scales the usable box dimensions (50–100%).
-- Optional STL upload to auto-detect item dimensions via oriented bounding box (trimesh).
-- Quantity and optional weight limit (max box weight).
-- Concise summary table with best orientation, counts per axis, total placed, and fill%.
+- Safety slider applies a reduction factor to the **final unit count** (50–100%) and now has an explicit "Permet girar" toggle to lock orientation when needed.
+- Optional STL upload (trimesh) that auto-fills the object dimensions and feeds the Plotly/PyVista previews.
+- Plotly inline viewer can spawn a fullscreen tab and lets you tune how many STL instances are rendered (default 200) for heavier meshes.
+- Inline Plotly scene plus an optional external PyVista/Qt viewer (when available).
+- Shared packing core (`packing_core.py`) keeps the Gradio UI and legacy script in sync, avoiding drift.
 
 ## Quickstart (Windows, PowerShell)
 
@@ -16,7 +17,7 @@ Single-file Gradio app that performs exact, axis-aligned carton/box packing. Int
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r .\gradio\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 
 # Run the app
 .\.venv\Scripts\python.exe .\app.py
@@ -24,38 +25,38 @@ py -m venv .venv
 
 ## One-click on Windows (.bat)
 
-If you prefer not to type commands, double‑click `scripts/run_windows.bat`. It will:
+Double‑click `run_gradio.bat`. It will:
 - create `.venv` if missing,
-- upgrade pip and install dependencies from `gradio/requirements.txt`,
-- and start the app with that environment.
+- upgrade pip and install dependencies from `requirements.txt`,
+- launch `app.py` with that environment.
 
 ## CI package (GitHub Actions)
-This branch includes a workflow that packages a simple “runner” ZIP with:
-- `app.py`, `README.md`, `requirements.txt` (copied from `gradio/requirements.txt`), and `scripts/run_windows.bat`.
+Every push to the `Gradio` branch publishes an artifact named `packassist-gradio-windows-runner` that bundles `app.py`, `README.md`, `requirements.txt`, and `run_gradio.bat`.
 
-Every push to the `Gradio` branch uploads an artifact named `packassist-gradio-windows-runner` you can download from the workflow run.
-
-The app will print a local Gradio URL (usually http://127.0.0.1:7860). Open it in your browser.
+When the app starts it prints a local Gradio URL (usually http://127.0.0.1:7860). Open it in your browser.
 
 ## Usage notes
-- Units are millimeters. STL units are assumed to be millimeters.
-- Safety percent reduces the available internal dimensions uniformly: usable_dim = box_dim * (safety/100).
-- Orientation search tries all 6 permutations of the item dimensions and picks the one with the highest capacity.
-- If both weight per item and max box weight are provided, the final placed count is capped by weight.
+- Units are millimeters everywhere (STL files are assumed to be mm as well).
+- Safety percent reduces the final recommended unit count; it no longer shrinks box dimensions silently.
+- Orientation search tries all 6 permutations only when "Permet girar" is enabled.
+- Use the "Límit de peces STL visibles" slider to cap how many STL copies are drawn in Plotly (useful for dense layouts); the fullscreen link opens the same figure in a dedicated browser tab.
+- Weight limits remain enforced: if total weight exceeds the box limit the result is capped accordingly.
+- Plotly is optional; if it is missing you still get the textual summary. PyVista/PyVistaQt are only needed for the external viewer button.
 
 ## Limitations
-- No external interactive 3D viewer. If you later want a 3D view, we can add a separate lightweight preview or integrate PyVista screenshots.
-- No complex heuristics beyond grid packing; irregular shapes are approximated by their oriented bounding box for placement.
+- Packing remains grid/axis-aligned; irregular shapes are approximated by their oriented bounding box.
+- STL rendering in Plotly is limited to the first ~20 instances for performance reasons (PyVista button is better for dense previews).
 
 ## Troubleshooting
-- If the app fails to start due to missing packages, re-run the install step:
-  ```pwsh
-  .\.venv\Scripts\python.exe -m pip install -r .\gradio\requirements.txt
-  ```
-- If STL fails to load, ensure the file is valid and `trimesh` is installed (it is included in `gradio/requirements.txt`).
+- If dependencies are missing, re-run: `python -m pip install -r requirements.txt` inside the virtual environment.
+- STL issues are almost always invalid meshes; ensure the file is manifold and exported in millimeters.
+- To enable the external viewer install `pyvista`, `pyvistaqt`, and `vtk` in the same environment.
 
 ## Project layout
-- `app.py` — Single-file Gradio application with packing logic and UI.
-- `gradio/requirements.txt` — Dependency list used for the app.
-- `gradio/interactive_viewer.py` — Not used in this Gradio-only mode.
+- `app.py` — Gradio application + Plotly inline preview + viewer launcher.
+- `formula_excel.py` — Legacy UI kept for reference.
+- `interactive_viewer.py` — PyVista/Qt standalone viewer used by `app.py` when the button is pressed.
+- `packing_core.py` — Shared packing logic (Decimal precision, summaries, weight heuristics).
+- `mesh_utils.py` — STL helpers, trimesh OBB alignment, and upload processors.
+- `requirements.txt` — Dependency list for the Gradio app and viewer.
 

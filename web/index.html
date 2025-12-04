@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📦 PackAssist - Calculadora de Capacitat</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <!-- Three.js -->
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+            "@dimforge/rapier3d-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.12.0/+esm"
+        }
+    }
+    </script>
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>📦 Calculadora de Capacitat de Peces</h1>
+                <p>Càlcul optimitzat + Mode a Granel amb Física Real</p>
+            </div>
+        </header>
+
+        <main class="main-content">
+            <!-- Mode Selector -->
+            <div class="mode-selector">
+                <button class="mode-btn active" data-mode="optimized">
+                    🎯 Mode Optimitzat
+                    <span class="mode-desc">Càlcul matemàtic precís</span>
+                </button>
+                <button class="mode-btn" data-mode="bulk">
+                    🌊 Mode a Granel
+                    <span class="mode-desc">Simulació amb gravetat</span>
+                </button>
+            </div>
+
+            <div class="content-grid">
+                <!-- Left Panel: Inputs -->
+                <aside class="input-panel">
+                    <!-- Object Section -->
+                    <section class="input-section object-section">
+                        <div class="section-header">
+                            <h2>📏 Dimensions de l'Objecte</h2>
+                            <label class="stl-upload-btn">
+                                <input type="file" id="stl-upload" accept=".stl,.STL" hidden>
+                                <span>📁 STL</span>
+                            </label>
+                        </div>
+                        <div id="stl-status" class="stl-status"></div>
+                        
+                        <div class="input-group">
+                            <label for="obj-length">Llargada (mm)</label>
+                            <input type="number" id="obj-length" value="50" min="0.01" step="0.1">
+                        </div>
+                        <div class="input-group">
+                            <label for="obj-width">Amplada (mm)</label>
+                            <input type="number" id="obj-width" value="67" min="0.01" step="0.1">
+                        </div>
+                        <div class="input-group">
+                            <label for="obj-height">Alçada (mm)</label>
+                            <input type="number" id="obj-height" value="50" min="0.01" step="0.1">
+                        </div>
+                        <div class="input-group">
+                            <label for="obj-weight">Pes (kg)</label>
+                            <input type="number" id="obj-weight" value="0.100" min="0.001" step="0.001">
+                        </div>
+                        <div class="input-group checkbox-group">
+                            <input type="checkbox" id="allow-rotation" checked>
+                            <label for="allow-rotation">Permet girar l'objecte (6 orientacions)</label>
+                        </div>
+                    </section>
+
+                    <!-- Box Section -->
+                    <section class="input-section box-section">
+                        <h2>📦 Dimensions de la Caixa</h2>
+                        <div class="input-group">
+                            <label for="box-length">Llargada (mm)</label>
+                            <input type="number" id="box-length" value="100" min="0.1" step="1">
+                        </div>
+                        <div class="input-group">
+                            <label for="box-width">Amplada (mm)</label>
+                            <input type="number" id="box-width" value="150" min="0.1" step="1">
+                        </div>
+                        <div class="input-group">
+                            <label for="box-height">Alçada (mm)</label>
+                            <input type="number" id="box-height" value="200" min="0.1" step="1">
+                        </div>
+                        <div class="input-group">
+                            <label for="max-weight">Pes màxim (kg)</label>
+                            <input type="number" id="max-weight" value="2.0" min="0.1" step="0.1">
+                        </div>
+                        <div class="input-group slider-group">
+                            <label for="safety-factor">Seguretat: <span id="safety-value">100</span>%</label>
+                            <input type="range" id="safety-factor" min="50" max="100" value="100">
+                        </div>
+                    </section>
+
+                    <!-- Bulk Mode Options (hidden by default) -->
+                    <section class="input-section bulk-section" id="bulk-options" style="display: none;">
+                        <h2>🌊 Opcions Mode a Granel</h2>
+                        <div class="input-group slider-group">
+                            <label for="drop-height">Alçada de caiguda: <span id="drop-height-value">300</span>mm</label>
+                            <input type="range" id="drop-height" min="100" max="1000" value="300" step="50">
+                        </div>
+                        <div class="input-group checkbox-group">
+                            <input type="checkbox" id="auto-capacity">
+                            <label for="auto-capacity">🔄 Mode automàtic (detecta capacitat)</label>
+                        </div>
+                        <div class="input-group slider-group" id="max-pieces-group">
+                            <label for="max-pieces">Peces màximes: <span id="max-pieces-value">50</span></label>
+                            <input type="range" id="max-pieces" min="10" max="200" value="50" step="10">
+                        </div>
+                        <div class="input-group slider-group">
+                            <label for="drop-interval">Interval (ms): <span id="drop-interval-value">200</span></label>
+                            <input type="range" id="drop-interval" min="50" max="1000" value="200" step="50">
+                        </div>
+                        <div class="input-group slider-group">
+                            <label for="piece-colors">Nombre de colors: <span id="piece-colors-value">10</span></label>
+                            <input type="range" id="piece-colors" min="2" max="20" value="10" step="1">
+                        </div>
+                        <div class="input-group checkbox-group">
+                            <input type="checkbox" id="random-rotation" checked>
+                            <label for="random-rotation">Rotació aleatòria en caiguda</label>
+                        </div>
+                        <p class="hint-text" id="auto-mode-hint" style="display: none;">
+                            ℹ️ En mode automàtic, la simulació pararà quan detecti que la caixa està plena 
+                            (peces caient fora) o després de 30s d'estabilització.
+                        </p>
+                    </section>
+
+                    <!-- Calculate Button -->
+                    <button id="calculate-btn" class="calculate-btn">
+                        🔍 CALCULAR CAPACITAT
+                    </button>
+                    <button id="start-simulation-btn" class="simulate-btn" style="display: none;">
+                        ▶️ INICIAR SIMULACIÓ
+                    </button>
+                    <button id="stop-simulation-btn" class="stop-btn" style="display: none;">
+                        ⏹️ ATURAR
+                    </button>
+                    <button id="reset-simulation-btn" class="reset-btn" style="display: none;">
+                        🔄 REINICIAR
+                    </button>
+                </aside>
+
+                <!-- Right Panel: 3D Viewer + Results -->
+                <div class="viewer-panel">
+                    <!-- 3D Viewer -->
+                    <div class="viewer-container">
+                        <div id="three-canvas" class="three-canvas"></div>
+                        <div class="viewer-controls">
+                            <button class="view-btn" data-view="iso" title="Vista Isomètrica">🎲</button>
+                            <button class="view-btn" data-view="top" title="Vista Superior">⬆️</button>
+                            <button class="view-btn" data-view="front" title="Vista Frontal">🔲</button>
+                            <button class="view-btn" data-view="right" title="Vista Dreta">➡️</button>
+                            <button class="view-btn" data-view="fullscreen" title="Pantalla Completa">🔎</button>
+                        </div>
+                        <div id="simulation-status" class="simulation-status"></div>
+                    </div>
+
+                    <!-- Results -->
+                    <div class="results-container">
+                        <div id="results" class="results-content">
+                            <p class="placeholder-text">👆 Introdueix les dades i fes clic a Calcular</p>
+                        </div>
+                        <div class="report-buttons" id="report-buttons" style="display: none;">
+                            <button id="report-preview-btn" class="report-btn" title="Previsualitzar i configurar informe">
+                                👁️ Previsualitzar Informe
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- Report Preview Modal -->
+        <div id="report-modal" class="modal" style="display: none;">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2>📄 Configuració de l'Informe</h2>
+                    <button id="modal-close" class="modal-close">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="report-config">
+                        <div class="config-section">
+                            <h3>🌐 Idioma</h3>
+                            <div class="radio-group">
+                                <label><input type="radio" name="report-lang" value="ca" checked> Català</label>
+                                <label><input type="radio" name="report-lang" value="en"> English</label>
+                            </div>
+                        </div>
+                        <div class="config-section">
+                            <h3>🎨 Nombre de colors</h3>
+                            <div class="slider-inline">
+                                <input type="range" id="color-count" min="2" max="20" value="10">
+                                <span id="color-count-value">10</span>
+                            </div>
+                            <p class="config-hint">Les peces tindran fins a aquest nombre de colors diferents</p>
+                        </div>
+                    </div>
+                    <div class="report-preview-frame" id="report-preview-frame">
+                        <p class="loading-text">Carregant previsualització...</p>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="modal-cancel" class="btn-secondary">Cancel·lar</button>
+                    <button id="modal-download" class="btn-primary">📥 Descarregar PDF</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>PackAssist — Oriol Canillas © 2025</p>
+        </footer>
+    </div>
+
+    <!-- Main Script -->
+    <script type="module" src="js/main.js"></script>
+</body>
+</html>
