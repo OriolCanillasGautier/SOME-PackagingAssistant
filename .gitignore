@@ -1,4 +1,28 @@
-.github/
-.venv/
+#.github/
+
+
+# Cache & Build
 __pycache__/
-.venv.7z
+*.pyc
+.cache/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Archives
+*.7z
+*.zip
+*.rar
