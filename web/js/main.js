@@ -4,10 +4,11 @@
  */
 
 import { calcularEmpaquetatge, getDistribution, getPieceDimensions } from './packing/calculator.js';
-import { loadSTL, extractDimensions, centerToOrigin } from './mesh/mesh-utils.js';
+import { loadMesh, loadSTL, extractDimensions, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS } from './mesh/mesh-utils.js';
 import { SceneManager } from './visualization/scene.js';
 import { BulkSimulation, initRapier } from './physics/physics-world.js';
 import { ReportGenerator } from './report/report-generator.js';
+import { getSimplificationModal } from './mesh/simplification-modal.js';
 
 // Application state
 const state = {
@@ -230,20 +231,62 @@ function switchMode(mode) {
 }
 
 /**
- * Handle STL file upload
+ * Handle 3D file upload (STL, OBJ)
  * @param {Event} event
  */
 async function handleSTLUpload(event) {
     const file = event.target.files[0];
     if (!file) return;
     
+    // Check if format is supported
+    if (!isSupported(file.name)) {
+        elements.stlStatus.className = 'stl-status error';
+        elements.stlStatus.textContent = `❌ Format no suportat. Formats vàlids: ${SUPPORTED_EXTENSIONS.join(', ')}`;
+        elements.stlStatus.style.display = 'block';
+        return;
+    }
+    
+    const ext = file.name.substring(file.name.lastIndexOf('.')).toUpperCase();
     elements.stlStatus.className = 'stl-status';
-    elements.stlStatus.textContent = 'Carregant STL...';
+    elements.stlStatus.textContent = `Carregant ${ext}...`;
     elements.stlStatus.style.display = 'block';
     
     try {
-        const geometry = await loadSTL(file);
+        let geometry = await loadMesh(file);
         centerToOrigin(geometry);
+        
+        // Comprovar si la malla té molts vèrtexs i oferir simplificació
+        const positions = geometry.getAttribute('position');
+        const vertexCount = positions.count;
+        const VERTEX_THRESHOLD = 5000; // Llindar per oferir simplificació
+        
+        if (vertexCount > VERTEX_THRESHOLD) {
+            // Mostrar opció de simplificació
+            elements.stlStatus.className = 'stl-status warning';
+            elements.stlStatus.innerHTML = `⚠️ Malla complexa (${vertexCount.toLocaleString()} vèrtexs). <button id="simplify-mesh-btn" class="btn-small">🔧 Simplificar</button>`;
+            
+            // Afegir handler pel botó
+            document.getElementById('simplify-mesh-btn')?.addEventListener('click', () => {
+                const modal = getSimplificationModal();
+                modal.open(geometry, (simplifiedGeometry) => {
+                    // Callback quan es completa la simplificació
+                    geometry = simplifiedGeometry;
+                    centerToOrigin(geometry);
+                    
+                    state.stlGeometry = geometry;
+                    state.stlDimensions = extractDimensions(geometry);
+                    
+                    // Update dimension inputs
+                    elements.objLength.value = state.stlDimensions.length.toFixed(2);
+                    elements.objWidth.value = state.stlDimensions.width.toFixed(2);
+                    elements.objHeight.value = state.stlDimensions.height.toFixed(2);
+                    
+                    const newPositions = geometry.getAttribute('position');
+                    elements.stlStatus.className = 'stl-status success';
+                    elements.stlStatus.textContent = `✅ Simplificat: ${newPositions.count.toLocaleString()} vèrtexs | ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm`;
+                });
+            });
+        }
         
         state.stlGeometry = geometry;
         state.stlDimensions = extractDimensions(geometry);
@@ -253,8 +296,10 @@ async function handleSTLUpload(event) {
         elements.objWidth.value = state.stlDimensions.width.toFixed(2);
         elements.objHeight.value = state.stlDimensions.height.toFixed(2);
         
-        elements.stlStatus.className = 'stl-status success';
-        elements.stlStatus.textContent = `✅ Dimensions: ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm`;
+        if (vertexCount <= VERTEX_THRESHOLD) {
+            elements.stlStatus.className = 'stl-status success';
+            elements.stlStatus.textContent = `✅ Dimensions: ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm`;
+        }
         
     } catch (error) {
         elements.stlStatus.className = 'stl-status error';
@@ -366,7 +411,9 @@ async function startSimulation() {
             randomRotation: values.randomRotation,
             autoMode: values.autoCapacity,
             settlingTimeoutMs: 30000,
-            colorCount: values.colorCount
+            colorCount: values.colorCount,
+            pieceWeight: values.objWeight,
+            maxWeight: values.maxWeight
         });
         
         // Setup status callback

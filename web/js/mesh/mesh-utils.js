@@ -1,11 +1,54 @@
 /**
  * PackAssist Web - Mesh Utilities
- * Port of mesh_utils.py to JavaScript
- * Uses Three.js STLLoader for mesh loading
+ * Supports: STL, OBJ formats
+ * Uses Three.js loaders for mesh loading
  */
 
 import * as THREE from 'three';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+/**
+ * Supported file extensions
+ */
+export const SUPPORTED_EXTENSIONS = ['.stl', '.obj'];
+
+/**
+ * Check if a file extension is supported
+ * @param {string} filename
+ * @returns {boolean}
+ */
+export function isSupported(filename) {
+    const ext = filename.toLowerCase().substring(filename.lastIndexOf('.'));
+    return SUPPORTED_EXTENSIONS.includes(ext);
+}
+
+/**
+ * Get file extension
+ * @param {string} filename
+ * @returns {string}
+ */
+function getExtension(filename) {
+    return filename.toLowerCase().substring(filename.lastIndexOf('.'));
+}
+
+/**
+ * Load a 3D mesh file (STL or OBJ) and return a Three.js BufferGeometry
+ * @param {File} file - File object
+ * @returns {Promise<THREE.BufferGeometry>}
+ */
+export async function loadMesh(file) {
+    const ext = getExtension(file.name);
+    
+    switch (ext) {
+        case '.stl':
+            return loadSTL(file);
+        case '.obj':
+            return loadOBJ(file);
+        default:
+            throw new Error(`Format no suportat: ${ext}. Formats vàlids: ${SUPPORTED_EXTENSIONS.join(', ')}`);
+    }
+}
 
 /**
  * Load an STL file and return a Three.js BufferGeometry
@@ -39,6 +82,87 @@ export async function loadSTL(input) {
             reject(new Error('Invalid input type'));
         }
     });
+}
+
+/**
+ * Load an OBJ file and return a Three.js BufferGeometry
+ * @param {File} file - File object
+ * @returns {Promise<THREE.BufferGeometry>}
+ */
+export async function loadOBJ(file) {
+    const loader = new OBJLoader();
+    
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const text = e.target.result;
+                const object = loader.parse(text);
+                
+                // OBJLoader returns a Group, we need to merge all geometries
+                const geometries = [];
+                object.traverse((child) => {
+                    if (child.isMesh && child.geometry) {
+                        // Clone and apply any transforms
+                        const geo = child.geometry.clone();
+                        if (child.matrixWorld) {
+                            geo.applyMatrix4(child.matrixWorld);
+                        }
+                        geometries.push(geo);
+                    }
+                });
+                
+                if (geometries.length === 0) {
+                    reject(new Error('No geometry found in OBJ file'));
+                    return;
+                }
+                
+                // Merge all geometries into one
+                let mergedGeometry;
+                if (geometries.length === 1) {
+                    mergedGeometry = geometries[0];
+                } else {
+                    // Use BufferGeometryUtils to merge
+                    mergedGeometry = mergeBufferGeometries(geometries);
+                }
+                
+                resolve(mergedGeometry);
+            } catch (error) {
+                reject(new Error(`Error parsing OBJ: ${error.message}`));
+            }
+        };
+        reader.onerror = () => reject(new Error('Error reading file'));
+        reader.readAsText(file);
+    });
+}
+
+/**
+ * Simple merge of buffer geometries (without using BufferGeometryUtils)
+ * @param {THREE.BufferGeometry[]} geometries
+ * @returns {THREE.BufferGeometry}
+ */
+function mergeBufferGeometries(geometries) {
+    // Count total vertices
+    let totalVertices = 0;
+    for (const geo of geometries) {
+        totalVertices += geo.getAttribute('position').count;
+    }
+    
+    // Create merged arrays
+    const positions = new Float32Array(totalVertices * 3);
+    let offset = 0;
+    
+    for (const geo of geometries) {
+        const posAttr = geo.getAttribute('position');
+        positions.set(posAttr.array, offset);
+        offset += posAttr.array.length;
+    }
+    
+    const merged = new THREE.BufferGeometry();
+    merged.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    merged.computeVertexNormals();
+    
+    return merged;
 }
 
 /**

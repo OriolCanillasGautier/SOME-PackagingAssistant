@@ -46,8 +46,10 @@ export class PhysicsWorld {
         this.gravity = -9810; // mm/s² (9.81 m/s² * 1000)
         
         // Solver iterations for more accurate collision (reduces interpenetration)
-        this.numSolverIterations = 8;
-        this.numAdditionalFrictionIterations = 4;
+        // Higher values = less interpenetration but slower
+        this.numSolverIterations = 16;
+        this.numAdditionalFrictionIterations = 8;
+        this.numVelocitySolverIterations = 8;
         
         // Vibration settings
         this.isVibrating = false;
@@ -73,9 +75,10 @@ export class PhysicsWorld {
         const gravity = { x: 0.0, y: this.gravity, z: 0.0 };
         this.world = new RAPIER.World(gravity);
         
-        // Configure solver for more accurate collisions
+        // Configure solver for more accurate collisions (reduces interpenetration)
         this.world.numSolverIterations = this.numSolverIterations;
         this.world.numAdditionalFrictionIterations = this.numAdditionalFrictionIterations;
+        this.world.numVelocitySolverIterations = this.numVelocitySolverIterations;
         
         // Reset arrays
         this.bodies = [];
@@ -92,11 +95,14 @@ export class PhysicsWorld {
      * Create the box container with floor and walls
      */
     createBoxContainer({ length, width, height }) {
-        const wallThickness = 50; // Thick walls to prevent pieces escaping
+        // THICK walls positioned OUTSIDE the box visualization
+        // The visual box goes from (0,0,0) to (length, height, width)
+        // Walls are placed OUTSIDE these bounds so pieces can't escape
+        const wallThickness = 100;
         this.wallBodies = [];
         this.wallOriginalPositions = [];
         
-        // FLOOR at y=0
+        // FLOOR at y=0 (slightly below)
         const floor = this.createKinematicBox(
             length / 2, -wallThickness / 2, width / 2,
             length / 2 + wallThickness, wallThickness / 2, width / 2 + wallThickness
@@ -104,7 +110,7 @@ export class PhysicsWorld {
         this.wallBodies.push(floor);
         this.wallOriginalPositions.push({ x: length / 2, y: -wallThickness / 2, z: width / 2 });
         
-        // BACK WALL (z=0)
+        // BACK WALL at z=0 (positioned at z = -thickness/2, so inner face is at z=0)
         const back = this.createKinematicBox(
             length / 2, height / 2, -wallThickness / 2,
             length / 2 + wallThickness, height / 2 + wallThickness, wallThickness / 2
@@ -112,7 +118,7 @@ export class PhysicsWorld {
         this.wallBodies.push(back);
         this.wallOriginalPositions.push({ x: length / 2, y: height / 2, z: -wallThickness / 2 });
         
-        // FRONT WALL (z=width)
+        // FRONT WALL at z=width (positioned so inner face is at z=width)
         const front = this.createKinematicBox(
             length / 2, height / 2, width + wallThickness / 2,
             length / 2 + wallThickness, height / 2 + wallThickness, wallThickness / 2
@@ -120,7 +126,7 @@ export class PhysicsWorld {
         this.wallBodies.push(front);
         this.wallOriginalPositions.push({ x: length / 2, y: height / 2, z: width + wallThickness / 2 });
         
-        // LEFT WALL (x=0)
+        // LEFT WALL at x=0 (positioned so inner face is at x=0)
         const left = this.createKinematicBox(
             -wallThickness / 2, height / 2, width / 2,
             wallThickness / 2, height / 2 + wallThickness, width / 2 + wallThickness
@@ -128,7 +134,7 @@ export class PhysicsWorld {
         this.wallBodies.push(left);
         this.wallOriginalPositions.push({ x: -wallThickness / 2, y: height / 2, z: width / 2 });
         
-        // RIGHT WALL (x=length)
+        // RIGHT WALL at x=length (positioned so inner face is at x=length)
         const right = this.createKinematicBox(
             length + wallThickness / 2, height / 2, width / 2,
             wallThickness / 2, height / 2 + wallThickness, width / 2 + wallThickness
@@ -266,12 +272,12 @@ export class PhysicsWorld {
         const body = this.world.createRigidBody(bodyDesc);
         
         // Create cuboid collider (half-extents)
-        // Use slightly smaller collider to prevent visual overlap (0.98 scale)
-        const colliderDesc = RAPIER.ColliderDesc.cuboid(l / 2 * 0.98, h / 2 * 0.98, w / 2 * 0.98)
-            .setDensity(3.0) // Higher density for more weight/stability
-            .setFriction(0.4)
-            .setRestitution(0.02) // Very low bounce
-            .setContactForceEventThreshold(0.1);
+        // Use slightly smaller collider (0.95 scale) to prevent interpenetration
+        const colliderDesc = RAPIER.ColliderDesc.cuboid(l / 2 * 0.95, h / 2 * 0.95, w / 2 * 0.95)
+            .setDensity(2.0) // Moderate density
+            .setFriction(0.5) // Higher friction for better stacking
+            .setRestitution(0.01) // Almost no bounce
+            .setContactForceEventThreshold(0.01);
         
         this.world.createCollider(colliderDesc, body);
         
@@ -331,7 +337,7 @@ export class PhysicsWorld {
             );
         }
         
-        colliderDesc.setDensity(3.0).setFriction(0.4).setRestitution(0.02);
+        colliderDesc.setDensity(2.0).setFriction(0.5).setRestitution(0.01);
         this.world.createCollider(colliderDesc, body);
         
         this.bodies.push(body);
@@ -584,11 +590,20 @@ export class BulkSimulation {
         this.overflowCount = 0;
         this.maxOverflow = 5; // Stop after 5 pieces fall outside
         
+        // Weight control in auto mode
+        this.pieceWeight = 0; // Weight per piece in kg
+        this.maxWeight = 0; // Maximum total weight in kg
+        this.currentTotalWeight = 0; // Current weight of pieces in box
+        
         // Saturation detection - stop if no new pieces enter box after X drops
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
-        this.maxStagnantDrops = 10; // Stop after 10 drops without increase
-        this.checkInterval = 3; // Check every 3 drops
+        this.maxStagnantDrops = 5; // Stop after 5 consecutive checks without increase
+        this.checkInterval = 2; // Check every 2 drops (more responsive)
+        
+        // Track pieces above box to detect overflow faster
+        this.piecesAboveBox = 0;
+        this.maxPiecesAboveBox = 3; // If 3+ pieces are stuck above, box is full
         
         // 20 distinct colors for pieces - configurable
         this.pieceColors = [
@@ -641,13 +656,15 @@ export class BulkSimulation {
             randomRotation = true,
             autoMode = false,
             settlingTimeoutMs = 30000,
-            colorCount = 10
+            colorCount = 10,
+            pieceWeight = 0,
+            maxWeight = 0
         } = options;
 
         this.boxDims = boxDims;
         this.pieceDims = pieceDims;
         this.stlGeometry = stlGeometry;
-        this.maxPieces = autoMode ? 999 : maxPieces; // No limit in auto mode
+        this.maxPieces = autoMode ? 50000 : maxPieces; // Much higher limit in auto mode (50k)
         this.dropHeight = dropHeight;
         this.dropIntervalMs = dropIntervalMs;
         this.randomRotation = randomRotation;
@@ -659,6 +676,11 @@ export class BulkSimulation {
         this.allDropped = false;
         this.settlingTimeoutMs = settlingTimeoutMs;
         this.colorCount = Math.min(colorCount, this.pieceColors.length);
+        
+        // Weight control
+        this.pieceWeight = pieceWeight;
+        this.maxWeight = maxWeight;
+        this.currentTotalWeight = 0;
         
         // Pre-compute STL vertices if available
         if (stlGeometry) {
@@ -675,19 +697,21 @@ export class BulkSimulation {
             const removed = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims);
             const finalCount = this.physics.countPiecesInBox();
             
-            // If pieces were removed and we haven't retried yet, drop them again
+            // If pieces were removed and we haven't retried yet, drop HALF of them again
+            // This fills potential gaps without overcrowding
             if (removed > 0 && !this.hasRetried) {
                 this.hasRetried = true;
-                this.retryCount = removed;
+                const toRetry = Math.max(1, Math.floor(removed / 2)); // Drop half, minimum 1
+                this.retryCount = toRetry;
                 
                 if (this.onStatusUpdate) {
                     this.onStatusUpdate({
                         status: 'retrying',
-                        message: `🔄 ${removed} peces sobresortien. Reintentant deixar-les caure...`
+                        message: `🔄 ${removed} peces sobresortien. Reintentant amb ${toRetry} peces...`
                     });
                 }
                 
-                // Drop the removed pieces again
+                // Drop the retry pieces
                 this.physics.isRunning = true;
                 this.isRunning = true;
                 this.allDropped = false;
@@ -695,7 +719,7 @@ export class BulkSimulation {
                 // Drop retry pieces with a slight delay between each
                 let retryDropped = 0;
                 const retryInterval = setInterval(() => {
-                    if (retryDropped >= removed || !this.isRunning) {
+                    if (retryDropped >= toRetry || !this.isRunning) {
                         clearInterval(retryInterval);
                         this.allDropped = true;
                         // Start another vibration phase
@@ -796,7 +820,8 @@ export class BulkSimulation {
         }
         
         // Step physics multiple times for stability (sub-stepping)
-        const substeps = 4; // Increased for better collision resolution
+        // More substeps = better collision resolution but slower
+        const substeps = 6; // Increased for better collision resolution
         for (let i = 0; i < substeps; i++) {
             const settled = this.physics.step();
             if (settled && !this.vibrationPhase) {
@@ -814,6 +839,17 @@ export class BulkSimulation {
      */
     dropPiece() {
         if (!this.isRunning) return;
+        
+        // Check for weight limit in auto mode
+        if (this.autoMode && this.pieceWeight > 0 && this.maxWeight > 0) {
+            const insideCount = this.physics.countPiecesInBox();
+            this.currentTotalWeight = insideCount * this.pieceWeight;
+            
+            if (this.currentTotalWeight >= this.maxWeight) {
+                this.finishDropping('weight');
+                return;
+            }
+        }
         
         // Check for overflow in auto mode
         if (this.autoMode) {
@@ -898,6 +934,15 @@ export class BulkSimulation {
         // Check for saturation in auto mode (every checkInterval drops)
         if (this.autoMode && this.droppedCount % this.checkInterval === 0) {
             const currentInside = this.physics.countPiecesInBox();
+            const piecesAbove = this.countPiecesAboveBox();
+            
+            // Fast detection: if pieces are piling above the box, it's full
+            if (piecesAbove >= this.maxPiecesAboveBox) {
+                console.log(`Box full: ${piecesAbove} pieces stuck above box`);
+                this.finishDropping('overflow');
+                return;
+            }
+            
             if (currentInside <= this.lastInsideCount) {
                 // No new pieces entered the box
                 this.stagnantDrops++;
@@ -915,9 +960,17 @@ export class BulkSimulation {
         }
 
         if (this.onStatusUpdate) {
-            const progressText = this.autoMode 
-                ? `🌊 Mode automàtic: ${this.droppedCount} peces (fins que la caixa es plenarà)`
-                : `🌊 Deixant caure peces: ${this.droppedCount}/${this.maxPieces}`;
+            let progressText;
+            if (this.autoMode) {
+                if (this.pieceWeight > 0 && this.maxWeight > 0) {
+                    const weightStr = this.currentTotalWeight.toFixed(2);
+                    progressText = `🌊 Mode automàtic: ${this.droppedCount} peces | ⚖️ ${weightStr}/${this.maxWeight} kg`;
+                } else {
+                    progressText = `🌊 Mode automàtic: ${this.droppedCount} peces (fins que la caixa es plenarà)`;
+                }
+            } else {
+                progressText = `🌊 Deixant caure peces: ${this.droppedCount}/${this.maxPieces}`;
+            }
             this.onStatusUpdate({
                 status: 'running',
                 dropped: this.droppedCount,
@@ -951,6 +1004,34 @@ export class BulkSimulation {
     }
     
     /**
+     * Count pieces that are stuck above the box (not falling into it)
+     * These are pieces that have settled above the box height
+     */
+    countPiecesAboveBox() {
+        if (!this.boxDims) return 0;
+        
+        const { length, width, height } = this.boxDims;
+        let count = 0;
+        
+        for (const { body } of this.physics.meshBodies) {
+            if (!body.isValid()) continue;
+            const pos = body.translation();
+            const vel = body.linvel();
+            const speed = Math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2);
+            
+            // Piece is above box, within XZ bounds, and nearly stationary
+            if (pos.y > height + 20 && 
+                pos.x > -20 && pos.x < length + 20 &&
+                pos.z > -20 && pos.z < width + 20 &&
+                speed < 50) { // Slow enough to be considered "stuck"
+                count++;
+            }
+        }
+        
+        return count;
+    }
+    
+    /**
      * Finish dropping and start vibration phase
      */
     finishDropping(reason) {
@@ -964,6 +1045,8 @@ export class BulkSimulation {
             ? `(caixa plena - ${this.maxOverflow} peces han caigut fora)`
             : reason === 'saturated'
             ? `(saturació detectada - cap peça nova entra a la caixa)`
+            : reason === 'weight'
+            ? `(pes màxim assolit: ${this.currentTotalWeight.toFixed(2)} kg)`
             : '';
         
         // Start vibration phase to settle pieces
@@ -1041,6 +1124,7 @@ export class BulkSimulation {
         this.stagnantDrops = 0;
         this.hasRetried = false;
         this.retryCount = 0;
+        this.currentTotalWeight = 0;
         
         if (this.onStatusUpdate) {
             this.onStatusUpdate({

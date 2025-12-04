@@ -348,6 +348,35 @@ body {
     border: 1px solid var(--accent-red);
 }
 
+.stl-status.warning {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--accent-yellow);
+    border: 1px solid var(--accent-yellow);
+}
+
+/* Botó petit per simplificació */
+.btn-small {
+    padding: 4px 10px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    border: none;
+    border-radius: var(--radius-sm);
+    background: var(--accent-blue);
+    color: white;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+}
+
+.btn-small:hover {
+    background: var(--accent-blue-hover);
+    transform: scale(1.02);
+}
+
 /* Buttons */
 .calculate-btn,
 .simulate-btn,

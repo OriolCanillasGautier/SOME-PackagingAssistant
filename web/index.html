@@ -47,8 +47,8 @@
                         <div class="section-header">
                             <h2>📏 Dimensions de l'Objecte</h2>
                             <label class="stl-upload-btn">
-                                <input type="file" id="stl-upload" accept=".stl,.STL" hidden>
-                                <span>📁 STL</span>
+                                <input type="file" id="stl-upload" accept=".stl,.STL,.obj,.OBJ" hidden>
+                                <span>📁 3D</span>
                             </label>
                         </div>
                         <div id="stl-status" class="stl-status"></div>
@@ -109,15 +109,15 @@
                         </div>
                         <div class="input-group checkbox-group">
                             <input type="checkbox" id="auto-capacity">
-                            <label for="auto-capacity">🔄 Mode automàtic (detecta capacitat)</label>
+                            <label for="auto-capacity">🔄 Mode automàtic (detecta capacitat i pes)</label>
                         </div>
                         <div class="input-group slider-group" id="max-pieces-group">
-                            <label for="max-pieces">Peces màximes: <span id="max-pieces-value">50</span></label>
-                            <input type="range" id="max-pieces" min="10" max="200" value="50" step="10">
+                            <label for="max-pieces">Peces màximes: <span id="max-pieces-value">100</span></label>
+                            <input type="range" id="max-pieces" min="10" max="10000" value="100" step="10">
                         </div>
                         <div class="input-group slider-group">
-                            <label for="drop-interval">Interval (ms): <span id="drop-interval-value">200</span></label>
-                            <input type="range" id="drop-interval" min="50" max="1000" value="200" step="50">
+                            <label for="drop-interval">Interval (ms): <span id="drop-interval-value">100</span></label>
+                            <input type="range" id="drop-interval" min="20" max="500" value="100" step="10">
                         </div>
                         <div class="input-group slider-group">
                             <label for="piece-colors">Nombre de colors: <span id="piece-colors-value">10</span></label>
@@ -128,8 +128,10 @@
                             <label for="random-rotation">Rotació aleatòria en caiguda</label>
                         </div>
                         <p class="hint-text" id="auto-mode-hint" style="display: none;">
-                            ℹ️ En mode automàtic, la simulació pararà quan detecti que la caixa està plena 
-                            (peces caient fora) o després de 30s d'estabilització.
+                            ℹ️ En mode automàtic, la simulació pararà quan:
+                            <br>• S'assoleixi el pes màxim (si s'especifica pes/peça i pes màxim)
+                            <br>• La caixa estigui plena (peces caient fora)
+                            <br>• Després de 30s d'estabilització
                         </p>
                     </section>
 
@@ -216,7 +218,7 @@
 
         <!-- Footer -->
         <footer class="footer">
-            <p>PackAssist — Oriol Canillas © 2025</p>
+            <p>PackAssist — Oriol Canillas & SOME © 2025</p>
         </footer>
     </div>
 
