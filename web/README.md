@@ -1,6 +1,6 @@
-# 📦 PackAssist Web
+# 📦 SOME-PackAssist Web
 
-Versió web de l'eina de càlcul de capacitat de peces, ara amb **Three.js** per visualització 3D i **Rapier.js** per simulació física en mode a granel.
+**Versió 0.0.2** | Aplicació web de càlcul de capacitat amb Three.js i Rapier.js
 
 ## 🚀 Característiques
 
@@ -15,11 +15,20 @@ Versió web de l'eina de càlcul de capacitat de peces, ara amb **Three.js** per
 - Simulació física real amb gravetat (Rapier.js)
 - Les peces cauen i s'acomoden naturalment dins la caixa
 - Suport per malles STL complexes
+- Mode automàtic de detecció de capacitat
+- Sistema de vibració per assentar peces
+- Fins a 20 colors configurables
 - Paràmetres configurables:
   - Alçada de caiguda
   - Nombre màxim de peces
   - Interval entre caigudes
   - Rotació aleatòria
+
+### Informes PDF
+- Generació d'informes professionals
+- Múltiples vistes (isomètrica, frontal, superior, lateral)
+- Català i anglès
+- Previsualització abans de descarregar
 
 ## 🛠️ Tecnologies
 
@@ -33,92 +42,40 @@ Versió web de l'eina de càlcul de capacitat de peces, ara amb **Three.js** per
 ```
 web/
 ├── index.html              # Pàgina principal
-├── server.php              # Servidor PHP de desenvolupament
+├── start_server.bat        # Script per iniciar servidor (Windows)
 ├── css/
 │   └── styles.css          # Estils amb tema clar/fosc
 └── js/
     ├── main.js             # Controlador principal
     ├── packing/
-    │   └── calculator.js   # Lògica de càlcul (port de packing_core.py)
+    │   └── calculator.js   # Lògica de càlcul
     ├── mesh/
-    │   └── mesh-utils.js   # Utilitats STL (port de mesh_utils.py)
+    │   └── mesh-utils.js   # Utilitats STL
     ├── visualization/
     │   └── scene.js        # Gestor d'escena Three.js
-    └── physics/
-        └── physics-world.js # Motor de física Rapier.js
+    ├── physics/
+    │   └── physics-world.js # Motor de física Rapier.js
+    └── report/
+        └── report-generator.js # Generador d'informes PDF
 ```
 
-## 🏃 Com executar
+## 🚀 Inici Ràpid
 
-### Opció 1: PHP (recomanat per desenvolupament)
-
+### Producció (Nginx a Ubuntu, port 5555)
 ```bash
-cd web
-php -S localhost:8080 server.php
+# Copia al directori web de Nginx
+sudo cp -r . /var/www/packassist
+
+# Configura Nginx (veure README principal)
+# Obre: http://<IP_SERVIDOR>:5555
 ```
 
-Obre el navegador a `http://localhost:8080`
-
-### Opció 2: Python
-
+### Desenvolupament local
 ```bash
-cd web
-python -m http.server 8080
+python3 -m http.server 5555
 ```
 
-### Opció 3: Node.js (amb npx)
-
-```bash
-cd web
-npx serve .
-```
-
-### Opció 4: Directament des del sistema de fitxers
-
-Obre `index.html` directament al navegador (algunes funcionalitats poden no funcionar per restriccions CORS).
-
-## 🎮 Ús
-
-### Mode Optimitzat
-
-1. Introdueix les dimensions de l'objecte (mm) o puja un STL
-2. Introdueix les dimensions de la caixa (mm)
-3. Configura el pes per unitat i màxim
-4. Ajusta el factor de seguretat
-5. Fes clic a **CALCULAR CAPACITAT**
-
-### Mode a Granel
-
-1. Canvia al mode "🌊 Mode a Granel"
-2. Configura les dimensions de l'objecte i la caixa
-3. Ajusta els paràmetres de simulació:
-   - **Alçada de caiguda**: Des de quina alçada cauen les peces
-   - **Peces màximes**: Quantes peces deixar caure
-   - **Interval**: Temps entre cada peça (ms)
-   - **Rotació aleatòria**: Si les peces giren en caure
-4. Fes clic a **INICIAR SIMULACIÓ**
-5. Observa com les peces cauen i s'acomoden per gravetat
-6. La simulació s'atura quan totes les peces s'han estabilitzat
-
-## 📝 Notes tècniques
-
-### Física
-
-- El motor Rapier.js utilitza WASM per màxim rendiment
-- Les malles STL es converteixen a convex hulls per col·lisions
-- La gravetat està escalada per treballar en mm (-981 mm/s²)
-- Detecció d'estabilització: 30 frames amb velocitat < 1 mm/s
-
-### Rendiment
-
-- Instanced rendering per peces (mode optimitzat)
-- Límit de 500 peces visuals en mode optimitzat
-- Límit configurable en mode a granel (per defecte 50)
-- Web Workers per càrrega STL asíncrona
-
-### Compatibilitat
-
-- Navegadors moderns amb WebGL2 (Chrome, Firefox, Edge, Safari 15+)
+Obre: http://localhost:5555
 - Tema clar/fosc automàtic segons preferències del sistema
 - Responsive per mòbil i escriptori
 
