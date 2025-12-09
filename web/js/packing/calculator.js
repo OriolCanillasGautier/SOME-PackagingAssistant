@@ -176,7 +176,8 @@ export function calcularEmpaquetatge(params) {
         objL, objW, objH, objWeight,
         boxL, boxW, boxH, maxWeight,
         allowRotation = true,
-        safetyFactor = DEFAULT_SAFETY_FACTOR
+        safetyFactor = DEFAULT_SAFETY_FACTOR,
+        packingGap = 0 // Separació entre peces en mm (0 = sense gap)
     } = params;
 
     // Validation
@@ -230,10 +231,10 @@ export function calcularEmpaquetatge(params) {
     for (let i = 0; i < orientations.length; i++) {
         const [ol, ow, oh] = orientations[i];
         
-        // Calculate how many fit in each direction
-        const fitL = ol <= boxDims[0] ? Math.floor(boxDims[0] / ol) : 0;
-        const fitW = ow <= boxDims[1] ? Math.floor(boxDims[1] / ow) : 0;
-        const fitH = oh <= boxDims[2] ? Math.floor(boxDims[2] / oh) : 0;
+        // Calculate how many fit in each direction (amb gap entre peces)
+        const fitL = (ol + packingGap) <= boxDims[0] ? Math.floor(boxDims[0] / (ol + packingGap)) : 0;
+        const fitW = (ow + packingGap) <= boxDims[1] ? Math.floor(boxDims[1] / (ow + packingGap)) : 0;
+        const fitH = (oh + packingGap) <= boxDims[2] ? Math.floor(boxDims[2] / (oh + packingGap)) : 0;
 
         const totalUnits = fitL * fitW * fitH;
         const totalWeight = totalUnits * objWeight;
@@ -308,6 +309,7 @@ export function calcularEmpaquetatge(params) {
             realUnits: realFit,
             bestOrientation: bestConfig,
             allOrientations,
+            packingGap: packingGap,
         }
     };
 }

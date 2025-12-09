@@ -43,6 +43,8 @@ const elements = {
     maxWeight: document.getElementById('max-weight'),
     safetyFactor: document.getElementById('safety-factor'),
     safetyValue: document.getElementById('safety-value'),
+    packingGap: document.getElementById('packing-gap'),
+    packingGapValue: document.getElementById('packing-gap-value'),
     
     // Bulk mode options
     bulkOptions: document.getElementById('bulk-options'),
@@ -121,6 +123,11 @@ function setupEventListeners() {
     // Safety factor slider
     elements.safetyFactor.addEventListener('input', (e) => {
         elements.safetyValue.textContent = e.target.value;
+    });
+    
+    // Packing gap slider
+    elements.packingGap.addEventListener('input', (e) => {
+        elements.packingGapValue.textContent = e.target.value;
     });
     
     // Bulk mode sliders
@@ -325,6 +332,7 @@ function getInputValues() {
         maxWeight: parseFloat(elements.maxWeight.value) || 0,
         allowRotation: elements.allowRotation.checked,
         safetyFactor: parseInt(elements.safetyFactor.value) / 100,
+        packingGap: parseFloat(elements.packingGap.value) || 0,
         // Bulk mode
         dropHeight: parseInt(elements.dropHeight.value),
         maxPieces: parseInt(elements.maxPieces.value),
@@ -360,13 +368,27 @@ function handleCalculate() {
         const [nx, ny, nz] = getDistribution(result.data);
         
         if (nx > 0 && ny > 0 && nz > 0) {
-            const drawn = state.sceneManager.addPackedPieces({
-                pieceL, pieceW, pieceH,
-                nx, ny, nz,
-                maxDraw: 500
-            });
+            let drawn;
             
-            console.log(`Rendered ${drawn} pieces`);
+            // Use STL geometry if available, otherwise use cuboids
+            if (state.stlGeometry) {
+                drawn = state.sceneManager.addPackedSTLPieces({
+                    stlGeometry: state.stlGeometry,
+                    pieceL, pieceW, pieceH,
+                    nx, ny, nz,
+                    maxDraw: 500,
+                    packingGap: values.packingGap
+                });
+            } else {
+                drawn = state.sceneManager.addPackedPieces({
+                    pieceL, pieceW, pieceH,
+                    nx, ny, nz,
+                    maxDraw: 500,
+                    packingGap: values.packingGap
+                });
+            }
+            
+            console.log(`Rendered ${drawn} pieces with ${values.packingGap}mm gap`);
             
             // Store results for report
             state.lastResults = {

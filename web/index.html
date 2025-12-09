@@ -95,8 +95,12 @@
                             <input type="number" id="max-weight" value="2.0" min="0.1" step="0.1">
                         </div>
                         <div class="input-group slider-group">
-                            <label for="safety-factor">Seguretat: <span id="safety-value">100</span>%</label>
-                            <input type="range" id="safety-factor" min="50" max="100" value="100">
+                            <label for="safety-factor">Factor de seguretat: <span id="safety-value">0.85</span></label>
+                            <input type="range" id="safety-factor" min="0.5" max="1.0" value="0.85" step="0.05">
+                        </div>
+                        <div class="input-group slider-group">
+                            <label for="packing-gap">Espaiat entre peces: <span id="packing-gap-value">0</span> mm</label>
+                            <input type="range" id="packing-gap" min="0" max="50" value="0" step="1">
                         </div>
                     </section>
 

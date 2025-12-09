@@ -175,8 +175,9 @@ export class SceneManager {
      * @param {number} params.ny - Number in Y direction
      * @param {number} params.nz - Number in Z direction
      * @param {number} params.maxDraw - Maximum pieces to draw
+     * @param {number} [params.packingGap=0] - Gap between pieces in mm
      */
-    addPackedPieces({ pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500 }) {
+    addPackedPieces({ pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0 }) {
         this.clearPieces();
 
         const geometry = new THREE.BoxGeometry(pieceL, pieceH, pieceW);
@@ -199,11 +200,80 @@ export class SceneManager {
         for (let iz = 0; iz < nz && index < totalPieces; iz++) {
             for (let iy = 0; iy < ny && index < totalPieces; iy++) {
                 for (let ix = 0; ix < nx && index < totalPieces; ix++) {
-                    // Position piece
+                    // Position piece with gap spacing
                     dummy.position.set(
-                        ix * pieceL + pieceL / 2,
-                        iz * pieceH + pieceH / 2,
-                        iy * pieceW + pieceW / 2
+                        ix * (pieceL + packingGap) + pieceL / 2,
+                        iz * (pieceH + packingGap) + pieceH / 2,
+                        iy * (pieceW + packingGap) + pieceW / 2
+                    );
+                    dummy.updateMatrix();
+                    instancedMesh.setMatrixAt(index, dummy.matrix);
+                    
+                    // Slight color variation
+                    const hue = 0.6 + (index / totalPieces) * 0.05;
+                    const color = new THREE.Color().setHSL(hue, 0.7, 0.55);
+                    instancedMesh.setColorAt(index, color);
+                    
+                    index++;
+                }
+            }
+        }
+
+        instancedMesh.instanceMatrix.needsUpdate = true;
+        if (instancedMesh.instanceColor) {
+            instancedMesh.instanceColor.needsUpdate = true;
+        }
+
+        this.scene.add(instancedMesh);
+        this.pieces.push(instancedMesh);
+
+        return totalPieces;
+    }
+
+    /**
+     * Add packed STL pieces in a grid
+     * @param {Object} params
+     * @param {THREE.BufferGeometry} params.stlGeometry - STL geometry to instance
+     * @param {number} params.pieceL - Piece length
+     * @param {number} params.pieceW - Piece width  
+     * @param {number} params.pieceH - Piece height
+     * @param {number} params.nx - Number in X direction
+     * @param {number} params.ny - Number in Y direction
+     * @param {number} params.nz - Number in Z direction
+     * @param {number} [params.maxDraw=500] - Maximum pieces to draw
+     * @param {number} [params.packingGap=0] - Gap between pieces in mm
+     */
+    addPackedSTLPieces({ stlGeometry, pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0 }) {
+        this.clearPieces();
+
+        // Clone and prepare geometry
+        const geometry = stlGeometry.clone();
+        geometry.computeVertexNormals();
+
+        const material = new THREE.MeshPhongMaterial({
+            color: 0x3b82f6,
+            opacity: 0.85,
+            transparent: true,
+            flatShading: true
+        });
+
+        // Use instancing for performance
+        const totalPieces = Math.min(nx * ny * nz, maxDraw);
+        const instancedMesh = new THREE.InstancedMesh(geometry, material, totalPieces);
+        instancedMesh.castShadow = true;
+        instancedMesh.receiveShadow = true;
+
+        const dummy = new THREE.Object3D();
+        let index = 0;
+
+        for (let iz = 0; iz < nz && index < totalPieces; iz++) {
+            for (let iy = 0; iy < ny && index < totalPieces; iy++) {
+                for (let ix = 0; ix < nx && index < totalPieces; ix++) {
+                    // Position piece with gap spacing
+                    dummy.position.set(
+                        ix * (pieceL + packingGap) + pieceL / 2,
+                        iz * (pieceH + packingGap) + pieceH / 2,
+                        iy * (pieceW + packingGap) + pieceW / 2
                     );
                     dummy.updateMatrix();
                     instancedMesh.setMatrixAt(index, dummy.matrix);
