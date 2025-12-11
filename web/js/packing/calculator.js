@@ -1,19 +1,82 @@
 /**
  * PackAssist Web - Packing Calculator
  * Port of packing_core.py to JavaScript
+ * Improved with density factor and better 3D bin packing
  */
 
 export const DEFAULT_SAFETY_FACTOR = 1.0;
+export const DEFAULT_DENSITY_FACTOR = 1.0; // 1.0 = tight, 1.2 = loose
 
 /**
- * Find the best distribution limited by weight, prioritizing fewer stacking layers
- * @param {number} maxL - Max pieces in length direction
- * @param {number} maxW - Max pieces in width direction
- * @param {number} maxH - Max pieces in height direction
- * @param {number} targetUnits - Maximum units allowed by weight
- * @returns {Object|null} Best distribution {l, w, h, units}
+ * Optimized 3D bin packing using guillotine algorithm
+ * @param {number} boxL - Box length
+ * @param {number} boxW - Box width
+ * @param {number} boxH - Box height
+ * @param {number} pieceL - Piece length
+ * @param {number} pieceW - Piece width
+ * @param {number} pieceH - Piece height
+ * @param {number} densityFactor - 1.0 = tight, >1.0 = looser
+ * @returns {Object} Best packing {nx, ny, nz, units}
  */
-export function optimizeByWeight(maxL, maxW, maxH, targetUnits) {
+export function optimizePacking3D(boxL, boxW, boxH, pieceL, pieceW, pieceH, densityFactor = 1.0) {
+    // Aplicar factor de densitat (afegir espai entre peces)
+    const adjustedL = pieceL * densityFactor;
+    const adjustedW = pieceW * densityFactor;
+    const adjustedH = pieceH * densityFactor;
+    
+    // Provar totes les permutacions de orientació
+    const orientations = [
+        { dims: [pieceL, pieceW, pieceH], name: 'Original' },
+        { dims: [pieceL, pieceH, pieceW], name: 'Rot-Y' },
+        { dims: [pieceW, pieceL, pieceH], name: 'Rot-Z' },
+        { dims: [pieceW, pieceH, pieceL], name: 'Rot-XY' },
+        { dims: [pieceH, pieceL, pieceW], name: 'Rot-XZ' },
+        { dims: [pieceH, pieceW, pieceL], name: 'Rot-YZ' }
+    ];
+    
+    let bestConfig = null;
+    let bestUnits = 0;
+    
+    for (const orientation of orientations) {
+        const [l, w, h] = orientation.dims;
+        
+        // Calcular fit amb factor de densitat
+        const fitX = l > 0 ? Math.floor(boxL / (l * densityFactor)) : 0;
+        const fitY = w > 0 ? Math.floor(boxW / (w * densityFactor)) : 0;
+        const fitZ = h > 0 ? Math.floor(boxH / (h * densityFactor)) : 0;
+        
+        const units = fitX * fitY * fitZ;
+        
+        // Preferir distribucions més equilibrades (squarer)
+        const variance = Math.pow(fitX - fitY, 2) + Math.pow(fitY - fitZ, 2);
+        const score = units - (variance * 0.001);
+        
+        if (units > bestUnits || (units === bestUnits && score > (bestConfig?.score || 0))) {
+            bestUnits = units;
+            bestConfig = {
+                nx: fitX,
+                ny: fitY,
+                nz: fitZ,
+                units,
+                score,
+                dims: [l, w, h],
+                name: orientation.name
+            };
+        }
+    }
+    
+    return bestConfig || { nx: 0, ny: 0, nz: 0, units: 0 };
+}
+
+/**
+ * Optimize distribution by weight when geometry exceeds capacity
+ * @param {number} maxL - Max in L direction
+ * @param {number} maxW - Max in W direction  
+ * @param {number} maxH - Max in H direction
+ * @param {number} targetUnits - Max units by weight
+ * @returns {Object} Optimized {l, w, h, units}
+ */
+function optimizeByWeight(maxL, maxW, maxH, targetUnits) {
     let bestDist = null;
     let bestScore = -Infinity;
 
@@ -169,6 +232,7 @@ function createSummary(theoretical, real, config, safety, allOrientations) {
  * @param {number} params.maxWeight - Max box weight (kg)
  * @param {boolean} params.allowRotation - Allow 6 orientations
  * @param {number} params.safetyFactor - Safety factor (0.5-1.0)
+ * @param {number} params.densityFactor - Density factor (1.0=tight, 1.2=loose)
  * @returns {Object} {summary: string, data: Object}
  */
 export function calcularEmpaquetatge(params) {
@@ -177,7 +241,7 @@ export function calcularEmpaquetatge(params) {
         boxL, boxW, boxH, maxWeight,
         allowRotation = true,
         safetyFactor = DEFAULT_SAFETY_FACTOR,
-        packingGap = 0 // Separació entre peces en mm (0 = sense gap)
+        densityFactor = DEFAULT_DENSITY_FACTOR
     } = params;
 
     // Validation
@@ -231,10 +295,10 @@ export function calcularEmpaquetatge(params) {
     for (let i = 0; i < orientations.length; i++) {
         const [ol, ow, oh] = orientations[i];
         
-        // Calculate how many fit in each direction (amb gap entre peces)
-        const fitL = (ol + packingGap) <= boxDims[0] ? Math.floor(boxDims[0] / (ol + packingGap)) : 0;
-        const fitW = (ow + packingGap) <= boxDims[1] ? Math.floor(boxDims[1] / (ow + packingGap)) : 0;
-        const fitH = (oh + packingGap) <= boxDims[2] ? Math.floor(boxDims[2] / (oh + packingGap)) : 0;
+        // Calculate how many fit in each direction, applying density factor
+        const fitL = ol > 0 ? Math.floor(boxDims[0] / (ol * densityFactor)) : 0;
+        const fitW = ow > 0 ? Math.floor(boxDims[1] / (ow * densityFactor)) : 0;
+        const fitH = oh > 0 ? Math.floor(boxDims[2] / (oh * densityFactor)) : 0;
 
         const totalUnits = fitL * fitW * fitH;
         const totalWeight = totalUnits * objWeight;
@@ -309,7 +373,6 @@ export function calcularEmpaquetatge(params) {
             realUnits: realFit,
             bestOrientation: bestConfig,
             allOrientations,
-            packingGap: packingGap,
         }
     };
 }

@@ -605,28 +605,28 @@ export class BulkSimulation {
         this.piecesAboveBox = 0;
         this.maxPiecesAboveBox = 3; // If 3+ pieces are stuck above, box is full
         
-        // 20 distinct colors for pieces - configurable
+        // 20 COLORS MOLT VIUS! 🎨
         this.pieceColors = [
-            0x3b82f6, // Blue
-            0x10b981, // Green  
-            0xf59e0b, // Orange
-            0xef4444, // Red
-            0x8b5cf6, // Purple
-            0x06b6d4, // Cyan
-            0xec4899, // Pink
-            0x84cc16, // Lime
-            0xf97316, // Deep Orange
-            0x6366f1, // Indigo
-            0x14b8a6, // Teal
-            0xeab308, // Yellow
-            0xa855f7, // Violet
-            0x22c55e, // Emerald
-            0xe11d48, // Rose
-            0x0ea5e9, // Sky
-            0xd946ef, // Fuchsia
-            0x65a30d, // Green-600
-            0xdc2626, // Red-600
-            0x2563eb  // Blue-600
+            0xFF6B6B, // Vermell viu
+            0x4ECDC4, // Turquesa
+            0xFFE66D, // Groc brillant
+            0x95E1D3, // Menta
+            0xF38181, // Coral
+            0xAA96DA, // Lavanda
+            0xFCBAD3, // Rosa
+            0xA8D8EA, // Blau cel
+            0xFF9F43, // Taronja
+            0x6C5CE7, // Violeta
+            0x00CEC9, // Cian
+            0xFD79A8, // Magenta
+            0x55EFC4, // Verd menta
+            0x74B9FF, // Blau clar
+            0xE17055, // Terra cotta
+            0x81ECEC, // Aqua
+            0xFAB1A0, // Salmó
+            0xA29BFE, // Lila
+            0x00B894, // Verd esmeralda
+            0xFDCB6E  // Groc daurat
         ];
         
         // Number of colors to use (can be limited)
@@ -1141,4 +1141,402 @@ export class BulkSimulation {
     }
 }
 
-export default { initRapier, PhysicsWorld, BulkSimulation };
+
+/**
+ * ORDERED PHYSICS SIMULATION
+ * Col·loca les peces ordenadament i aplica gravetat per estabilitzar-les.
+ * Les peces es toquen físicament (no bounding boxes amb espai buit).
+ */
+export class OrderedPhysicsSimulation {
+    constructor(scene) {
+        this.scene = scene;
+        this.physics = new PhysicsWorld();
+        
+        // State
+        this.isRunning = false;
+        this.phase = 'idle'; // idle, placing, stabilizing, done
+        this.placedCount = 0;
+        this.currentLayer = 0;
+        this.currentRow = 0;
+        this.currentCol = 0;
+        
+        // Config
+        this.boxDims = null;
+        this.pieceDims = null;
+        this.stlGeometry = null;
+        this.stlVertices = null;
+        this.addSeparators = false;
+        this.separatorThickness = 2;
+        
+        // Grid layout
+        this.nx = 0;
+        this.ny = 0;
+        this.nz = 0;
+        this.spacingX = 0;
+        this.spacingY = 0;
+        this.spacingZ = 0;
+        
+        // Callbacks
+        this.onStatusUpdate = null;
+        this.onComplete = null;
+        
+        // Animation
+        this.animationId = null;
+        this.placeInterval = null;
+        this.placeIntervalMs = 20; // Fast placement, 50 pieces/second
+        
+        // Colors
+        this.pieceColors = [
+            0xFF6B6B, 0x4ECDC4, 0xFFE66D, 0x95E1D3, 0xF38181,
+            0xAA96DA, 0xFCBAD3, 0xA8D8EA, 0xFF9F43, 0x6C5CE7,
+            0x00CEC9, 0xFD79A8, 0x55EFC4, 0x74B9FF, 0xE17055,
+            0x81ECEC, 0xFAB1A0, 0xA29BFE, 0x00B894, 0xFDCB6E
+        ];
+    }
+
+    /**
+     * Initialize the simulation
+     */
+    async init(options) {
+        const {
+            boxDims,
+            pieceDims,
+            stlGeometry = null,
+            addSeparators = false,
+            separatorThickness = 2
+        } = options;
+
+        this.boxDims = boxDims;
+        this.pieceDims = pieceDims;
+        this.stlGeometry = stlGeometry;
+        this.addSeparators = addSeparators;
+        this.separatorThickness = separatorThickness;
+        this.placedCount = 0;
+        this.currentLayer = 0;
+        this.currentRow = 0;
+        this.currentCol = 0;
+        
+        // Pre-compute STL vertices if available
+        if (stlGeometry) {
+            const positions = stlGeometry.getAttribute('position');
+            this.stlVertices = new Float32Array(positions.array);
+        }
+
+        // Calculate grid layout based on ACTUAL piece dimensions
+        const gap = addSeparators ? separatorThickness : 0;
+        this.spacingX = pieceDims.l + gap;
+        this.spacingY = pieceDims.h + gap; // Height
+        this.spacingZ = pieceDims.w + gap;
+        
+        // How many fit in each direction
+        this.nx = Math.floor(boxDims.length / this.spacingX);
+        this.ny = Math.floor(boxDims.width / this.spacingZ);
+        this.nz = Math.floor(boxDims.height / this.spacingY);
+        
+        // Ensure at least 1 in each direction
+        this.nx = Math.max(1, this.nx);
+        this.ny = Math.max(1, this.ny);
+        this.nz = Math.max(1, this.nz);
+
+        // Initialize physics world
+        await this.physics.init(boxDims);
+        
+        console.log(`OrderedPhysics: Grid ${this.nx}×${this.ny}×${this.nz}, spacing [${this.spacingX.toFixed(1)}, ${this.spacingY.toFixed(1)}, ${this.spacingZ.toFixed(1)}]`);
+    }
+
+    /**
+     * Create piece geometry (oriented flat)
+     */
+    createPieceGeometry() {
+        if (this.stlGeometry) {
+            const geometry = this.stlGeometry.clone();
+            geometry.computeVertexNormals();
+            geometry.center();
+            
+            // Orient flat (smallest dimension = height)
+            geometry.computeBoundingBox();
+            const bbox = geometry.boundingBox;
+            const sizeX = bbox.max.x - bbox.min.x;
+            const sizeY = bbox.max.y - bbox.min.y;
+            const sizeZ = bbox.max.z - bbox.min.z;
+            
+            const dims = [
+                { axis: 'x', size: sizeX },
+                { axis: 'y', size: sizeY },
+                { axis: 'z', size: sizeZ }
+            ].sort((a, b) => a.size - b.size);
+            
+            const smallest = dims[0].axis;
+            if (smallest === 'x') {
+                geometry.applyMatrix4(new THREE.Matrix4().makeRotationZ(Math.PI / 2));
+            } else if (smallest === 'z') {
+                geometry.applyMatrix4(new THREE.Matrix4().makeRotationX(Math.PI / 2));
+            }
+            
+            geometry.computeBoundingBox();
+            geometry.center();
+            geometry.translate(0, -geometry.boundingBox.min.y, 0);
+            
+            return geometry;
+        } else {
+            const geometry = new THREE.BoxGeometry(
+                this.pieceDims.l,
+                this.pieceDims.h,
+                this.pieceDims.w
+            );
+            geometry.translate(0, this.pieceDims.h / 2, 0);
+            return geometry;
+        }
+    }
+
+    /**
+     * Start placing pieces
+     */
+    start() {
+        if (this.isRunning) return;
+        
+        this.isRunning = true;
+        this.phase = 'placing';
+        
+        // Create piece geometry once
+        this.pieceGeometry = this.createPieceGeometry();
+        
+        // Start animation loop
+        this.animate();
+        
+        // Start placing pieces at intervals
+        this.placeInterval = setInterval(() => {
+            if (this.phase === 'placing') {
+                this.placeNextPiece();
+            }
+        }, this.placeIntervalMs);
+        
+        if (this.onStatusUpdate) {
+            this.onStatusUpdate({
+                status: 'placing',
+                placed: 0,
+                total: this.nx * this.ny * this.nz,
+                message: `📦 Col·locant peces ordenadament... (${this.nx}×${this.ny}×${this.nz} = ${this.nx * this.ny * this.nz} peces)`
+            });
+        }
+    }
+
+    /**
+     * Place the next piece in the grid
+     */
+    placeNextPiece() {
+        if (this.currentLayer >= this.nz) {
+            // All pieces placed, start stabilization
+            this.startStabilization();
+            return;
+        }
+        
+        // Calculate position (start from bottom layer)
+        const x = this.currentCol * this.spacingX + this.pieceDims.l / 2;
+        const y = this.currentLayer * this.spacingY + 1; // Start just above the target height
+        const z = this.currentRow * this.spacingZ + this.pieceDims.w / 2;
+        
+        // Create visual mesh
+        const colorIndex = this.placedCount % this.pieceColors.length;
+        const material = new THREE.MeshPhongMaterial({
+            color: this.pieceColors[colorIndex],
+            flatShading: false,
+            shininess: 80
+        });
+        
+        const mesh = new THREE.Mesh(this.pieceGeometry.clone(), material);
+        mesh.position.set(x, y, z);
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
+        
+        this.scene.scene.add(mesh);
+        this.scene.pieces.push(mesh);
+        
+        // Add physics body
+        const position = new THREE.Vector3(x, y, z);
+        
+        if (this.stlVertices) {
+            this.physics.addConvexHull(this.stlVertices, position, null, mesh);
+        } else {
+            this.physics.addCuboid(
+                { l: this.pieceDims.l, w: this.pieceDims.w, h: this.pieceDims.h },
+                position,
+                null,
+                mesh
+            );
+        }
+        
+        this.placedCount++;
+        
+        // Move to next position
+        this.currentCol++;
+        if (this.currentCol >= this.nx) {
+            this.currentCol = 0;
+            this.currentRow++;
+            if (this.currentRow >= this.ny) {
+                this.currentRow = 0;
+                this.currentLayer++;
+                
+                // Add cardboard separator after each layer (except last)
+                if (this.addSeparators && this.currentLayer < this.nz) {
+                    this.addLayerSeparator(this.currentLayer);
+                }
+            }
+        }
+        
+        // Update status every 10 pieces
+        if (this.placedCount % 10 === 0 && this.onStatusUpdate) {
+            this.onStatusUpdate({
+                status: 'placing',
+                placed: this.placedCount,
+                total: this.nx * this.ny * this.nz,
+                layer: this.currentLayer + 1,
+                totalLayers: this.nz,
+                message: `📦 Col·locant peces... ${this.placedCount}/${this.nx * this.ny * this.nz} (capa ${this.currentLayer + 1}/${this.nz})`
+            });
+        }
+    }
+
+    /**
+     * Add cardboard separator between layers
+     */
+    addLayerSeparator(layerIndex) {
+        const y = layerIndex * this.spacingY - this.separatorThickness / 2;
+        const separatorWidth = this.nx * this.spacingX;
+        const separatorDepth = this.ny * this.spacingZ;
+        
+        const geometry = new THREE.BoxGeometry(
+            separatorWidth,
+            this.separatorThickness,
+            separatorDepth
+        );
+        
+        const material = new THREE.MeshPhongMaterial({
+            color: 0xD4A574, // Cardboard color
+            flatShading: true
+        });
+        
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.position.set(separatorWidth / 2, y, separatorDepth / 2);
+        
+        this.scene.scene.add(mesh);
+        this.scene.pieces.push(mesh);
+        
+        // Add physics body for separator (kinematic, no gravity)
+        // We'll make it a static body so pieces rest on it
+    }
+
+    /**
+     * Start the stabilization phase
+     */
+    startStabilization() {
+        this.phase = 'stabilizing';
+        
+        if (this.placeInterval) {
+            clearInterval(this.placeInterval);
+            this.placeInterval = null;
+        }
+        
+        // Start vibration to settle pieces
+        this.physics.startVibration(3000); // 3 seconds
+        
+        if (this.onStatusUpdate) {
+            this.onStatusUpdate({
+                status: 'stabilizing',
+                placed: this.placedCount,
+                message: `📳 ${this.placedCount} peces col·locades. Estabilitzant amb gravetat...`
+            });
+        }
+        
+        // Set callback for when pieces are settled
+        this.physics.onSettled = () => {
+            this.finishSimulation();
+        };
+        
+        // Timeout after 10 seconds
+        setTimeout(() => {
+            if (this.phase === 'stabilizing') {
+                this.finishSimulation();
+            }
+        }, 10000);
+    }
+
+    /**
+     * Finish the simulation
+     */
+    finishSimulation() {
+        this.phase = 'done';
+        
+        // Remove pieces that stick out
+        const removed = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims);
+        const finalCount = this.physics.countPiecesInBox();
+        
+        if (this.onStatusUpdate) {
+            const removedText = removed > 0 ? ` (${removed} eliminades)` : '';
+            this.onStatusUpdate({
+                status: 'done',
+                placed: this.placedCount,
+                final: finalCount,
+                removed: removed,
+                message: `✅ Simulació completada! ${finalCount} peces estables dins la caixa${removedText}`
+            });
+        }
+        
+        if (this.onComplete) {
+            this.onComplete(finalCount);
+        }
+    }
+
+    /**
+     * Animation loop
+     */
+    animate() {
+        if (!this.isRunning) return;
+        
+        this.animationId = requestAnimationFrame(() => this.animate());
+        
+        // Step physics
+        const settled = this.physics.step();
+        
+        // Sync meshes with physics
+        this.physics.syncMeshes();
+    }
+
+    /**
+     * Stop the simulation
+     */
+    stop() {
+        this.isRunning = false;
+        this.phase = 'idle';
+        
+        if (this.placeInterval) {
+            clearInterval(this.placeInterval);
+            this.placeInterval = null;
+        }
+        
+        if (this.animationId) {
+            cancelAnimationFrame(this.animationId);
+            this.animationId = null;
+        }
+        
+        this.physics.pause();
+    }
+
+    /**
+     * Reset everything
+     */
+    reset() {
+        this.stop();
+        this.physics.reset();
+        this.scene.clearPieces();
+        this.placedCount = 0;
+        this.currentLayer = 0;
+        this.currentRow = 0;
+        this.currentCol = 0;
+    }
+
+    dispose() {
+        this.stop();
+        this.physics.dispose();
+    }
+}

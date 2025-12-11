@@ -6,7 +6,7 @@
 import { calcularEmpaquetatge, getDistribution, getPieceDimensions } from './packing/calculator.js';
 import { loadMesh, loadSTL, extractDimensions, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS } from './mesh/mesh-utils.js';
 import { SceneManager } from './visualization/scene.js';
-import { BulkSimulation, initRapier } from './physics/physics-world.js';
+import { BulkSimulation, OrderedPhysicsSimulation, initRapier } from './physics/physics-world.js';
 import { ReportGenerator } from './report/report-generator.js';
 import { getSimplificationModal } from './mesh/simplification-modal.js';
 
@@ -17,6 +17,7 @@ const state = {
     stlDimensions: null,
     sceneManager: null,
     bulkSimulation: null,
+    orderedSimulation: null, // New ordered physics simulation
     isSimulating: false,
     reportGenerator: null,
     lastResults: null // Store last results for report generation
@@ -43,8 +44,6 @@ const elements = {
     maxWeight: document.getElementById('max-weight'),
     safetyFactor: document.getElementById('safety-factor'),
     safetyValue: document.getElementById('safety-value'),
-    packingGap: document.getElementById('packing-gap'),
-    packingGapValue: document.getElementById('packing-gap-value'),
     
     // Bulk mode options
     bulkOptions: document.getElementById('bulk-options'),
@@ -60,6 +59,16 @@ const elements = {
     randomRotation: document.getElementById('random-rotation'),
     autoCapacity: document.getElementById('auto-capacity'),
     autoModeHint: document.getElementById('auto-mode-hint'),
+    
+    // Density factor
+    densityFactor: document.getElementById('density-factor'),
+    densityValue: document.getElementById('density-value'),
+    
+    // Separators
+    addSeparators: document.getElementById('add-separators'),
+    separatorThickness: document.getElementById('separator-thickness'),
+    separatorThicknessValue: document.getElementById('separator-thickness-value'),
+    separatorThicknessGroup: document.getElementById('separator-thickness-group'),
     
     // Buttons
     calculateBtn: document.getElementById('calculate-btn'),
@@ -125,9 +134,22 @@ function setupEventListeners() {
         elements.safetyValue.textContent = e.target.value;
     });
     
-    // Packing gap slider
-    elements.packingGap.addEventListener('input', (e) => {
-        elements.packingGapValue.textContent = e.target.value;
+    // Density factor slider
+    elements.densityFactor?.addEventListener('input', (e) => {
+        elements.densityValue.textContent = e.target.value;
+    });
+    
+    // Separator checkbox and slider
+    elements.addSeparators?.addEventListener('change', (e) => {
+        if (elements.separatorThicknessGroup) {
+            elements.separatorThicknessGroup.style.display = e.target.checked ? 'block' : 'none';
+        }
+    });
+    
+    elements.separatorThickness?.addEventListener('input', (e) => {
+        if (elements.separatorThicknessValue) {
+            elements.separatorThicknessValue.textContent = e.target.value;
+        }
     });
     
     // Bulk mode sliders
@@ -220,6 +242,13 @@ function switchMode(mode) {
     elements.modeButtons.forEach(btn => {
         btn.classList.toggle('active', btn.dataset.mode === mode);
     });
+    
+    // Update app container class for CSS mode-specific styling
+    const appContainer = document.querySelector('.app-container');
+    if (appContainer) {
+        appContainer.classList.remove('mode-optimized', 'mode-bulk');
+        appContainer.classList.add(`mode-${mode}`);
+    }
     
     // Show/hide mode-specific elements
     const isOptimized = mode === 'optimized';
@@ -332,7 +361,7 @@ function getInputValues() {
         maxWeight: parseFloat(elements.maxWeight.value) || 0,
         allowRotation: elements.allowRotation.checked,
         safetyFactor: parseInt(elements.safetyFactor.value) / 100,
-        packingGap: parseFloat(elements.packingGap.value) || 0,
+        densityFactor: parseFloat(elements.densityFactor?.value || 1.0),
         // Bulk mode
         dropHeight: parseInt(elements.dropHeight.value),
         maxPieces: parseInt(elements.maxPieces.value),
@@ -345,9 +374,15 @@ function getInputValues() {
 
 /**
  * Handle calculate button click (optimized mode)
+ * Mode optimitzat: peces ordenades en graella, amb o sense separadors
+ * Si s'activen separadors, usa física per col·locar les peces ordenadament
  */
-function handleCalculate() {
+async function handleCalculate() {
     const values = getInputValues();
+    
+    // Separator options
+    const addSeparators = elements.addSeparators?.checked || false;
+    const separatorThickness = parseFloat(elements.separatorThickness?.value) || 2;
     
     // Run packing calculation
     const result = calcularEmpaquetatge(values);
@@ -367,44 +402,90 @@ function handleCalculate() {
         const [pieceL, pieceW, pieceH] = getPieceDimensions(result.data);
         const [nx, ny, nz] = getDistribution(result.data);
         
+        // Dimensions originals i òptimes per calcular la rotació correcta
+        const originalDims = [values.objL, values.objW, values.objH];
+        const optimalDims = [pieceL, pieceW, pieceH];
+        
+        // Nom de l'orientació per saber quina rotació aplicar
+        const orientationName = result.data.bestOrientation?.name || 'Original';
+        
         if (nx > 0 && ny > 0 && nz > 0) {
-            let drawn;
-            
-            // Use STL geometry if available, otherwise use cuboids
-            if (state.stlGeometry) {
-                drawn = state.sceneManager.addPackedSTLPieces({
-                    stlGeometry: state.stlGeometry,
-                    pieceL, pieceW, pieceH,
-                    nx, ny, nz,
-                    maxDraw: 500,
-                    packingGap: values.packingGap
-                });
-            } else {
-                drawn = state.sceneManager.addPackedPieces({
-                    pieceL, pieceW, pieceH,
-                    nx, ny, nz,
-                    maxDraw: 500,
-                    packingGap: values.packingGap
-                });
-            }
-            
-            console.log(`Rendered ${drawn} pieces with ${values.packingGap}mm gap`);
+            // Mode simple - sempre usar visualització sense física per ara
+            const drawn = state.sceneManager.addPackedPieces({
+                pieceL, pieceW, pieceH,
+                nx, ny, nz,
+                maxDraw: 500,
+                stlGeometry: state.stlGeometry || null,
+                addSeparators,
+                separatorThickness,
+                originalDims,
+                optimalDims,
+                orientationName,
+                densityFactor: values.densityFactor,
+                boxDims: { l: boxL, w: boxW, h: boxH }
+            });
+                
+            console.log(`Rendered ${drawn} pieces`);
             
             // Store results for report
             state.lastResults = {
                 pieceDims: { l: values.objL, w: values.objW, h: values.objH },
                 boxDims: { length: values.boxL, width: values.boxW, height: values.boxH },
-                pieceCount: result.data.totalUnitats,
+                pieceCount: result.data.realUnits || result.data.totalUnitats,
                 pieceWeight: values.objWeight,
                 maxWeight: values.maxWeight,
                 mode: 'optimized',
-                safetyFactor: values.safetyFactor
+                safetyFactor: values.safetyFactor,
+                addSeparators,
+                separatorThickness
             };
             
             // Show report buttons
             elements.reportButtons.style.display = 'flex';
         }
     }
+}
+
+/**
+ * Start ordered physics simulation (for separator mode)
+ * Col·loca les peces ordenadament i aplica gravetat
+ */
+async function startOrderedPhysicsMode(options) {
+    // Stop any existing simulation
+    if (state.orderedSimulation) {
+        state.orderedSimulation.dispose();
+    }
+    
+    // Initialize Rapier
+    const rapierReady = await initRapier();
+    if (!rapierReady) {
+        console.error('Failed to init Rapier for ordered mode');
+        // Fallback to simple visualization
+        return;
+    }
+    
+    // Create ordered simulation
+    state.orderedSimulation = new OrderedPhysicsSimulation(state.sceneManager);
+    
+    // Status callback
+    state.orderedSimulation.onStatusUpdate = (status) => {
+        const statusEl = document.getElementById('simulation-status');
+        if (statusEl) {
+            statusEl.textContent = status.message;
+            statusEl.style.display = 'block';
+        }
+    };
+    
+    // Complete callback
+    state.orderedSimulation.onComplete = (finalCount) => {
+        state.isSimulating = false;
+        console.log(`Ordered physics complete: ${finalCount} pieces`);
+    };
+    
+    // Initialize and start
+    await state.orderedSimulation.init(options);
+    state.isSimulating = true;
+    state.orderedSimulation.start();
 }
 
 /**

@@ -213,6 +213,11 @@ body {
     border-left: 4px solid var(--accent-purple);
 }
 
+/* Optimized mode option - hide in bulk mode */
+.mode-bulk .optimized-option {
+    display: none !important;
+}
+
 /* Input Groups */
 .input-group {
     margin-bottom: 12px;
@@ -305,6 +310,14 @@ body {
     transform: scale(1.2);
 }
 
+/* Density info hint */
+.density-info {
+    font-size: 0.75rem;
+    font-weight: normal;
+    color: var(--text-muted);
+    margin-left: 4px;
+}
+
 /* STL Upload Button */
 .stl-upload-btn {
     display: inline-flex;
@@ -356,6 +369,22 @@ body {
     background: rgba(245, 158, 11, 0.15);
     color: var(--accent-yellow);
     border: 1px solid var(--accent-yellow);
+}
+
+/* Warning box per mode optimitzat amb STL */
+.warning-box {
+    background: rgba(245, 158, 11, 0.15);
+    border: 1px solid var(--accent-yellow);
+    border-radius: var(--radius-md);
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    font-size: 0.9rem;
+    line-height: 1.5;
+    color: var(--text-primary);
+}
+
+.warning-box strong {
+    color: var(--accent-yellow);
 }
 
 /* Botó petit per simplificació */

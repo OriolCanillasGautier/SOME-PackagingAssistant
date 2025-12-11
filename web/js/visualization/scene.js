@@ -166,137 +166,343 @@ export class SceneManager {
     }
 
     /**
-     * Add packed pieces as cuboids
-     * @param {Object} params
-     * @param {number} params.pieceL - Piece length
-     * @param {number} params.pieceW - Piece width  
-     * @param {number} params.pieceH - Piece height
-     * @param {number} params.nx - Number in X direction
-     * @param {number} params.ny - Number in Y direction
-     * @param {number} params.nz - Number in Z direction
-     * @param {number} params.maxDraw - Maximum pieces to draw
-     * @param {number} [params.packingGap=0] - Gap between pieces in mm
+     * Prepara la geometria STL: centra i posa la base a Y=0
+     * NO aplica cap rotació - respecta l'orientació que vingui del calculador
      */
-    addPackedPieces({ pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0 }) {
-        this.clearPieces();
-
-        const geometry = new THREE.BoxGeometry(pieceL, pieceH, pieceW);
-        const material = new THREE.MeshPhongMaterial({
-            color: 0x3b82f6,
-            opacity: 0.85,
-            transparent: true,
-            flatShading: true
-        });
-
-        // Use instancing for performance
-        const totalPieces = Math.min(nx * ny * nz, maxDraw);
-        const instancedMesh = new THREE.InstancedMesh(geometry, material, totalPieces);
-        instancedMesh.castShadow = true;
-        instancedMesh.receiveShadow = true;
-
-        const dummy = new THREE.Object3D();
-        let index = 0;
-
-        for (let iz = 0; iz < nz && index < totalPieces; iz++) {
-            for (let iy = 0; iy < ny && index < totalPieces; iy++) {
-                for (let ix = 0; ix < nx && index < totalPieces; ix++) {
-                    // Position piece with gap spacing
-                    dummy.position.set(
-                        ix * (pieceL + packingGap) + pieceL / 2,
-                        iz * (pieceH + packingGap) + pieceH / 2,
-                        iy * (pieceW + packingGap) + pieceW / 2
-                    );
-                    dummy.updateMatrix();
-                    instancedMesh.setMatrixAt(index, dummy.matrix);
-                    
-                    // Slight color variation
-                    const hue = 0.6 + (index / totalPieces) * 0.05;
-                    const color = new THREE.Color().setHSL(hue, 0.7, 0.55);
-                    instancedMesh.setColorAt(index, color);
-                    
-                    index++;
-                }
-            }
-        }
-
-        instancedMesh.instanceMatrix.needsUpdate = true;
-        if (instancedMesh.instanceColor) {
-            instancedMesh.instanceColor.needsUpdate = true;
-        }
-
-        this.scene.add(instancedMesh);
-        this.pieces.push(instancedMesh);
-
-        return totalPieces;
+    orientGeometryToMatch(geometry, originalDims, optimalDims) {
+        // Només centrar i posar a Y=0, sense rotar
+        geometry.computeBoundingBox();
+        geometry.center();
+        geometry.computeBoundingBox();
+        geometry.translate(0, -geometry.boundingBox.min.y, 0);
+        
+        // Retornar dimensions reals de la geometria
+        geometry.computeBoundingBox();
+        const bbox = geometry.boundingBox;
+        return {
+            geometry,
+            dims: [
+                bbox.max.x - bbox.min.x,
+                bbox.max.y - bbox.min.y,
+                bbox.max.z - bbox.min.z
+            ]
+        };
+    }
+    
+    /**
+     * Orienta la geometria sense rotació específica, només centra i posa a Y=0
+     */
+    orientGeometryFlat(geometry) {
+        geometry.computeBoundingBox();
+        geometry.center();
+        geometry.computeBoundingBox();
+        geometry.translate(0, -geometry.boundingBox.min.y, 0);
+        
+        geometry.computeBoundingBox();
+        const bbox = geometry.boundingBox;
+        return {
+            geometry,
+            dims: [
+                bbox.max.x - bbox.min.x,
+                bbox.max.y - bbox.min.y,
+                bbox.max.z - bbox.min.z
+            ]
+        };
     }
 
     /**
-     * Add packed STL pieces in a grid
-     * @param {Object} params
-     * @param {THREE.BufferGeometry} params.stlGeometry - STL geometry to instance
-     * @param {number} params.pieceL - Piece length
-     * @param {number} params.pieceW - Piece width  
-     * @param {number} params.pieceH - Piece height
-     * @param {number} params.nx - Number in X direction
-     * @param {number} params.ny - Number in Y direction
-     * @param {number} params.nz - Number in Z direction
-     * @param {number} [params.maxDraw=500] - Maximum pieces to draw
-     * @param {number} [params.packingGap=0] - Gap between pieces in mm
+     * Aplica rotació a la geometria segons l'orientació del calculador
+     * El calculador permuta [L, W, H] en diferents ordres
+     * Hem de rotar la geometria per coincidir amb la permutació
+     * 
+     * STL original té: X=length, Y=height, Z=width
+     * Orientacions del calculador:
+     *   Original (L×W×H) -> Cap rotació
+     *   Rotació Y (L×H×W) -> W i H intercanviats -> Rotar X 90°
+     *   Rotació Z (W×L×H) -> L i W intercanviats -> Rotar Y 90°
+     *   Rotació XY (W×H×L) -> W→L, H→W, L→H -> Rotar Y 90° + X 90°
+     *   Rotació XZ (H×L×W) -> H→L, L→W, W→H -> Rotar Z 90° 
+     *   Rotació YZ (H×W×L) -> H→L -> Rotar Z -90°
      */
-    addPackedSTLPieces({ stlGeometry, pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0 }) {
+    applyOrientationRotation(geometry, orientationName, originalDims) {
+        const rotMatrix = new THREE.Matrix4();
+        
+        // Netejar el nom de possibles sufixos
+        const cleanName = orientationName.split(' (')[0].trim();
+        
+        console.log(`📐 Aplicant rotació per: "${cleanName}"`);
+        
+        switch(cleanName) {
+            case 'Original':
+            case 'Sense rotació':
+                // Cap rotació
+                break;
+                
+            case 'Rotació Y':
+                // L×H×W: W i H intercanviats
+                // Rotar 90° al voltant de X per posar W a Y i H a Z
+                rotMatrix.makeRotationX(Math.PI / 2);
+                geometry.applyMatrix4(rotMatrix);
+                break;
+                
+            case 'Rotació Z':
+                // W×L×H: L i W intercanviats
+                // Rotar 90° al voltant de Y per intercanviar X i Z
+                rotMatrix.makeRotationY(Math.PI / 2);
+                geometry.applyMatrix4(rotMatrix);
+                break;
+                
+            case 'Rotació XY':
+                // W×H×L: W→X, H→Y, L→Z
+                // Rotar 90° Y després 90° X
+                rotMatrix.makeRotationY(Math.PI / 2);
+                geometry.applyMatrix4(rotMatrix);
+                rotMatrix.makeRotationX(Math.PI / 2);
+                geometry.applyMatrix4(rotMatrix);
+                break;
+                
+            case 'Rotació XZ':
+                // H×L×W: H→X, L→Y, W→Z
+                // Rotar 90° al voltant de Z
+                rotMatrix.makeRotationZ(Math.PI / 2);
+                geometry.applyMatrix4(rotMatrix);
+                break;
+                
+            case 'Rotació YZ':
+                // H×W×L: H→X, W→Y, L→Z
+                // Rotar -90° al voltant de Z
+                rotMatrix.makeRotationZ(-Math.PI / 2);
+                geometry.applyMatrix4(rotMatrix);
+                break;
+                
+            default:
+                console.warn(`⚠️ Orientació desconeguda: ${orientationName}`);
+        }
+        
+        // Centrar després de la rotació
+        geometry.center();
+    }
+
+    /**
+     * Add packed pieces in organized grid layout
+     * MODE OPTIMITZAT: Col·loca peces STL en graella ordenada
+     * SIMPLE: Agafem l'STL tal qual (com al mode gravetat) i el posicionem en graella
+     */
+    addPackedPieces({ pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, stlGeometry = null, addSeparators = false, separatorThickness = 2, originalDims = null, optimalDims = null, orientationName = 'Original', densityFactor = 1.0, boxDims = null }) {
         this.clearPieces();
 
-        // Clone and prepare geometry
-        const geometry = stlGeometry.clone();
-        geometry.computeVertexNormals();
+        // COLORS MOLT VIUS! 🎨
+        const pieceColors = [
+            0xFF6B6B, 0x4ECDC4, 0xFFE66D, 0x95E1D3, 0xF38181,
+            0xAA96DA, 0xFCBAD3, 0xA8D8EA, 0xFF9F43, 0x6C5CE7,
+            0x00CEC9, 0xFD79A8, 0x55EFC4, 0x74B9FF, 0xE17055,
+            0x81ECEC, 0xFAB1A0, 0xA29BFE, 0x00B894, 0xFDCB6E
+        ];
 
-        const material = new THREE.MeshPhongMaterial({
-            color: 0x3b82f6,
-            opacity: 0.85,
-            transparent: true,
-            flatShading: true
-        });
+        let geometry;
+        let actualSizeX, actualSizeY, actualSizeZ;
+        
+        if (stlGeometry) {
+            // SIMPLE: Agafem l'STL TAL QUAL, sense rotacions!
+            geometry = stlGeometry.clone();
+            geometry.computeVertexNormals();
+            geometry.center();
+            geometry.computeBoundingBox();
+            
+            const bbox = geometry.boundingBox;
+            actualSizeX = bbox.max.x - bbox.min.x;
+            actualSizeY = bbox.max.y - bbox.min.y;
+            actualSizeZ = bbox.max.z - bbox.min.z;
+            
+            // Moure perquè la base estigui a Y=0
+            geometry.translate(0, -bbox.min.y, 0);
+            
+            console.log(`📦 STL: ${actualSizeX.toFixed(1)} x ${actualSizeY.toFixed(1)} x ${actualSizeZ.toFixed(1)}`);
+        } else {
+            // Geometria de caixa simple
+            geometry = new THREE.BoxGeometry(pieceL, pieceH, pieceW);
+            geometry.translate(0, pieceH / 2, 0);
+            actualSizeX = pieceL;
+            actualSizeY = pieceH;
+            actualSizeZ = pieceW;
+        }
 
-        // Use instancing for performance
+        // ESPAIAT: Usar les dimensions REALS de l'STL per l'espaiat
+        // Així les peces es toquen (o quasi) sense solapar-se
+        const gapX = addSeparators ? separatorThickness : 0;
+        const gapZ = addSeparators ? separatorThickness : 0;
+        const gapY = addSeparators ? separatorThickness : 0;
+        
+        const spacingX = actualSizeX * densityFactor + gapX;
+        const spacingZ = actualSizeZ * densityFactor + gapZ;
+        const spacingY = actualSizeY + gapY;
+
+        console.log(`Distribució: ${nx} x ${ny} x ${nz} = ${nx*ny*nz} peces`);
+        console.log(`Espaiat real: X=${spacingX.toFixed(1)}, Z=${spacingZ.toFixed(1)}, Y=${spacingY.toFixed(1)}`);
+
         const totalPieces = Math.min(nx * ny * nz, maxDraw);
-        const instancedMesh = new THREE.InstancedMesh(geometry, material, totalPieces);
-        instancedMesh.castShadow = true;
-        instancedMesh.receiveShadow = true;
-
-        const dummy = new THREE.Object3D();
         let index = 0;
 
+        // Offset per començar des de la cantonada
+        const offsetX = actualSizeX / 2;
+        const offsetZ = actualSizeZ / 2;
+
+        // nz = capes verticals (Y), ny = files (Z), nx = columnes (X)
         for (let iz = 0; iz < nz && index < totalPieces; iz++) {
             for (let iy = 0; iy < ny && index < totalPieces; iy++) {
                 for (let ix = 0; ix < nx && index < totalPieces; ix++) {
-                    // Position piece with gap spacing
-                    dummy.position.set(
-                        ix * (pieceL + packingGap) + pieceL / 2,
-                        iz * (pieceH + packingGap) + pieceH / 2,
-                        iy * (pieceW + packingGap) + pieceW / 2
-                    );
-                    dummy.updateMatrix();
-                    instancedMesh.setMatrixAt(index, dummy.matrix);
+                    const colorIndex = index % pieceColors.length;
+                    const material = new THREE.MeshPhongMaterial({
+                        color: pieceColors[colorIndex],
+                        flatShading: false,
+                        shininess: 80,
+                        side: THREE.DoubleSide
+                    });
+
+                    const mesh = new THREE.Mesh(geometry.clone(), material);
                     
-                    // Slight color variation
-                    const hue = 0.6 + (index / totalPieces) * 0.05;
-                    const color = new THREE.Color().setHSL(hue, 0.7, 0.55);
-                    instancedMesh.setColorAt(index, color);
+                    // Posició basada en dimensions reals de l'STL
+                    const posX = ix * spacingX + offsetX;
+                    const posY = iz * spacingY;
+                    const posZ = iy * spacingZ + offsetZ;
+                    
+                    mesh.position.set(posX, posY, posZ);
+                    
+                    mesh.castShadow = true;
+                    mesh.receiveShadow = true;
+                    
+                    this.scene.add(mesh);
+                    this.pieces.push(mesh);
+                    
+                    // Wireframe subtil
+                    const edges = new THREE.EdgesGeometry(geometry);
+                    const wire = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x222222, opacity: 0.3, transparent: true }));
+                    wire.position.copy(mesh.position);
+                    this.scene.add(wire);
+                    this.pieces.push(wire);
                     
                     index++;
                 }
             }
         }
-
-        instancedMesh.instanceMatrix.needsUpdate = true;
-        if (instancedMesh.instanceColor) {
-            instancedMesh.instanceColor.needsUpdate = true;
+        
+        // Separadors horitzontals entre capes
+        if (addSeparators && separatorThickness > 0 && nz > 1) {
+            this.addHorizontalSeparators({
+                pieceL: actualSizeX, 
+                pieceW: actualSizeZ,
+                nx, ny, nz,
+                separatorThickness,
+                spacingX, spacingZ, spacingY,
+                offsetX: 0, 
+                offsetZ: 0
+            });
         }
 
-        this.scene.add(instancedMesh);
-        this.pieces.push(instancedMesh);
-
+        console.log(`✅ Renderitzades ${index} peces`);
         return totalPieces;
+    }
+    
+    /**
+     * Afegeix separadors horitzontals (cartons) entre capes
+     */
+    addHorizontalSeparators({ pieceL, pieceW, nx, ny, nz, separatorThickness, spacingX, spacingZ, spacingY, offsetX = 0, offsetZ = 0 }) {
+        const cardboardColor = 0xD4A574;
+        const cardboardMaterial = new THREE.MeshPhongMaterial({
+            color: cardboardColor,
+            flatShading: true,
+            side: THREE.DoubleSide
+        });
+        
+        const totalWidth = nx * spacingX;
+        const totalDepth = ny * spacingZ;
+        
+        // Un separador horitzontal entre cada capa
+        for (let layer = 1; layer < nz; layer++) {
+            const separatorGeom = new THREE.BoxGeometry(
+                totalWidth,
+                separatorThickness,
+                totalDepth
+            );
+            const separator = new THREE.Mesh(separatorGeom, cardboardMaterial.clone());
+            separator.position.set(
+                offsetX + totalWidth / 2,
+                layer * spacingY - separatorThickness / 2,
+                offsetZ + totalDepth / 2
+            );
+            this.scene.add(separator);
+            this.pieces.push(separator);
+        }
+    }
+    
+    /**
+     * Add cardboard L-separators between pieces
+     */
+    addCardboardSeparators({ pieceL, pieceW, pieceH, nx, ny, nz, separatorThickness, spacingX, spacingY, spacingZ }) {
+        const cardboardColor = 0xC4A574; // Color cartró
+        const cardboardMaterial = new THREE.MeshPhongMaterial({
+            color: cardboardColor,
+            transparent: false,
+            flatShading: true,
+            side: THREE.DoubleSide
+        });
+        
+        // Vertical separators between columns (YZ plane)
+        for (let ix = 1; ix < nx; ix++) {
+            for (let iy = 0; iy < ny; iy++) {
+                const height = nz * spacingZ;
+                const separatorGeom = new THREE.BoxGeometry(
+                    separatorThickness,
+                    height,
+                    pieceW
+                );
+                const separator = new THREE.Mesh(separatorGeom, cardboardMaterial.clone());
+                separator.position.set(
+                    ix * spacingX - separatorThickness / 2,
+                    height / 2,
+                    iy * spacingY + pieceW / 2
+                );
+                this.scene.add(separator);
+                this.pieces.push(separator);
+            }
+        }
+        
+        // Horizontal separators between rows (XZ plane)
+        for (let iy = 1; iy < ny; iy++) {
+            for (let ix = 0; ix < nx; ix++) {
+                const height = nz * spacingZ;
+                const separatorGeom = new THREE.BoxGeometry(
+                    pieceL,
+                    height,
+                    separatorThickness
+                );
+                const separator = new THREE.Mesh(separatorGeom, cardboardMaterial.clone());
+                separator.position.set(
+                    ix * spacingX + pieceL / 2,
+                    height / 2,
+                    iy * spacingY - separatorThickness / 2
+                );
+                this.scene.add(separator);
+                this.pieces.push(separator);
+            }
+        }
+        
+        // Horizontal layer separators (XY plane) between vertical layers
+        for (let iz = 1; iz < nz; iz++) {
+            const separatorGeom = new THREE.BoxGeometry(
+                nx * spacingX - separatorThickness,
+                separatorThickness,
+                ny * spacingY - separatorThickness
+            );
+            const separator = new THREE.Mesh(separatorGeom, cardboardMaterial.clone());
+            separator.position.set(
+                (nx * spacingX - separatorThickness) / 2,
+                iz * spacingZ - separatorThickness / 2,
+                (ny * spacingY - separatorThickness) / 2
+            );
+            this.scene.add(separator);
+            this.pieces.push(separator);
+        }
     }
 
     /**
