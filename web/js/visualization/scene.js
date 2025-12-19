@@ -300,54 +300,134 @@ export class SceneManager {
         ];
 
         let geometry;
-        let actualSizeX, actualSizeY, actualSizeZ;
+        // Dimensions for spacing - will be updated after STL rotation
+        let spacingX, spacingZ, spacingY;
         
         if (stlGeometry) {
-            // SIMPLE: Agafem l'STL TAL QUAL, sense rotacions!
             geometry = stlGeometry.clone();
             geometry.computeVertexNormals();
             geometry.center();
             geometry.computeBoundingBox();
             
-            const bbox = geometry.boundingBox;
-            actualSizeX = bbox.max.x - bbox.min.x;
-            actualSizeY = bbox.max.y - bbox.min.y;
-            actualSizeZ = bbox.max.z - bbox.min.z;
+            // Get original STL dimensions
+            let bbox = geometry.boundingBox;
+            const stlX = bbox.max.x - bbox.min.x;
+            const stlY = bbox.max.y - bbox.min.y;
+            const stlZ = bbox.max.z - bbox.min.z;
             
-            // Moure perquè la base estigui a Y=0
-            geometry.translate(0, -bbox.min.y, 0);
+            console.log(`📦 Original STL: ${stlX.toFixed(1)} x ${stlY.toFixed(1)} x ${stlZ.toFixed(1)}`);
+            console.log(`📦 Target dims (L×W×H): ${pieceL.toFixed(1)} x ${pieceW.toFixed(1)} x ${pieceH.toFixed(1)}`);
+            console.log(`📦 Orientation: ${orientationName}`);
             
-            console.log(`📦 STL: ${actualSizeX.toFixed(1)} x ${actualSizeY.toFixed(1)} x ${actualSizeZ.toFixed(1)}`);
+            // Map orientation name to the rotation defined in ORIENTATIONS
+            // Original STL assumes: X=length, Y=height, Z=width (Three.js convention)
+            // The rotations will permute these to match the calculator's expected orientation
+            const orientationRotations = {
+                'Original (L×W×H)': { x: 0, y: 0, z: 0 },
+                'Rotació Y (L×H×W)': { x: Math.PI / 2, y: 0, z: 0 },
+                'Rotació Z (W×L×H)': { x: 0, y: 0, z: Math.PI / 2 },
+                'Rotació XY (W×H×L)': { x: Math.PI / 2, y: 0, z: Math.PI / 2 },
+                'Rotació XZ (H×L×W)': { x: 0, y: Math.PI / 2, z: 0 },
+                'Rotació YZ (H×W×L)': { x: 0, y: Math.PI / 2, z: Math.PI / 2 },
+            };
+            
+            // Find matching rotation
+            let rot = { x: 0, y: 0, z: 0 };
+            for (const [name, r] of Object.entries(orientationRotations)) {
+                if (orientationName.includes(name) || name.includes(orientationName.split(' ')[0])) {
+                    rot = r;
+                    break;
+                }
+            }
+            
+            // Apply rotation
+            if (rot.x !== 0) geometry.rotateX(rot.x);
+            if (rot.y !== 0) geometry.rotateY(rot.y);
+            if (rot.z !== 0) geometry.rotateZ(rot.z);
+            
+            console.log(`📦 Applied rotation: X=${(rot.x * 180/Math.PI).toFixed(0)}°, Y=${(rot.y * 180/Math.PI).toFixed(0)}°, Z=${(rot.z * 180/Math.PI).toFixed(0)}°`);
+            
+            // Recompute bounding box after rotation
+            geometry.computeBoundingBox();
+            bbox = geometry.boundingBox;
+            
+            const newX = bbox.max.x - bbox.min.x;
+            const newY = bbox.max.y - bbox.min.y;
+            const newZ = bbox.max.z - bbox.min.z;
+            
+            console.log(`📦 After rotation: ${newX.toFixed(1)} x ${newY.toFixed(1)} x ${newZ.toFixed(1)}`);
+            
+            // Move geometry so its CORNER is at origin (not center!)
+            // This way when we position at (x, y, z), the piece occupies from there to (x+w, y+h, z+d)
+            geometry.translate(-bbox.min.x, -bbox.min.y, -bbox.min.z);
+            
+            // USE ACTUAL STL DIMENSIONS after rotation for spacing!
+            spacingX = newX * densityFactor;
+            spacingZ = newZ * densityFactor;
+            spacingY = newY;
+            
+            console.log(`📦 Spacing from STL: X=${spacingX.toFixed(1)}, Y=${spacingY.toFixed(1)}, Z=${spacingZ.toFixed(1)}`);
+            
         } else {
-            // Geometria de caixa simple
+            // Simple box geometry - use pieceL/W/H
+            spacingX = pieceL * densityFactor;
+            spacingZ = pieceW * densityFactor;
+            spacingY = pieceH;
+            
             geometry = new THREE.BoxGeometry(pieceL, pieceH, pieceW);
             geometry.translate(0, pieceH / 2, 0);
-            actualSizeX = pieceL;
-            actualSizeY = pieceH;
-            actualSizeZ = pieceW;
         }
 
-        // ESPAIAT: Usar les dimensions REALS de l'STL per l'espaiat
-        // Així les peces es toquen (o quasi) sense solapar-se
+        // Add gaps if separators
         const gapX = addSeparators ? separatorThickness : 0;
         const gapZ = addSeparators ? separatorThickness : 0;
         const gapY = addSeparators ? separatorThickness : 0;
         
-        const spacingX = actualSizeX * densityFactor + gapX;
-        const spacingZ = actualSizeZ * densityFactor + gapZ;
-        const spacingY = actualSizeY + gapY;
+        spacingX += gapX;
+        spacingZ += gapZ;
+        spacingY += gapY;
 
-        console.log(`Distribució: ${nx} x ${ny} x ${nz} = ${nx*ny*nz} peces`);
-        console.log(`Espaiat real: X=${spacingX.toFixed(1)}, Z=${spacingZ.toFixed(1)}, Y=${spacingY.toFixed(1)}`);
+        // 🔒 IMPORTANT: Recalculate nx/ny/nz based on ACTUAL box dimensions and STL spacing
+        // This ensures pieces NEVER exceed the box bounds
+        if (boxDims) {
+            const boxL = boxDims.l || boxDims.length;
+            const boxW = boxDims.w || boxDims.width;
+            const boxH = boxDims.h || boxDims.height;
+            
+            const maxNx = Math.floor(boxL / spacingX);
+            const maxNy = Math.floor(boxW / spacingZ);  // ny corresponds to Z (width)
+            const maxNz = Math.floor(boxH / spacingY);  // nz corresponds to Y (height)
+            
+            console.log(`📦 Box dims: L=${boxL}, W=${boxW}, H=${boxH}`);
+            console.log(`📦 Requested grid: ${nx}×${ny}×${nz}`);
+            console.log(`📦 Max fit in box: ${maxNx}×${maxNy}×${maxNz}`);
+            
+            // Limit to what actually fits
+            nx = Math.min(nx, maxNx);
+            ny = Math.min(ny, maxNy);
+            nz = Math.min(nz, maxNz);
+            
+            console.log(`📦 Adjusted grid: ${nx}×${ny}×${nz}`);
+        }
+
+        // Ensure at least 0 pieces if nothing fits
+        nx = Math.max(0, nx);
+        ny = Math.max(0, ny);
+        nz = Math.max(0, nz);
+        
+        if (nx === 0 || ny === 0 || nz === 0) {
+            console.warn('⚠️ No pieces fit in the box with current dimensions!');
+            return 0;
+        }
+
+        console.log(`Grid: ${nx} x ${ny} x ${nz} = ${nx*ny*nz} pieces`);
+        console.log(`Spacing: X=${spacingX.toFixed(1)}, Z=${spacingZ.toFixed(1)}, Y=${spacingY.toFixed(1)}`);
 
         const totalPieces = Math.min(nx * ny * nz, maxDraw);
         let index = 0;
 
-        // Offset per començar des de la cantonada
-        const offsetX = actualSizeX / 2;
-        const offsetZ = actualSizeZ / 2;
-
-        // nz = capes verticals (Y), ny = files (Z), nx = columnes (X)
+        // No offset needed - geometry corner is at origin
+        // nz = vertical layers (Y), ny = rows (Z), nx = columns (X)
         for (let iz = 0; iz < nz && index < totalPieces; iz++) {
             for (let iy = 0; iy < ny && index < totalPieces; iy++) {
                 for (let ix = 0; ix < nx && index < totalPieces; ix++) {
@@ -361,10 +441,9 @@ export class SceneManager {
 
                     const mesh = new THREE.Mesh(geometry.clone(), material);
                     
-                    // Posició basada en dimensions reals de l'STL
-                    const posX = ix * spacingX + offsetX;
+                    const posX = ix * spacingX;
                     const posY = iz * spacingY;
-                    const posZ = iy * spacingZ + offsetZ;
+                    const posZ = iy * spacingZ;
                     
                     mesh.position.set(posX, posY, posZ);
                     
@@ -374,13 +453,6 @@ export class SceneManager {
                     this.scene.add(mesh);
                     this.pieces.push(mesh);
                     
-                    // Wireframe subtil
-                    const edges = new THREE.EdgesGeometry(geometry);
-                    const wire = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x222222, opacity: 0.3, transparent: true }));
-                    wire.position.copy(mesh.position);
-                    this.scene.add(wire);
-                    this.pieces.push(wire);
-                    
                     index++;
                 }
             }
@@ -389,8 +461,8 @@ export class SceneManager {
         // Separadors horitzontals entre capes
         if (addSeparators && separatorThickness > 0 && nz > 1) {
             this.addHorizontalSeparators({
-                pieceL: actualSizeX, 
-                pieceW: actualSizeZ,
+                pieceL: spacingX - gapX, 
+                pieceW: spacingZ - gapZ,
                 nx, ny, nz,
                 separatorThickness,
                 spacingX, spacingZ, spacingY,
@@ -399,8 +471,8 @@ export class SceneManager {
             });
         }
 
-        console.log(`✅ Renderitzades ${index} peces`);
-        return totalPieces;
+        console.log(`✅ Rendered ${index} pieces`);
+        return index;
     }
     
     /**

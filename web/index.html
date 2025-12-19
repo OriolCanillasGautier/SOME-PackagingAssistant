@@ -52,6 +52,18 @@
                             </label>
                         </div>
                         <div id="stl-status" class="stl-status"></div>
+
+                        <!-- Recent Files List -->
+                        <div id="recent-stls-container" class="recent-stls-container" style="display: none;">
+                            <h3>📚 Peces Recents</h3>
+                            <div id="recent-stls-list" class="recent-stls-list">
+                                <!-- Loaded dynamically -->
+                            </div>
+                            <div class="library-actions">
+                                <button id="export-library-btn" class="btn-text-only" title="Exportar dades de la llibreria a CSV">📤 Exportar</button>
+                                <button id="clear-library-btn" class="btn-text-only warning" title="Esborrar tota la llibreria">🗑️ Netejar</button>
+                            </div>
+                        </div>
                         
                         <div class="input-group">
                             <label for="obj-length">Llargada (mm)</label>
@@ -111,6 +123,51 @@
                         <div class="input-group slider-group optimized-option" id="separator-thickness-group" style="display: none;">
                             <label for="separator-thickness">Gruix separador: <span id="separator-thickness-value">2</span>mm</label>
                             <input type="range" id="separator-thickness" min="1" max="10" value="2" step="0.5">
+                        </div>
+                    </section>
+
+                    <!-- Physics-Based Optimized Mode Options (only visible with STL) -->
+                    <section class="input-section physics-optimized-section" id="physics-optimized-options" style="display: none;">
+                        <h2>⚙️ Opcions de Física (STL)</h2>
+                        <div class="input-group checkbox-group">
+                            <input type="checkbox" id="use-physics-placement" checked>
+                            <label for="use-physics-placement">🎯 Usar física per col·locació intel·ligent</label>
+                        </div>
+                        <p class="hint-text physics-hint">
+                            ℹ️ Quan està activat:
+                            <br>• Es testeja l'estabilitat de cada orientació
+                            <br>• Les peces es toquen realment (no bounding boxes)
+                            <br>• Es poden usar orientacions diferents per capa/buit
+                        </p>
+                        <div class="input-group" id="stability-precision-group">
+                            <label>🎚️ Precisió del test d'estabilitat:</label>
+                            <div class="radio-group vertical">
+                                <label>
+                                    <input type="radio" name="stability-precision" value="fast" checked>
+                                    ⚡ Ràpid (0.5s per orientació)
+                                </label>
+                                <label>
+                                    <input type="radio" name="stability-precision" value="precise">
+                                    🎯 Precís (2s per orientació)
+                                </label>
+                            </div>
+                        </div>
+                        <div class="input-group">
+                            <label>📐 Direcció de col·locació:</label>
+                            <div class="radio-group vertical">
+                                <label>
+                                    <input type="radio" name="placement-direction" value="auto" checked>
+                                    🤖 Automàtic (optimitzat per cas)
+                                </label>
+                                <label>
+                                    <input type="radio" name="placement-direction" value="vertical">
+                                    ⬇️ Vertical (de dalt a baix)
+                                </label>
+                                <label>
+                                    <input type="radio" name="placement-direction" value="horizontal">
+                                    ➡️ Horitzontal (des d'un costat)
+                                </label>
+                            </div>
                         </div>
                     </section>
 
@@ -230,13 +287,49 @@
             </div>
         </div>
 
+        <!-- Stability Confirmation Modal -->
+        <div id="stability-modal" class="modal" style="display: none;">
+            <div class="modal-content modal-medium">
+                <div class="modal-header">
+                    <h2>⚖️ Verificació d'Estabilitat</h2>
+                    <button id="stability-modal-close" class="modal-close">×</button>
+                </div>
+                <div class="modal-body">
+                    <div class="stability-viewer">
+                        <div id="stability-preview" class="stability-preview">
+                            <p class="loading-text">Simulant gravetat...</p>
+                        </div>
+                        <div class="stability-status" id="stability-status">
+                            <p>⏳ Aplicant gravetat per verificar estabilitat...</p>
+                        </div>
+                    </div>
+                    <div class="stability-controls">
+                        <div class="rotation-controls">
+                            <p>🔄 Rotar peça manualment (±45°):</p>
+                            <div class="rotation-buttons">
+                                <button id="rotate-x-minus" class="rotate-btn" title="Rotar -45° eix X">↺ X</button>
+                                <button id="rotate-x-plus" class="rotate-btn" title="Rotar +45° eix X">↻ X</button>
+                                <button id="rotate-z-minus" class="rotate-btn" title="Rotar -45° eix Z">↺ Z</button>
+                                <button id="rotate-z-plus" class="rotate-btn" title="Rotar +45° eix Z">↻ Z</button>
+                            </div>
+                            <button id="reset-rotation" class="btn-secondary">🔄 Restablir rotació</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="stability-unstable" class="btn-danger">❌ Inestable - Descartar</button>
+                    <button id="stability-stable" class="btn-success">✅ Estable - Confirmar</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Footer -->
         <footer class="footer">
             <p>PackAssist — Oriol Canillas & SOME © 2025</p>
         </footer>
     </div>
 
-    <!-- Main Script -->
-    <script type="module" src="js/main.js"></script>
+    <!-- Main Script - cache bust v2 -->
+    <script type="module" src="js/main.js?v=20241217b"></script>
 </body>
 </html>

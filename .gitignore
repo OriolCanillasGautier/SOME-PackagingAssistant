@@ -26,3 +26,7 @@ npm-debug.log*
 *.7z
 *.zip
 *.rar
+
+# User Library (generated)
+web/library/
+web/library.csv
