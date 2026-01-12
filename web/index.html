@@ -23,6 +23,9 @@
             <div class="header-content">
                 <h1>📦 Calculadora de Capacitat de Peces</h1>
                 <p>Càlcul optimitzat + Mode a Granel amb Física Real</p>
+                <nav class="header-nav">
+                    <a href="historial.html" class="nav-link">📋 Historial de Càlculs</a>
+                </nav>
             </div>
         </header>
 
@@ -52,16 +55,11 @@
                             </label>
                         </div>
                         <div id="stl-status" class="stl-status"></div>
-
-                        <!-- Recent Files List -->
-                        <div id="recent-stls-container" class="recent-stls-container" style="display: none;">
-                            <h3>📚 Peces Recents</h3>
-                            <div id="recent-stls-list" class="recent-stls-list">
-                                <!-- Loaded dynamically -->
-                            </div>
-                            <div class="library-actions">
-                                <button id="export-library-btn" class="btn-text-only" title="Exportar dades de la llibreria a CSV">📤 Exportar</button>
-                                <button id="clear-library-btn" class="btn-text-only warning" title="Esborrar tota la llibreria">🗑️ Netejar</button>
+                        
+                        <!-- STL History (inline, max 5) -->
+                        <div class="stl-history-inline" id="stl-history-inline">
+                            <div class="stl-history-list" id="stl-history-list">
+                                <!-- Items will be populated by JS -->
                             </div>
                         </div>
                         
@@ -85,6 +83,10 @@
                             <input type="checkbox" id="allow-rotation" checked>
                             <label for="allow-rotation">Permet girar l'objecte (6 orientacions)</label>
                         </div>
+                        <div class="input-group slider-group">
+                            <label for="opt-piece-colors">Nombre de colors: <span id="opt-piece-colors-value">10</span></label>
+                            <input type="range" id="opt-piece-colors" min="2" max="20" value="10" step="1">
+                        </div>
                     </section>
 
                     <!-- Box Section -->
@@ -107,67 +109,12 @@
                             <input type="number" id="max-weight" value="2.0" min="0.1" step="0.1">
                         </div>
                         <div class="input-group slider-group">
-                            <label for="safety-factor">Seguretat: <span id="safety-value">100</span>%</label>
-                            <input type="range" id="safety-factor" min="50" max="100" value="100">
+                            <label for="safety-factor">Factor de seguretat: <span id="safety-value">0.85</span></label>
+                            <input type="range" id="safety-factor" min="0.5" max="1.0" value="0.85" step="0.05">
                         </div>
-                        <div class="input-group slider-group optimized-option">
-                            <label for="density-factor">Espaiat: <span id="density-value">1.0</span>x
-                                <span class="density-info">(1.0=tocant, 1.5=espaiat)</span>
-                            </label>
-                            <input type="range" id="density-factor" min="1.0" max="1.5" value="1.0" step="0.05">
-                        </div>
-                        <div class="input-group checkbox-group optimized-option">
-                            <input type="checkbox" id="add-separators">
-                            <label for="add-separators">📦 Afegir separadors de cartró entre peces</label>
-                        </div>
-                        <div class="input-group slider-group optimized-option" id="separator-thickness-group" style="display: none;">
-                            <label for="separator-thickness">Gruix separador: <span id="separator-thickness-value">2</span>mm</label>
-                            <input type="range" id="separator-thickness" min="1" max="10" value="2" step="0.5">
-                        </div>
-                    </section>
-
-                    <!-- Physics-Based Optimized Mode Options (only visible with STL) -->
-                    <section class="input-section physics-optimized-section" id="physics-optimized-options" style="display: none;">
-                        <h2>⚙️ Opcions de Física (STL)</h2>
-                        <div class="input-group checkbox-group">
-                            <input type="checkbox" id="use-physics-placement" checked>
-                            <label for="use-physics-placement">🎯 Usar física per col·locació intel·ligent</label>
-                        </div>
-                        <p class="hint-text physics-hint">
-                            ℹ️ Quan està activat:
-                            <br>• Es testeja l'estabilitat de cada orientació
-                            <br>• Les peces es toquen realment (no bounding boxes)
-                            <br>• Es poden usar orientacions diferents per capa/buit
-                        </p>
-                        <div class="input-group" id="stability-precision-group">
-                            <label>🎚️ Precisió del test d'estabilitat:</label>
-                            <div class="radio-group vertical">
-                                <label>
-                                    <input type="radio" name="stability-precision" value="fast" checked>
-                                    ⚡ Ràpid (0.5s per orientació)
-                                </label>
-                                <label>
-                                    <input type="radio" name="stability-precision" value="precise">
-                                    🎯 Precís (2s per orientació)
-                                </label>
-                            </div>
-                        </div>
-                        <div class="input-group">
-                            <label>📐 Direcció de col·locació:</label>
-                            <div class="radio-group vertical">
-                                <label>
-                                    <input type="radio" name="placement-direction" value="auto" checked>
-                                    🤖 Automàtic (optimitzat per cas)
-                                </label>
-                                <label>
-                                    <input type="radio" name="placement-direction" value="vertical">
-                                    ⬇️ Vertical (de dalt a baix)
-                                </label>
-                                <label>
-                                    <input type="radio" name="placement-direction" value="horizontal">
-                                    ➡️ Horitzontal (des d'un costat)
-                                </label>
-                            </div>
+                        <div class="input-group slider-group">
+                            <label for="packing-gap">Espaiat entre peces: <span id="packing-gap-value">0</span> mm</label>
+                            <input type="range" id="packing-gap" min="0" max="50" value="0" step="1">
                         </div>
                     </section>
 
@@ -206,19 +153,21 @@
                         </p>
                     </section>
 
-                    <!-- Calculate Button -->
-                    <button id="calculate-btn" class="calculate-btn">
-                        🔍 CALCULAR CAPACITAT
-                    </button>
-                    <button id="start-simulation-btn" class="simulate-btn" style="display: none;">
-                        ▶️ INICIAR SIMULACIÓ
-                    </button>
-                    <button id="stop-simulation-btn" class="stop-btn" style="display: none;">
-                        ⏹️ ATURAR
-                    </button>
-                    <button id="reset-simulation-btn" class="reset-btn" style="display: none;">
-                        🔄 REINICIAR
-                    </button>
+                    <!-- Floating Action Buttons -->
+                    <div class="floating-actions">
+                        <button id="calculate-btn" class="calculate-btn">
+                            🔍 CALCULAR CAPACITAT
+                        </button>
+                        <button id="start-simulation-btn" class="simulate-btn" style="display: none;">
+                            ▶️ INICIAR SIMULACIÓ
+                        </button>
+                        <button id="stop-simulation-btn" class="stop-btn" style="display: none;">
+                            ⏹️ ATURAR
+                        </button>
+                        <button id="reset-simulation-btn" class="reset-btn" style="display: none;">
+                            🔄 REINICIAR
+                        </button>
+                    </div>
                 </aside>
 
                 <!-- Right Panel: 3D Viewer + Results -->
@@ -287,49 +236,13 @@
             </div>
         </div>
 
-        <!-- Stability Confirmation Modal -->
-        <div id="stability-modal" class="modal" style="display: none;">
-            <div class="modal-content modal-medium">
-                <div class="modal-header">
-                    <h2>⚖️ Verificació d'Estabilitat</h2>
-                    <button id="stability-modal-close" class="modal-close">×</button>
-                </div>
-                <div class="modal-body">
-                    <div class="stability-viewer">
-                        <div id="stability-preview" class="stability-preview">
-                            <p class="loading-text">Simulant gravetat...</p>
-                        </div>
-                        <div class="stability-status" id="stability-status">
-                            <p>⏳ Aplicant gravetat per verificar estabilitat...</p>
-                        </div>
-                    </div>
-                    <div class="stability-controls">
-                        <div class="rotation-controls">
-                            <p>🔄 Rotar peça manualment (±45°):</p>
-                            <div class="rotation-buttons">
-                                <button id="rotate-x-minus" class="rotate-btn" title="Rotar -45° eix X">↺ X</button>
-                                <button id="rotate-x-plus" class="rotate-btn" title="Rotar +45° eix X">↻ X</button>
-                                <button id="rotate-z-minus" class="rotate-btn" title="Rotar -45° eix Z">↺ Z</button>
-                                <button id="rotate-z-plus" class="rotate-btn" title="Rotar +45° eix Z">↻ Z</button>
-                            </div>
-                            <button id="reset-rotation" class="btn-secondary">🔄 Restablir rotació</button>
-                        </div>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button id="stability-unstable" class="btn-danger">❌ Inestable - Descartar</button>
-                    <button id="stability-stable" class="btn-success">✅ Estable - Confirmar</button>
-                </div>
-            </div>
-        </div>
-
         <!-- Footer -->
         <footer class="footer">
             <p>PackAssist — Oriol Canillas & SOME © 2025</p>
         </footer>
     </div>
 
-    <!-- Main Script - cache bust v2 -->
-    <script type="module" src="js/main.js?v=20241217b"></script>
+    <!-- Main Script -->
+    <script type="module" src="js/main.js"></script>
 </body>
 </html>

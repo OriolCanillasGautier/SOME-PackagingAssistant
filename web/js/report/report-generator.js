@@ -16,7 +16,6 @@ const translations = {
         fillType: 'Tipus d\'ompliment',
         bulk: 'A granel',
         optimized: 'Optimitzat',
-        optimizedPhysics: 'Optimitzat amb Física',
         pieceInfo: 'Informació de la Peça',
         pieceName: 'Nom',
         customPiece: 'Peça personalitzada',
@@ -37,9 +36,6 @@ const translations = {
         layerCount: 'Nombre de capes',
         piecesPerLayer: 'Peces per capa',
         layerHeight: 'Alçada de capa',
-        orientationsUsed: 'Orientacions usades',
-        orientationsByLayer: 'Orientacions per capa',
-        multiOrientation: 'Multi-orientació',
         views: 'Vistes',
         frontView: 'Vista Frontal',
         topView: 'Vista Superior',
@@ -58,7 +54,6 @@ const translations = {
         fillType: 'Fill Type',
         bulk: 'Bulk',
         optimized: 'Optimized',
-        optimizedPhysics: 'Optimized with Physics',
         pieceInfo: 'Piece Information',
         pieceName: 'Name',
         customPiece: 'Custom piece',
@@ -79,9 +74,6 @@ const translations = {
         layerCount: 'Layer count',
         piecesPerLayer: 'Pieces per layer',
         layerHeight: 'Layer height',
-        orientationsUsed: 'Orientations used',
-        orientationsByLayer: 'Orientations by layer',
-        multiOrientation: 'Multi-orientation',
         views: 'Views',
         frontView: 'Front View',
         topView: 'Top View',
@@ -268,8 +260,7 @@ export class ReportGenerator {
             pieceCount,
             pieceWeight = 0.1,
             maxWeight,
-            mode = 'bulk',
-            layerData = null // New: multi-orientation layer data
+            mode = 'bulk'
         } = data;
 
         // Calculate values
@@ -278,29 +269,7 @@ export class ReportGenerator {
         const totalWeight = pieceCount * pieceWeight;
         const volumeUsage = (pieceCount * pieceVolume / boxVolume * 100).toFixed(1);
         const currentDate = new Date().toLocaleDateString(this.language === 'ca' ? 'ca-ES' : 'en-US');
-        
-        // Format mode display
-        let modeDisplay = this.t.bulk;
-        if (mode === 'optimized') modeDisplay = this.t.optimized;
-        if (mode === 'optimized-physics') modeDisplay = this.t.optimizedPhysics;
-        
-        // Format layer data if available
-        let layerInfoHtml = '';
-        if (layerData && Object.keys(layerData).length > 0) {
-            layerInfoHtml = `
-                <div class="info-box layer-box">
-                    <h3>📊 ${this.t.orientationsByLayer}</h3>
-                    <table>
-                        ${Object.entries(layerData).map(([layer, orientations]) => {
-                            const oriList = Object.entries(orientations)
-                                .map(([ori, count]) => `${ori}: ${count}`)
-                                .join(', ');
-                            return `<tr><td>Capa ${parseInt(layer) + 1}</td><td>${oriList}</td></tr>`;
-                        }).join('')}
-                    </table>
-                </div>
-            `;
-        }
+
         // Create HTML for PDF - 2 PAGES with LARGE images
         const htmlContent = `
 <!DOCTYPE html>
@@ -372,14 +341,6 @@ export class ReportGenerator {
         }
         .results-box h3 {
             color: #059669;
-        }
-        .layer-box {
-            background: #f0f0ff;
-            border: 1px solid #6366f1;
-            margin-top: 15px;
-        }
-        .layer-box h3 {
-            color: #6366f1;
         }
         
         table {
@@ -513,12 +474,9 @@ export class ReportGenerator {
                     <tr><td>${this.t.pieceCount}</td><td class="result-value">${pieceCount}</td></tr>
                     <tr><td>${this.t.totalWeight}</td><td>${totalWeight.toFixed(2)} kg</td></tr>
                     <tr><td>${this.t.volumeUsage}</td><td>${volumeUsage}%</td></tr>
-                    <tr><td>${this.t.fillType}</td><td>${modeDisplay}</td></tr>
                 </table>
             </div>
         </div>
-        
-        ${layerInfoHtml}
 
         <div class="main-view">
             ${views.isometric ? `<img src="${views.isometric}" alt="${this.t.isometricView}">` : '<p>Vista no disponible</p>'}

@@ -167,17 +167,6 @@ function mergeBufferGeometries(geometries) {
 
 /**
  * Extract dimensions from a BufferGeometry (bounding box)
- * 
- * IMPORTANT: Three.js uses Y-up coordinate system:
- * - X = length (horizontal, left-right)
- * - Y = height (vertical, up-down)
- * - Z = width/depth (horizontal, front-back)
- * 
- * The calculator expects:
- * - L = length (X)
- * - W = width (Z, NOT Y!)
- * - H = height (Y)
- * 
  * @param {THREE.BufferGeometry} geometry
  * @returns {{length: number, width: number, height: number}}
  */
@@ -187,11 +176,10 @@ export function extractDimensions(geometry) {
     const size = new THREE.Vector3();
     box.getSize(size);
     
-    // Correct mapping for Y-up coordinate system
     return {
-        length: size.x,   // X axis = length
-        width: size.z,    // Z axis = width/depth (NOT Y!)
-        height: size.y    // Y axis = height (vertical)
+        length: size.x,
+        width: size.y,
+        height: size.z
     };
 }
 

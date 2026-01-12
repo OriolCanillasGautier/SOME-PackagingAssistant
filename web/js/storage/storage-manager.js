@@ -1,13 +1,14 @@
 /**
  * PackAssist Web - Storage Manager
- * Handles IndexedDB operations for persisting STL files and metadata
+ * Handles IndexedDB operations for persisting STL files and calculation history
  */
 
 export class StorageManager {
     constructor() {
         this.dbName = 'PackAssistDB';
-        this.dbVersion = 1;
-        this.storeName = 'stlFiles';
+        this.dbVersion = 2; // Incremented for new store
+        this.stlStoreName = 'stlFiles';
+        this.historyStoreName = 'calculationHistory';
         this.db = null;
     }
 
@@ -20,9 +21,19 @@ export class StorageManager {
 
             request.onupgradeneeded = (event) => {
                 const db = event.target.result;
-                if (!db.objectStoreNames.contains(this.storeName)) {
-                    const store = db.createObjectStore(this.storeName, { keyPath: 'id', autoIncrement: true });
+                
+                // STL Files store
+                if (!db.objectStoreNames.contains(this.stlStoreName)) {
+                    const store = db.createObjectStore(this.stlStoreName, { keyPath: 'id', autoIncrement: true });
                     store.createIndex('lastUsed', 'lastUsed', { unique: false });
+                    store.createIndex('name', 'name', { unique: false });
+                }
+                
+                // Calculation History store
+                if (!db.objectStoreNames.contains(this.historyStoreName)) {
+                    const historyStore = db.createObjectStore(this.historyStoreName, { keyPath: 'id', autoIncrement: true });
+                    historyStore.createIndex('timestamp', 'timestamp', { unique: false });
+                    historyStore.createIndex('mode', 'mode', { unique: false });
                 }
             };
 
@@ -49,8 +60,8 @@ export class StorageManager {
         if (!this.db) await this.init();
 
         return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([this.storeName], 'readwrite');
-            const store = transaction.objectStore(this.storeName);
+            const transaction = this.db.transaction([this.stlStoreName], 'readwrite');
+            const store = transaction.objectStore(this.stlStoreName);
 
             const item = {
                 name,
@@ -75,8 +86,8 @@ export class StorageManager {
         if (!this.db) await this.init();
 
         return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([this.storeName], 'readwrite');
-            const store = transaction.objectStore(this.storeName);
+            const transaction = this.db.transaction([this.stlStoreName], 'readwrite');
+            const store = transaction.objectStore(this.stlStoreName);
 
             const getRequest = store.get(id);
 
@@ -100,12 +111,12 @@ export class StorageManager {
      * @param {number} limit 
      * @returns {Promise<Array>}
      */
-    async getRecentFiles(limit = 5) {
+    async getRecentFiles(limit = 10) {
         if (!this.db) await this.init();
 
         return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([this.storeName], 'readonly');
-            const store = transaction.objectStore(this.storeName);
+            const transaction = this.db.transaction([this.stlStoreName], 'readonly');
+            const store = transaction.objectStore(this.stlStoreName);
             const index = store.index('lastUsed');
             
             const results = [];
@@ -134,8 +145,8 @@ export class StorageManager {
         if (!this.db) await this.init();
 
         return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([this.storeName], 'readonly');
-            const store = transaction.objectStore(this.storeName);
+            const transaction = this.db.transaction([this.stlStoreName], 'readonly');
+            const store = transaction.objectStore(this.stlStoreName);
             const request = store.getAll();
 
             request.onsuccess = () => resolve(request.result);
@@ -152,8 +163,8 @@ export class StorageManager {
         if (!this.db) await this.init();
 
         return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([this.storeName], 'readonly');
-            const store = transaction.objectStore(this.storeName);
+            const transaction = this.db.transaction([this.stlStoreName], 'readonly');
+            const store = transaction.objectStore(this.stlStoreName);
             const request = store.get(id);
 
             request.onsuccess = () => resolve(request.result);
@@ -169,12 +180,125 @@ export class StorageManager {
         if (!this.db) await this.init();
 
         return new Promise((resolve, reject) => {
-            const transaction = this.db.transaction([this.storeName], 'readwrite');
-            const store = transaction.objectStore(this.storeName);
+            const transaction = this.db.transaction([this.stlStoreName], 'readwrite');
+            const store = transaction.objectStore(this.stlStoreName);
             const request = store.delete(id);
 
             request.onsuccess = () => resolve();
             request.onerror = () => reject(new Error(`Error deleting file: ${request.error}`));
+        });
+    }
+
+    /**
+     * Update a file in storage (replace all fields)
+     * @param {number} id 
+     * @param {Object} fileData - Updated file data
+     */
+    async updateFile(id, fileData) {
+        if (!this.db) await this.init();
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.stlStoreName], 'readwrite');
+            const store = transaction.objectStore(this.stlStoreName);
+            
+            // Ensure id is preserved
+            fileData.id = id;
+            
+            const request = store.put(fileData);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(new Error(`Error updating file: ${request.error}`));
+        });
+    }
+
+    // ============================================
+    // CALCULATION HISTORY METHODS
+    // ============================================
+
+    /**
+     * Save a calculation to history
+     * @param {Object} calculation - Calculation data
+     * @returns {Promise<number>} ID of the saved calculation
+     */
+    async saveCalculation(calculation) {
+        if (!this.db) await this.init();
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.historyStoreName], 'readwrite');
+            const store = transaction.objectStore(this.historyStoreName);
+
+            const item = {
+                ...calculation,
+                timestamp: Date.now()
+            };
+
+            const request = store.add(item);
+
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(new Error(`Error saving calculation: ${request.error}`));
+        });
+    }
+
+    /**
+     * Get calculation history, most recent first
+     * @param {number} limit - Max number of results
+     * @returns {Promise<Array>}
+     */
+    async getCalculationHistory(limit = 50) {
+        if (!this.db) await this.init();
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.historyStoreName], 'readonly');
+            const store = transaction.objectStore(this.historyStoreName);
+            const index = store.index('timestamp');
+            
+            const results = [];
+            const request = index.openCursor(null, 'prev'); // Most recent first
+
+            request.onsuccess = (event) => {
+                const cursor = event.target.result;
+                if (cursor && results.length < limit) {
+                    results.push(cursor.value);
+                    cursor.continue();
+                } else {
+                    resolve(results);
+                }
+            };
+
+            request.onerror = () => reject(new Error(`Error listing history: ${request.error}`));
+        });
+    }
+
+    /**
+     * Delete a calculation from history
+     * @param {number} id 
+     */
+    async deleteCalculation(id) {
+        if (!this.db) await this.init();
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.historyStoreName], 'readwrite');
+            const store = transaction.objectStore(this.historyStoreName);
+            const request = store.delete(id);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(new Error(`Error deleting calculation: ${request.error}`));
+        });
+    }
+
+    /**
+     * Clear all calculation history
+     */
+    async clearHistory() {
+        if (!this.db) await this.init();
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction([this.historyStoreName], 'readwrite');
+            const store = transaction.objectStore(this.historyStoreName);
+            const request = store.clear();
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(new Error(`Error clearing history: ${request.error}`));
         });
     }
 }

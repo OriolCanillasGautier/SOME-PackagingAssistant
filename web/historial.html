@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="ca">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📋 Historial de Càlculs - PackAssist</title>
+    <link rel="stylesheet" href="css/styles.css">
+    <link rel="stylesheet" href="css/styles-history.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-content">
+                <h1>📋 Historial de Càlculs</h1>
+                <p>Consulta i gestiona els teus càlculs anteriors</p>
+                <nav class="header-nav">
+                    <a href="index.html" class="nav-link">📦 Calculadora</a>
+                </nav>
+            </div>
+        </header>
+
+        <main class="main-content history-page">
+            <!-- Controls -->
+            <div class="history-controls">
+                <div class="history-stats" id="history-stats">
+                    <span>📊 Carregant estadístiques...</span>
+                </div>
+                <div class="history-actions">
+                    <button id="export-btn" class="btn-secondary" title="Exportar historial a CSV">
+                        📥 Exportar CSV
+                    </button>
+                    <button id="clear-btn" class="btn-danger" title="Esborrar tot l'historial">
+                        🗑️ Esborrar Tot
+                    </button>
+                </div>
+            </div>
+
+            <!-- Filters -->
+            <div class="history-filters">
+                <div class="filter-group">
+                    <label for="filter-mode">Mode:</label>
+                    <select id="filter-mode">
+                        <option value="all">Tots</option>
+                        <option value="optimized">🎯 Optimitzat</option>
+                        <option value="bulk">🌊 A Granel</option>
+                    </select>
+                </div>
+                <div class="filter-group">
+                    <label for="filter-date">Data:</label>
+                    <select id="filter-date">
+                        <option value="all">Totes</option>
+                        <option value="today">Avui</option>
+                        <option value="week">Última setmana</option>
+                        <option value="month">Últim mes</option>
+                    </select>
+                </div>
+                <div class="filter-group search-group">
+                    <label for="filter-search">Cerca:</label>
+                    <input type="text" id="filter-search" placeholder="Nom d'STL...">
+                </div>
+            </div>
+
+            <!-- History Table -->
+            <div class="history-table-container">
+                <table class="history-table" id="history-table">
+                    <thead>
+                        <tr>
+                            <th>📅 Data</th>
+                            <th>🔧 Mode</th>
+                            <th>📦 Peça (mm)</th>
+                            <th>📋 Caixa (mm)</th>
+                            <th>🔢 Peces</th>
+                            <th>⚖️ Pes</th>
+                            <th>📁 STL</th>
+                            <th>⚙️</th>
+                        </tr>
+                    </thead>
+                    <tbody id="history-body">
+                        <tr>
+                            <td colspan="8" class="loading-cell">
+                                <span class="loading">Carregant historial...</span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Empty State -->
+            <div class="history-empty" id="history-empty" style="display: none;">
+                <div class="empty-icon">📋</div>
+                <h2>Cap càlcul guardat</h2>
+                <p>Quan facis un càlcul a la calculadora, apareixerà aquí automàticament.</p>
+                <a href="index.html" class="btn-primary">Anar a la Calculadora</a>
+            </div>
+        </main>
+
+        <!-- Detail Modal -->
+        <div id="detail-modal" class="modal" style="display: none;">
+            <div class="modal-content modal-large">
+                <div class="modal-header">
+                    <h2>📊 Detalls del Càlcul</h2>
+                    <button id="modal-close" class="modal-close">×</button>
+                </div>
+                <div class="modal-body" id="modal-body">
+                    <!-- Content will be injected -->
+                </div>
+                <div class="modal-footer">
+                    <button id="modal-load" class="btn-primary">📥 Carregar Dades</button>
+                    <button id="modal-cancel" class="btn-secondary">Tancar</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <p>PackAssist — Oriol Canillas & SOME © 2025</p>
+        </footer>
+    </div>
+
+    <!-- History Script -->
+    <script type="module" src="js/history.js"></script>
+</body>
+</html>

@@ -1,102 +1,19 @@
 /**
  * PackAssist Web - Packing Calculator
  * Port of packing_core.py to JavaScript
- * Improved with density factor, better 3D bin packing, and physics-based optimization
  */
 
 export const DEFAULT_SAFETY_FACTOR = 1.0;
-export const DEFAULT_DENSITY_FACTOR = 1.0; // 1.0 = tight, 1.2 = loose
 
 /**
- * Orientation definitions with rotation info
+ * Find the best distribution limited by weight, prioritizing fewer stacking layers
+ * @param {number} maxL - Max pieces in length direction
+ * @param {number} maxW - Max pieces in width direction
+ * @param {number} maxH - Max pieces in height direction
+ * @param {number} targetUnits - Maximum units allowed by weight
+ * @returns {Object|null} Best distribution {l, w, h, units}
  */
-export const ORIENTATIONS = [
-    { name: 'Original (L×W×H)', permutation: [0, 1, 2], rotation: { x: 0, y: 0, z: 0 } },
-    { name: 'Rotació Y (L×H×W)', permutation: [0, 2, 1], rotation: { x: Math.PI / 2, y: 0, z: 0 } },
-    { name: 'Rotació Z (W×L×H)', permutation: [1, 0, 2], rotation: { x: 0, y: Math.PI / 2, z: 0 } },
-    { name: 'Rotació XY (W×H×L)', permutation: [1, 2, 0], rotation: { x: Math.PI / 2, y: Math.PI / 2, z: 0 } },
-    { name: 'Rotació XZ (H×L×W)', permutation: [2, 0, 1], rotation: { x: 0, y: 0, z: Math.PI / 2 } },
-    { name: 'Rotació YZ (H×W×L)', permutation: [2, 1, 0], rotation: { x: 0, y: 0, z: -Math.PI / 2 } },
-];
-
-/**
- * Get oriented dimensions from original dims and orientation index
- */
-export function getOrientedDimensions(originalDims, orientationIndex) {
-    const perm = ORIENTATIONS[orientationIndex].permutation;
-    return [originalDims[perm[0]], originalDims[perm[1]], originalDims[perm[2]]];
-}
-
-/**
- * Optimized 3D bin packing using guillotine algorithm
- * @param {number} boxL - Box length
- * @param {number} boxW - Box width
- * @param {number} boxH - Box height
- * @param {number} pieceL - Piece length
- * @param {number} pieceW - Piece width
- * @param {number} pieceH - Piece height
- * @param {number} densityFactor - 1.0 = tight, >1.0 = looser
- * @returns {Object} Best packing {nx, ny, nz, units}
- */
-export function optimizePacking3D(boxL, boxW, boxH, pieceL, pieceW, pieceH, densityFactor = 1.0) {
-    // Aplicar factor de densitat (afegir espai entre peces)
-    const adjustedL = pieceL * densityFactor;
-    const adjustedW = pieceW * densityFactor;
-    const adjustedH = pieceH * densityFactor;
-    
-    // Provar totes les permutacions de orientació
-    const orientations = [
-        { dims: [pieceL, pieceW, pieceH], name: 'Original' },
-        { dims: [pieceL, pieceH, pieceW], name: 'Rot-Y' },
-        { dims: [pieceW, pieceL, pieceH], name: 'Rot-Z' },
-        { dims: [pieceW, pieceH, pieceL], name: 'Rot-XY' },
-        { dims: [pieceH, pieceL, pieceW], name: 'Rot-XZ' },
-        { dims: [pieceH, pieceW, pieceL], name: 'Rot-YZ' }
-    ];
-    
-    let bestConfig = null;
-    let bestUnits = 0;
-    
-    for (const orientation of orientations) {
-        const [l, w, h] = orientation.dims;
-        
-        // Calcular fit amb factor de densitat
-        const fitX = l > 0 ? Math.floor(boxL / (l * densityFactor)) : 0;
-        const fitY = w > 0 ? Math.floor(boxW / (w * densityFactor)) : 0;
-        const fitZ = h > 0 ? Math.floor(boxH / (h * densityFactor)) : 0;
-        
-        const units = fitX * fitY * fitZ;
-        
-        // Preferir distribucions més equilibrades (squarer)
-        const variance = Math.pow(fitX - fitY, 2) + Math.pow(fitY - fitZ, 2);
-        const score = units - (variance * 0.001);
-        
-        if (units > bestUnits || (units === bestUnits && score > (bestConfig?.score || 0))) {
-            bestUnits = units;
-            bestConfig = {
-                nx: fitX,
-                ny: fitY,
-                nz: fitZ,
-                units,
-                score,
-                dims: [l, w, h],
-                name: orientation.name
-            };
-        }
-    }
-    
-    return bestConfig || { nx: 0, ny: 0, nz: 0, units: 0 };
-}
-
-/**
- * Optimize distribution by weight when geometry exceeds capacity
- * @param {number} maxL - Max in L direction
- * @param {number} maxW - Max in W direction  
- * @param {number} maxH - Max in H direction
- * @param {number} targetUnits - Max units by weight
- * @returns {Object} Optimized {l, w, h, units}
- */
-function optimizeByWeight(maxL, maxW, maxH, targetUnits) {
+export function optimizeByWeight(maxL, maxW, maxH, targetUnits) {
     let bestDist = null;
     let bestScore = -Infinity;
 
@@ -252,7 +169,6 @@ function createSummary(theoretical, real, config, safety, allOrientations) {
  * @param {number} params.maxWeight - Max box weight (kg)
  * @param {boolean} params.allowRotation - Allow 6 orientations
  * @param {number} params.safetyFactor - Safety factor (0.5-1.0)
- * @param {number} params.densityFactor - Density factor (1.0=tight, 1.2=loose)
  * @returns {Object} {summary: string, data: Object}
  */
 export function calcularEmpaquetatge(params) {
@@ -261,7 +177,7 @@ export function calcularEmpaquetatge(params) {
         boxL, boxW, boxH, maxWeight,
         allowRotation = true,
         safetyFactor = DEFAULT_SAFETY_FACTOR,
-        densityFactor = DEFAULT_DENSITY_FACTOR
+        packingGap = 0 // Separació entre peces en mm (0 = sense gap)
     } = params;
 
     // Validation
@@ -315,10 +231,10 @@ export function calcularEmpaquetatge(params) {
     for (let i = 0; i < orientations.length; i++) {
         const [ol, ow, oh] = orientations[i];
         
-        // Calculate how many fit in each direction, applying density factor
-        const fitL = ol > 0 ? Math.floor(boxDims[0] / (ol * densityFactor)) : 0;
-        const fitW = ow > 0 ? Math.floor(boxDims[1] / (ow * densityFactor)) : 0;
-        const fitH = oh > 0 ? Math.floor(boxDims[2] / (oh * densityFactor)) : 0;
+        // Calculate how many fit in each direction (amb gap entre peces)
+        const fitL = (ol + packingGap) <= boxDims[0] ? Math.floor(boxDims[0] / (ol + packingGap)) : 0;
+        const fitW = (ow + packingGap) <= boxDims[1] ? Math.floor(boxDims[1] / (ow + packingGap)) : 0;
+        const fitH = (oh + packingGap) <= boxDims[2] ? Math.floor(boxDims[2] / (oh + packingGap)) : 0;
 
         const totalUnits = fitL * fitW * fitH;
         const totalWeight = totalUnits * objWeight;
@@ -393,6 +309,7 @@ export function calcularEmpaquetatge(params) {
             realUnits: realFit,
             bestOrientation: bestConfig,
             allOrientations,
+            packingGap: packingGap,
         }
     };
 }
@@ -420,434 +337,4 @@ export function getPieceDimensions(data) {
         return [0, 0, 0];
     }
     return [...data.bestOrientation.dimensions];
-}
-
-/**
- * ADVANCED PACKING with stability-filtered orientations
- * Calculates optimal packing using only stable orientations
- * and supports multiple orientations within each layer for better space usage
- */
-export function calcularEmpaquetamentAvancat(params) {
-    const {
-        objL, objW, objH, objWeight,
-        boxL, boxW, boxH, maxWeight,
-        stableOrientations = [], // Array of stable orientation indices
-        safetyFactor = DEFAULT_SAFETY_FACTOR,
-        densityFactor = DEFAULT_DENSITY_FACTOR
-    } = params;
-
-    // Validation
-    if ([objL, objW, objH, objWeight, boxL, boxW, boxH, maxWeight].some(v => v <= 0)) {
-        return {
-            summary: '<p>❌ Tots els valors han de ser majors que 0.</p>',
-            data: null
-        };
-    }
-
-    const objDims = [objL, objW, objH];
-    const boxDims = [boxL, boxW, boxH];
-
-    // Filter orientations to only stable ones (or use all if no stability test done)
-    const orientationsToUse = stableOrientations.length > 0
-        ? ORIENTATIONS.filter((_, i) => stableOrientations.includes(i))
-        : ORIENTATIONS;
-
-    const maxUnits = Math.floor(maxWeight / objWeight);
-    
-    // Try different strategies and pick the best
-    const strategies = [
-        packWithSingleOrientation(objDims, boxDims, orientationsToUse, densityFactor, maxUnits),
-        packWithMixedOrientationsPerLayer(objDims, boxDims, orientationsToUse, densityFactor, maxUnits),
-        packWithInterleavedOrientations(objDims, boxDims, orientationsToUse, densityFactor, maxUnits)
-    ];
-    
-    // Pick the best strategy (most units)
-    let best = strategies[0];
-    for (const s of strategies) {
-        if (s.totalUnits > best.totalUnits) {
-            best = s;
-        }
-    }
-
-    const { layerPlan, fillerPieces, totalUnits: theoreticalUnits } = best;
-
-    // Apply safety factor
-    const safety = Math.max(0.0, Math.min(1.0, safetyFactor));
-    const realUnits = Math.max(1, Math.floor(theoreticalUnits * safety));
-
-    // Generate summary
-    const summaryHtml = createAdvancedSummary(theoreticalUnits, realUnits, layerPlan, fillerPieces, safety);
-
-    return {
-        summary: summaryHtml,
-        data: {
-            theoreticalUnits,
-            realUnits,
-            layerPlan,
-            fillerPieces,
-            stableOrientationsUsed: orientationsToUse.map(o => o.name),
-            isMultiOrientation: new Set(layerPlan.map(l => l.orientation.name)).size > 1 || fillerPieces.length > 0
-        }
-    };
-}
-
-/**
- * Strategy 1: Single best orientation (original greedy approach)
- */
-function packWithSingleOrientation(objDims, boxDims, orientations, densityFactor, maxUnits) {
-    let totalUnits = 0;
-    const layerPlan = [];
-    let currentHeight = 0;
-
-    while (currentHeight < boxDims[2] && totalUnits < maxUnits) {
-        let bestLayerConfig = null;
-        let bestLayerUnits = 0;
-
-        for (const ori of orientations) {
-            const [ol, ow, oh] = getOrientedDimensions(objDims, ORIENTATIONS.indexOf(ori));
-            if (currentHeight + oh > boxDims[2]) continue;
-            
-            const fitX = Math.floor(boxDims[0] / (ol * densityFactor));
-            const fitY = Math.floor(boxDims[1] / (ow * densityFactor));
-            const layerUnits = fitX * fitY;
-            const allowedUnits = Math.min(layerUnits, maxUnits - totalUnits);
-            
-            if (allowedUnits > bestLayerUnits) {
-                bestLayerUnits = allowedUnits;
-                bestLayerConfig = {
-                    orientation: ori,
-                    dims: [ol, ow, oh],
-                    nx: fitX,
-                    ny: fitY,
-                    units: allowedUnits,
-                    startHeight: currentHeight,
-                    endHeight: currentHeight + oh,
-                    placements: generateGridPlacements(fitX, fitY, [ol, ow, oh], currentHeight, densityFactor, ori)
-                };
-            }
-        }
-
-        if (!bestLayerConfig || bestLayerUnits === 0) break;
-
-        layerPlan.push(bestLayerConfig);
-        totalUnits += bestLayerUnits;
-        currentHeight = bestLayerConfig.endHeight;
-    }
-
-    return { layerPlan, fillerPieces: [], totalUnits };
-}
-
-/**
- * Strategy 2: Mix orientations within each layer to fill gaps
- */
-function packWithMixedOrientationsPerLayer(objDims, boxDims, orientations, densityFactor, maxUnits) {
-    let totalUnits = 0;
-    const layerPlan = [];
-    let currentHeight = 0;
-
-    while (currentHeight < boxDims[2] && totalUnits < maxUnits) {
-        // Find all orientations that fit at this height
-        const fittingOrientations = [];
-        for (const ori of orientations) {
-            const [ol, ow, oh] = getOrientedDimensions(objDims, ORIENTATIONS.indexOf(ori));
-            if (currentHeight + oh <= boxDims[2]) {
-                fittingOrientations.push({ ori, dims: [ol, ow, oh] });
-            }
-        }
-
-        if (fittingOrientations.length === 0) break;
-
-        // Sort by height to group similar heights
-        fittingOrientations.sort((a, b) => a.dims[2] - b.dims[2]);
-
-        // Use the primary orientation for the main grid
-        const primary = fittingOrientations[0];
-        const [pl, pw, ph] = primary.dims;
-        const fitX = Math.floor(boxDims[0] / (pl * densityFactor));
-        const fitY = Math.floor(boxDims[1] / (pw * densityFactor));
-        const mainUnits = Math.min(fitX * fitY, maxUnits - totalUnits);
-
-        if (mainUnits === 0) break;
-
-        // Calculate remaining space in X direction
-        const usedX = fitX * pl * densityFactor;
-        const remainingX = boxDims[0] - usedX;
-        
-        // Calculate remaining space in Y direction
-        const usedY = fitY * pw * densityFactor;
-        const remainingY = boxDims[1] - usedY;
-
-        // Generate placements for main grid
-        const placements = generateGridPlacements(fitX, fitY, primary.dims, currentHeight, densityFactor, primary.ori);
-
-        // Try to fill gap in X direction with a different orientation
-        let gapUnitsX = 0;
-        for (const alt of fittingOrientations) {
-            if (alt.dims[2] !== ph) continue; // Must have same height
-            const [al, aw] = alt.dims;
-            if (al * densityFactor <= remainingX) {
-                const gapFitX = Math.floor(remainingX / (al * densityFactor));
-                const gapFitY = fitY;
-                gapUnitsX = Math.min(gapFitX * gapFitY, maxUnits - totalUnits - mainUnits);
-                
-                if (gapUnitsX > 0) {
-                    // Add gap placements
-                    for (let ix = 0; ix < gapFitX && placements.length < mainUnits + gapUnitsX; ix++) {
-                        for (let iy = 0; iy < gapFitY; iy++) {
-                            placements.push({
-                                x: usedX + ix * al * densityFactor + al / 2,
-                                y: currentHeight,
-                                z: iy * aw * densityFactor + aw / 2,
-                                orientation: alt.ori,
-                                dims: alt.dims
-                            });
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-
-        layerPlan.push({
-            orientation: primary.ori,
-            dims: primary.dims,
-            nx: fitX,
-            ny: fitY,
-            units: mainUnits + gapUnitsX,
-            startHeight: currentHeight,
-            endHeight: currentHeight + ph,
-            placements
-        });
-
-        totalUnits += mainUnits + gapUnitsX;
-        currentHeight += ph;
-    }
-
-    return { layerPlan, fillerPieces: [], totalUnits };
-}
-
-/**
- * Strategy 3: Interleaved orientations (alternating patterns)
- * Good for pieces where L and W are similar but H is different
- */
-function packWithInterleavedOrientations(objDims, boxDims, orientations, densityFactor, maxUnits) {
-    let totalUnits = 0;
-    const layerPlan = [];
-    let currentHeight = 0;
-
-    // Find pairs of complementary orientations (same footprint dimensions, different arrangement)
-    const pairs = [];
-    for (let i = 0; i < orientations.length; i++) {
-        const dims1 = getOrientedDimensions(objDims, ORIENTATIONS.indexOf(orientations[i]));
-        for (let j = i + 1; j < orientations.length; j++) {
-            const dims2 = getOrientedDimensions(objDims, ORIENTATIONS.indexOf(orientations[j]));
-            // Same height and complementary footprints
-            if (dims1[2] === dims2[2]) {
-                // Check if they can interleave
-                const combined1 = dims1[0] + dims2[0];
-                const combined2 = dims1[1] + dims2[1];
-                
-                if (combined1 <= boxDims[0] * 2 || combined2 <= boxDims[1] * 2) {
-                    pairs.push({
-                        ori1: orientations[i], dims1,
-                        ori2: orientations[j], dims2,
-                        height: dims1[2]
-                    });
-                }
-            }
-        }
-    }
-
-    // If no good pairs, fall back to single orientation
-    if (pairs.length === 0) {
-        return packWithSingleOrientation(objDims, boxDims, orientations, densityFactor, maxUnits);
-    }
-
-    // Try each pair and see which fits best
-    for (const pair of pairs) {
-        const testResult = tryInterleavedPair(pair, boxDims, densityFactor, maxUnits);
-        if (testResult.totalUnits > totalUnits) {
-            totalUnits = testResult.totalUnits;
-            layerPlan.length = 0;
-            layerPlan.push(...testResult.layers);
-        }
-    }
-
-    if (layerPlan.length === 0) {
-        return packWithSingleOrientation(objDims, boxDims, orientations, densityFactor, maxUnits);
-    }
-
-    return { layerPlan, fillerPieces: [], totalUnits };
-}
-
-function tryInterleavedPair(pair, boxDims, densityFactor, maxUnits) {
-    const { ori1, dims1, ori2, dims2, height } = pair;
-    const layers = [];
-    let total = 0;
-    let currentHeight = 0;
-
-    while (currentHeight + height <= boxDims[2] && total < maxUnits) {
-        // Try alternating rows with different orientations
-        const placements = [];
-        let rowY = 0;
-        let useFirst = true;
-
-        while (rowY + (useFirst ? dims1[1] : dims2[1]) <= boxDims[1]) {
-            const dims = useFirst ? dims1 : dims2;
-            const ori = useFirst ? ori1 : ori2;
-            const [l, w] = dims;
-            
-            const fitX = Math.floor(boxDims[0] / (l * densityFactor));
-            
-            for (let ix = 0; ix < fitX && total + placements.length < maxUnits; ix++) {
-                placements.push({
-                    x: ix * l * densityFactor + l / 2,
-                    y: currentHeight,
-                    z: rowY + w / 2,
-                    orientation: ori,
-                    dims: dims
-                });
-            }
-
-            rowY += w * densityFactor;
-            useFirst = !useFirst;
-        }
-
-        if (placements.length === 0) break;
-
-        layers.push({
-            orientation: ori1,
-            dims: dims1,
-            nx: Math.floor(boxDims[0] / (dims1[0] * densityFactor)),
-            ny: Math.floor(boxDims[1] / (dims1[1] * densityFactor)),
-            units: placements.length,
-            startHeight: currentHeight,
-            endHeight: currentHeight + height,
-            placements,
-            isInterleaved: true
-        });
-
-        total += placements.length;
-        currentHeight += height;
-    }
-
-    return { layers, totalUnits: total };
-}
-
-/**
- * Generate grid placements for a layer
- */
-function generateGridPlacements(nx, ny, dims, startHeight, densityFactor, orientation) {
-    const placements = [];
-    const [l, w, h] = dims;
-    
-    for (let ix = 0; ix < nx; ix++) {
-        for (let iy = 0; iy < ny; iy++) {
-            placements.push({
-                x: ix * l * densityFactor + l / 2,
-                y: startHeight,
-                z: iy * w * densityFactor + w / 2,
-                orientation,
-                dims
-            });
-        }
-    }
-    
-    return placements;
-}
-
-/**
- * Find empty spaces in the layer plan that could fit additional pieces
- */
-function findEmptySpacesInPlan(layerPlan, boxDims, objDims, orientations, densityFactor) {
-    const emptySpaces = [];
-    
-    for (const layer of layerPlan) {
-        const { nx, ny, dims, startHeight } = layer;
-        const usedWidth = nx * dims[0] * densityFactor;
-        const usedDepth = ny * dims[1] * densityFactor;
-        
-        // Space at the end of X direction
-        if (usedWidth < boxDims[0]) {
-            emptySpaces.push({
-                x: usedWidth,
-                y: startHeight,
-                z: 0,
-                width: boxDims[0] - usedWidth,
-                height: dims[2],
-                depth: boxDims[1]
-            });
-        }
-        
-        // Space at the end of Z direction
-        if (usedDepth < boxDims[1]) {
-            emptySpaces.push({
-                x: 0,
-                y: startHeight,
-                z: usedDepth,
-                width: usedWidth,
-                height: dims[2],
-                depth: boxDims[1] - usedDepth
-            });
-        }
-    }
-    
-    // Sort by volume (largest first)
-    emptySpaces.sort((a, b) => 
-        (b.width * b.height * b.depth) - (a.width * a.height * a.depth)
-    );
-    
-    return emptySpaces;
-}
-
-/**
- * Generate summary for advanced packing
- */
-function createAdvancedSummary(theoretical, real, layerPlan, fillerPieces, safety) {
-    const safetyPercent = Math.round(safety * 100);
-    const totalLayers = layerPlan.length;
-    const orientationsUsed = [...new Set(layerPlan.map(l => l.orientation.name))];
-    
-    let summary = `
-    <h1>📦 RESULTATS (Mode Avançat)</h1>
-    
-    <h2>🎯 Resultat Principal</h2>
-    <ul>
-        <li><strong>Unitats totals:</strong> ${theoretical} (${real} amb ${safetyPercent}% seguretat)</li>
-        <li><strong>Capes:</strong> ${totalLayers}</li>
-        <li><strong>Orientacions usades:</strong> ${orientationsUsed.join(', ')}</li>
-        ${fillerPieces.length > 0 ? `<li><strong>Peces omplidores:</strong> ${fillerPieces.length}</li>` : ''}
-    </ul>
-    
-    <h2>📊 Detall per Capa</h2>
-    <table>
-        <thead>
-            <tr><th>Capa</th><th>Orientació</th><th>Distribució</th><th>Unitats</th><th>Alçada</th></tr>
-        </thead>
-        <tbody>
-    `;
-    
-    for (let i = 0; i < layerPlan.length; i++) {
-        const layer = layerPlan[i];
-        summary += `
-            <tr>
-                <td>${i + 1}</td>
-                <td>${layer.orientation.name}</td>
-                <td>${layer.nx}×${layer.ny}</td>
-                <td>${layer.units}</td>
-                <td>${layer.startHeight.toFixed(1)} - ${layer.endHeight.toFixed(1)} mm</td>
-            </tr>
-        `;
-    }
-    
-    summary += '</tbody></table>';
-    
-    if (fillerPieces.length > 0) {
-        summary += `
-        <h2>🧩 Peces Omplidores</h2>
-        <p>${fillerPieces.length} peces addicionals col·locades en espais buits amb orientacions variades.</p>
-        `;
-    }
-    
-    return summary;
 }

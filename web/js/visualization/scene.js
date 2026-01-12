@@ -18,6 +18,31 @@ export class SceneManager {
         this.boxMesh = null;
         this.gridHelper = null;
         
+        // 20 distinct colors for pieces - matching physics-world.js
+        this.pieceColors = [
+            0x3b82f6, // Blue
+            0x10b981, // Green  
+            0xf59e0b, // Orange
+            0xef4444, // Red
+            0x8b5cf6, // Purple
+            0x06b6d4, // Cyan
+            0xec4899, // Pink
+            0x84cc16, // Lime
+            0xf97316, // Deep Orange
+            0x6366f1, // Indigo
+            0x14b8a6, // Teal
+            0xeab308, // Yellow
+            0xa855f7, // Violet
+            0x22c55e, // Emerald
+            0xe11d48, // Rose
+            0x0ea5e9, // Sky
+            0xd946ef, // Fuchsia
+            0x65a30d, // Green-600
+            0xdc2626, // Red-600
+            0x2563eb  // Blue-600
+        ];
+        this.colorCount = 10; // Default number of colors to use
+        
         this.init();
     }
 
@@ -166,415 +191,143 @@ export class SceneManager {
     }
 
     /**
-     * Prepara la geometria STL: centra i posa la base a Y=0
-     * NO aplica cap rotació - respecta l'orientació que vingui del calculador
+     * Add packed pieces as cuboids
+     * @param {Object} params
+     * @param {number} params.pieceL - Piece length
+     * @param {number} params.pieceW - Piece width  
+     * @param {number} params.pieceH - Piece height
+     * @param {number} params.nx - Number in X direction
+     * @param {number} params.ny - Number in Y direction
+     * @param {number} params.nz - Number in Z direction
+     * @param {number} params.maxDraw - Maximum pieces to draw
+     * @param {number} [params.packingGap=0] - Gap between pieces in mm
      */
-    orientGeometryToMatch(geometry, originalDims, optimalDims) {
-        // Només centrar i posar a Y=0, sense rotar
-        geometry.computeBoundingBox();
-        geometry.center();
-        geometry.computeBoundingBox();
-        geometry.translate(0, -geometry.boundingBox.min.y, 0);
-        
-        // Retornar dimensions reals de la geometria
-        geometry.computeBoundingBox();
-        const bbox = geometry.boundingBox;
-        return {
-            geometry,
-            dims: [
-                bbox.max.x - bbox.min.x,
-                bbox.max.y - bbox.min.y,
-                bbox.max.z - bbox.min.z
-            ]
-        };
-    }
-    
-    /**
-     * Orienta la geometria sense rotació específica, només centra i posa a Y=0
-     */
-    orientGeometryFlat(geometry) {
-        geometry.computeBoundingBox();
-        geometry.center();
-        geometry.computeBoundingBox();
-        geometry.translate(0, -geometry.boundingBox.min.y, 0);
-        
-        geometry.computeBoundingBox();
-        const bbox = geometry.boundingBox;
-        return {
-            geometry,
-            dims: [
-                bbox.max.x - bbox.min.x,
-                bbox.max.y - bbox.min.y,
-                bbox.max.z - bbox.min.z
-            ]
-        };
-    }
-
-    /**
-     * Aplica rotació a la geometria segons l'orientació del calculador
-     * El calculador permuta [L, W, H] en diferents ordres
-     * Hem de rotar la geometria per coincidir amb la permutació
-     * 
-     * STL original té: X=length, Y=height, Z=width
-     * Orientacions del calculador:
-     *   Original (L×W×H) -> Cap rotació
-     *   Rotació Y (L×H×W) -> W i H intercanviats -> Rotar X 90°
-     *   Rotació Z (W×L×H) -> L i W intercanviats -> Rotar Y 90°
-     *   Rotació XY (W×H×L) -> W→L, H→W, L→H -> Rotar Y 90° + X 90°
-     *   Rotació XZ (H×L×W) -> H→L, L→W, W→H -> Rotar Z 90° 
-     *   Rotació YZ (H×W×L) -> H→L -> Rotar Z -90°
-     */
-    applyOrientationRotation(geometry, orientationName, originalDims) {
-        const rotMatrix = new THREE.Matrix4();
-        
-        // Netejar el nom de possibles sufixos
-        const cleanName = orientationName.split(' (')[0].trim();
-        
-        console.log(`📐 Aplicant rotació per: "${cleanName}"`);
-        
-        switch(cleanName) {
-            case 'Original':
-            case 'Sense rotació':
-                // Cap rotació
-                break;
-                
-            case 'Rotació Y':
-                // L×H×W: W i H intercanviats
-                // Rotar 90° al voltant de X per posar W a Y i H a Z
-                rotMatrix.makeRotationX(Math.PI / 2);
-                geometry.applyMatrix4(rotMatrix);
-                break;
-                
-            case 'Rotació Z':
-                // W×L×H: L i W intercanviats
-                // Rotar 90° al voltant de Y per intercanviar X i Z
-                rotMatrix.makeRotationY(Math.PI / 2);
-                geometry.applyMatrix4(rotMatrix);
-                break;
-                
-            case 'Rotació XY':
-                // W×H×L: W→X, H→Y, L→Z
-                // Rotar 90° Y després 90° X
-                rotMatrix.makeRotationY(Math.PI / 2);
-                geometry.applyMatrix4(rotMatrix);
-                rotMatrix.makeRotationX(Math.PI / 2);
-                geometry.applyMatrix4(rotMatrix);
-                break;
-                
-            case 'Rotació XZ':
-                // H×L×W: H→X, L→Y, W→Z
-                // Rotar 90° al voltant de Z
-                rotMatrix.makeRotationZ(Math.PI / 2);
-                geometry.applyMatrix4(rotMatrix);
-                break;
-                
-            case 'Rotació YZ':
-                // H×W×L: H→X, W→Y, L→Z
-                // Rotar -90° al voltant de Z
-                rotMatrix.makeRotationZ(-Math.PI / 2);
-                geometry.applyMatrix4(rotMatrix);
-                break;
-                
-            default:
-                console.warn(`⚠️ Orientació desconeguda: ${orientationName}`);
-        }
-        
-        // Centrar després de la rotació
-        geometry.center();
-    }
-
-    /**
-     * Add packed pieces in organized grid layout
-     * MODE OPTIMITZAT: Col·loca peces STL en graella ordenada
-     * SIMPLE: Agafem l'STL tal qual (com al mode gravetat) i el posicionem en graella
-     */
-    addPackedPieces({ pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, stlGeometry = null, addSeparators = false, separatorThickness = 2, originalDims = null, optimalDims = null, orientationName = 'Original', densityFactor = 1.0, boxDims = null }) {
+    addPackedPieces({ pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0, colorCount = null }) {
         this.clearPieces();
-
-        // COLORS MOLT VIUS! 🎨
-        const pieceColors = [
-            0xFF6B6B, 0x4ECDC4, 0xFFE66D, 0x95E1D3, 0xF38181,
-            0xAA96DA, 0xFCBAD3, 0xA8D8EA, 0xFF9F43, 0x6C5CE7,
-            0x00CEC9, 0xFD79A8, 0x55EFC4, 0x74B9FF, 0xE17055,
-            0x81ECEC, 0xFAB1A0, 0xA29BFE, 0x00B894, 0xFDCB6E
-        ];
-
-        let geometry;
-        // Dimensions for spacing - will be updated after STL rotation
-        let spacingX, spacingZ, spacingY;
         
-        if (stlGeometry) {
-            geometry = stlGeometry.clone();
-            geometry.computeVertexNormals();
-            geometry.center();
-            geometry.computeBoundingBox();
-            
-            // Get original STL dimensions
-            let bbox = geometry.boundingBox;
-            const stlX = bbox.max.x - bbox.min.x;
-            const stlY = bbox.max.y - bbox.min.y;
-            const stlZ = bbox.max.z - bbox.min.z;
-            
-            console.log(`📦 Original STL: ${stlX.toFixed(1)} x ${stlY.toFixed(1)} x ${stlZ.toFixed(1)}`);
-            console.log(`📦 Target dims (L×W×H): ${pieceL.toFixed(1)} x ${pieceW.toFixed(1)} x ${pieceH.toFixed(1)}`);
-            console.log(`📦 Orientation: ${orientationName}`);
-            
-            // Map orientation name to the rotation defined in ORIENTATIONS
-            // Original STL assumes: X=length, Y=height, Z=width (Three.js convention)
-            // The rotations will permute these to match the calculator's expected orientation
-            const orientationRotations = {
-                'Original (L×W×H)': { x: 0, y: 0, z: 0 },
-                'Rotació Y (L×H×W)': { x: Math.PI / 2, y: 0, z: 0 },
-                'Rotació Z (W×L×H)': { x: 0, y: 0, z: Math.PI / 2 },
-                'Rotació XY (W×H×L)': { x: Math.PI / 2, y: 0, z: Math.PI / 2 },
-                'Rotació XZ (H×L×W)': { x: 0, y: Math.PI / 2, z: 0 },
-                'Rotació YZ (H×W×L)': { x: 0, y: Math.PI / 2, z: Math.PI / 2 },
-            };
-            
-            // Find matching rotation
-            let rot = { x: 0, y: 0, z: 0 };
-            for (const [name, r] of Object.entries(orientationRotations)) {
-                if (orientationName.includes(name) || name.includes(orientationName.split(' ')[0])) {
-                    rot = r;
-                    break;
-                }
-            }
-            
-            // Apply rotation
-            if (rot.x !== 0) geometry.rotateX(rot.x);
-            if (rot.y !== 0) geometry.rotateY(rot.y);
-            if (rot.z !== 0) geometry.rotateZ(rot.z);
-            
-            console.log(`📦 Applied rotation: X=${(rot.x * 180/Math.PI).toFixed(0)}°, Y=${(rot.y * 180/Math.PI).toFixed(0)}°, Z=${(rot.z * 180/Math.PI).toFixed(0)}°`);
-            
-            // Recompute bounding box after rotation
-            geometry.computeBoundingBox();
-            bbox = geometry.boundingBox;
-            
-            const newX = bbox.max.x - bbox.min.x;
-            const newY = bbox.max.y - bbox.min.y;
-            const newZ = bbox.max.z - bbox.min.z;
-            
-            console.log(`📦 After rotation: ${newX.toFixed(1)} x ${newY.toFixed(1)} x ${newZ.toFixed(1)}`);
-            
-            // Move geometry so its CORNER is at origin (not center!)
-            // This way when we position at (x, y, z), the piece occupies from there to (x+w, y+h, z+d)
-            geometry.translate(-bbox.min.x, -bbox.min.y, -bbox.min.z);
-            
-            // USE ACTUAL STL DIMENSIONS after rotation for spacing!
-            spacingX = newX * densityFactor;
-            spacingZ = newZ * densityFactor;
-            spacingY = newY;
-            
-            console.log(`📦 Spacing from STL: X=${spacingX.toFixed(1)}, Y=${spacingY.toFixed(1)}, Z=${spacingZ.toFixed(1)}`);
-            
-        } else {
-            // Simple box geometry - use pieceL/W/H
-            spacingX = pieceL * densityFactor;
-            spacingZ = pieceW * densityFactor;
-            spacingY = pieceH;
-            
-            geometry = new THREE.BoxGeometry(pieceL, pieceH, pieceW);
-            geometry.translate(0, pieceH / 2, 0);
-        }
+        // Use provided colorCount or default
+        const numColors = colorCount || this.colorCount;
 
-        // Add gaps if separators
-        const gapX = addSeparators ? separatorThickness : 0;
-        const gapZ = addSeparators ? separatorThickness : 0;
-        const gapY = addSeparators ? separatorThickness : 0;
-        
-        spacingX += gapX;
-        spacingZ += gapZ;
-        spacingY += gapY;
+        const geometry = new THREE.BoxGeometry(pieceL, pieceH, pieceW);
+        const material = new THREE.MeshPhongMaterial({
+            color: 0x3b82f6,
+            opacity: 0.85,
+            transparent: true,
+            flatShading: true
+        });
 
-        // 🔒 IMPORTANT: Recalculate nx/ny/nz based on ACTUAL box dimensions and STL spacing
-        // This ensures pieces NEVER exceed the box bounds
-        if (boxDims) {
-            const boxL = boxDims.l || boxDims.length;
-            const boxW = boxDims.w || boxDims.width;
-            const boxH = boxDims.h || boxDims.height;
-            
-            const maxNx = Math.floor(boxL / spacingX);
-            const maxNy = Math.floor(boxW / spacingZ);  // ny corresponds to Z (width)
-            const maxNz = Math.floor(boxH / spacingY);  // nz corresponds to Y (height)
-            
-            console.log(`📦 Box dims: L=${boxL}, W=${boxW}, H=${boxH}`);
-            console.log(`📦 Requested grid: ${nx}×${ny}×${nz}`);
-            console.log(`📦 Max fit in box: ${maxNx}×${maxNy}×${maxNz}`);
-            
-            // Limit to what actually fits
-            nx = Math.min(nx, maxNx);
-            ny = Math.min(ny, maxNy);
-            nz = Math.min(nz, maxNz);
-            
-            console.log(`📦 Adjusted grid: ${nx}×${ny}×${nz}`);
-        }
-
-        // Ensure at least 0 pieces if nothing fits
-        nx = Math.max(0, nx);
-        ny = Math.max(0, ny);
-        nz = Math.max(0, nz);
-        
-        if (nx === 0 || ny === 0 || nz === 0) {
-            console.warn('⚠️ No pieces fit in the box with current dimensions!');
-            return 0;
-        }
-
-        console.log(`Grid: ${nx} x ${ny} x ${nz} = ${nx*ny*nz} pieces`);
-        console.log(`Spacing: X=${spacingX.toFixed(1)}, Z=${spacingZ.toFixed(1)}, Y=${spacingY.toFixed(1)}`);
-
+        // Use instancing for performance
         const totalPieces = Math.min(nx * ny * nz, maxDraw);
+        const instancedMesh = new THREE.InstancedMesh(geometry, material, totalPieces);
+        instancedMesh.castShadow = true;
+        instancedMesh.receiveShadow = true;
+
+        const dummy = new THREE.Object3D();
         let index = 0;
 
-        // No offset needed - geometry corner is at origin
-        // nz = vertical layers (Y), ny = rows (Z), nx = columns (X)
         for (let iz = 0; iz < nz && index < totalPieces; iz++) {
             for (let iy = 0; iy < ny && index < totalPieces; iy++) {
                 for (let ix = 0; ix < nx && index < totalPieces; ix++) {
-                    const colorIndex = index % pieceColors.length;
-                    const material = new THREE.MeshPhongMaterial({
-                        color: pieceColors[colorIndex],
-                        flatShading: false,
-                        shininess: 80,
-                        side: THREE.DoubleSide
-                    });
-
-                    const mesh = new THREE.Mesh(geometry.clone(), material);
+                    // Position piece with gap spacing
+                    dummy.position.set(
+                        ix * (pieceL + packingGap) + pieceL / 2,
+                        iz * (pieceH + packingGap) + pieceH / 2,
+                        iy * (pieceW + packingGap) + pieceW / 2
+                    );
+                    dummy.updateMatrix();
+                    instancedMesh.setMatrixAt(index, dummy.matrix);
                     
-                    const posX = ix * spacingX;
-                    const posY = iz * spacingY;
-                    const posZ = iy * spacingZ;
-                    
-                    mesh.position.set(posX, posY, posZ);
-                    
-                    mesh.castShadow = true;
-                    mesh.receiveShadow = true;
-                    
-                    this.scene.add(mesh);
-                    this.pieces.push(mesh);
+                    // Use colors from pieceColors array
+                    const colorIndex = index % numColors;
+                    const color = new THREE.Color(this.pieceColors[colorIndex]);
+                    instancedMesh.setColorAt(index, color);
                     
                     index++;
                 }
             }
         }
-        
-        // Separadors horitzontals entre capes
-        if (addSeparators && separatorThickness > 0 && nz > 1) {
-            this.addHorizontalSeparators({
-                pieceL: spacingX - gapX, 
-                pieceW: spacingZ - gapZ,
-                nx, ny, nz,
-                separatorThickness,
-                spacingX, spacingZ, spacingY,
-                offsetX: 0, 
-                offsetZ: 0
-            });
+
+        instancedMesh.instanceMatrix.needsUpdate = true;
+        if (instancedMesh.instanceColor) {
+            instancedMesh.instanceColor.needsUpdate = true;
         }
 
-        console.log(`✅ Rendered ${index} pieces`);
-        return index;
+        this.scene.add(instancedMesh);
+        this.pieces.push(instancedMesh);
+
+        return totalPieces;
     }
-    
+
     /**
-     * Afegeix separadors horitzontals (cartons) entre capes
+     * Add packed STL pieces in a grid
+     * @param {Object} params
+     * @param {THREE.BufferGeometry} params.stlGeometry - STL geometry to instance
+     * @param {number} params.pieceL - Piece length
+     * @param {number} params.pieceW - Piece width  
+     * @param {number} params.pieceH - Piece height
+     * @param {number} params.nx - Number in X direction
+     * @param {number} params.ny - Number in Y direction
+     * @param {number} params.nz - Number in Z direction
+     * @param {number} [params.maxDraw=500] - Maximum pieces to draw
+     * @param {number} [params.packingGap=0] - Gap between pieces in mm
      */
-    addHorizontalSeparators({ pieceL, pieceW, nx, ny, nz, separatorThickness, spacingX, spacingZ, spacingY, offsetX = 0, offsetZ = 0 }) {
-        const cardboardColor = 0xD4A574;
-        const cardboardMaterial = new THREE.MeshPhongMaterial({
-            color: cardboardColor,
-            flatShading: true,
-            side: THREE.DoubleSide
+    addPackedSTLPieces({ stlGeometry, pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0, colorCount = null }) {
+        this.clearPieces();
+        
+        // Use provided colorCount or default
+        const numColors = colorCount || this.colorCount;
+
+        // Clone and prepare geometry
+        const geometry = stlGeometry.clone();
+        geometry.computeVertexNormals();
+
+        const material = new THREE.MeshPhongMaterial({
+            color: 0x3b82f6,
+            opacity: 0.85,
+            transparent: true,
+            flatShading: true
         });
-        
-        const totalWidth = nx * spacingX;
-        const totalDepth = ny * spacingZ;
-        
-        // Un separador horitzontal entre cada capa
-        for (let layer = 1; layer < nz; layer++) {
-            const separatorGeom = new THREE.BoxGeometry(
-                totalWidth,
-                separatorThickness,
-                totalDepth
-            );
-            const separator = new THREE.Mesh(separatorGeom, cardboardMaterial.clone());
-            separator.position.set(
-                offsetX + totalWidth / 2,
-                layer * spacingY - separatorThickness / 2,
-                offsetZ + totalDepth / 2
-            );
-            this.scene.add(separator);
-            this.pieces.push(separator);
-        }
-    }
-    
-    /**
-     * Add cardboard L-separators between pieces
-     */
-    addCardboardSeparators({ pieceL, pieceW, pieceH, nx, ny, nz, separatorThickness, spacingX, spacingY, spacingZ }) {
-        const cardboardColor = 0xC4A574; // Color cartró
-        const cardboardMaterial = new THREE.MeshPhongMaterial({
-            color: cardboardColor,
-            transparent: false,
-            flatShading: true,
-            side: THREE.DoubleSide
-        });
-        
-        // Vertical separators between columns (YZ plane)
-        for (let ix = 1; ix < nx; ix++) {
-            for (let iy = 0; iy < ny; iy++) {
-                const height = nz * spacingZ;
-                const separatorGeom = new THREE.BoxGeometry(
-                    separatorThickness,
-                    height,
-                    pieceW
-                );
-                const separator = new THREE.Mesh(separatorGeom, cardboardMaterial.clone());
-                separator.position.set(
-                    ix * spacingX - separatorThickness / 2,
-                    height / 2,
-                    iy * spacingY + pieceW / 2
-                );
-                this.scene.add(separator);
-                this.pieces.push(separator);
+
+        // Use instancing for performance
+        const totalPieces = Math.min(nx * ny * nz, maxDraw);
+        const instancedMesh = new THREE.InstancedMesh(geometry, material, totalPieces);
+        instancedMesh.castShadow = true;
+        instancedMesh.receiveShadow = true;
+
+        const dummy = new THREE.Object3D();
+        let index = 0;
+
+        for (let iz = 0; iz < nz && index < totalPieces; iz++) {
+            for (let iy = 0; iy < ny && index < totalPieces; iy++) {
+                for (let ix = 0; ix < nx && index < totalPieces; ix++) {
+                    // Position piece with gap spacing
+                    dummy.position.set(
+                        ix * (pieceL + packingGap) + pieceL / 2,
+                        iz * (pieceH + packingGap) + pieceH / 2,
+                        iy * (pieceW + packingGap) + pieceW / 2
+                    );
+                    dummy.updateMatrix();
+                    instancedMesh.setMatrixAt(index, dummy.matrix);
+                    
+                    // Use colors from pieceColors array
+                    const colorIndex = index % numColors;
+                    const color = new THREE.Color(this.pieceColors[colorIndex]);
+                    instancedMesh.setColorAt(index, color);
+                    
+                    index++;
+                }
             }
         }
-        
-        // Horizontal separators between rows (XZ plane)
-        for (let iy = 1; iy < ny; iy++) {
-            for (let ix = 0; ix < nx; ix++) {
-                const height = nz * spacingZ;
-                const separatorGeom = new THREE.BoxGeometry(
-                    pieceL,
-                    height,
-                    separatorThickness
-                );
-                const separator = new THREE.Mesh(separatorGeom, cardboardMaterial.clone());
-                separator.position.set(
-                    ix * spacingX + pieceL / 2,
-                    height / 2,
-                    iy * spacingY - separatorThickness / 2
-                );
-                this.scene.add(separator);
-                this.pieces.push(separator);
-            }
+
+        instancedMesh.instanceMatrix.needsUpdate = true;
+        if (instancedMesh.instanceColor) {
+            instancedMesh.instanceColor.needsUpdate = true;
         }
-        
-        // Horizontal layer separators (XY plane) between vertical layers
-        for (let iz = 1; iz < nz; iz++) {
-            const separatorGeom = new THREE.BoxGeometry(
-                nx * spacingX - separatorThickness,
-                separatorThickness,
-                ny * spacingY - separatorThickness
-            );
-            const separator = new THREE.Mesh(separatorGeom, cardboardMaterial.clone());
-            separator.position.set(
-                (nx * spacingX - separatorThickness) / 2,
-                iz * spacingZ - separatorThickness / 2,
-                (ny * spacingY - separatorThickness) / 2
-            );
-            this.scene.add(separator);
-            this.pieces.push(separator);
-        }
+
+        this.scene.add(instancedMesh);
+        this.pieces.push(instancedMesh);
+
+        return totalPieces;
     }
 
     /**

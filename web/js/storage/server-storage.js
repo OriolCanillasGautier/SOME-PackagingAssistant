@@ -6,7 +6,9 @@
 
 export class ServerStorage {
     constructor() {
-        this.basePath = '/library/';
+        // Server is configured to run on port 80
+        this.apiBase = 'http://localhost:80';
+        this.basePath = this.apiBase + '/library/';
     }
 
     /**
@@ -33,7 +35,7 @@ export class ServerStorage {
         formData.append('weight', weight.toString());
 
         try {
-            const response = await fetch('/api/upload', {
+            const response = await fetch(`${this.apiBase}/api/upload`, {
                 method: 'POST',
                 body: formData
             });
@@ -53,7 +55,7 @@ export class ServerStorage {
      */
     async getRecentFiles(limit = 100) {
         try {
-            const response = await fetch('/api/library');
+            const response = await fetch(`${this.apiBase}/api/library`);
             if (!response.ok) throw new Error('Failed to fetch library');
             
             const files = await response.json();
@@ -79,19 +81,32 @@ export class ServerStorage {
 
     /**
      * Get file data by ID (Filename)
+     * Since the server doesn't directly serve library files, we need to handle this differently
+     * For now, we'll return the metadata from the library list
      */
-    async getFile(filename) {
+    async getFile(id) {
         try {
-            const response = await fetch(`${this.basePath}${filename}`);
-            if (!response.ok) throw new Error('File not found on server');
-            
+            // Fetch the library to find the file metadata
+            const allFiles = await this.getAllFiles();
+            const file = allFiles.find(f => f.dbId === id || f.name === id);
+
+            if (!file) {
+                throw new Error('File not found');
+            }
+
+            // Fetch the actual file content from the server
+            // The server serves files from the web directory, so library files are at /library/filename.stl
+            const response = await fetch(`${this.apiBase}/library/${file.name}`);
+            if (!response.ok) {
+                throw new Error(`Failed to download file: ${response.statusText}`);
+            }
+
             const buffer = await response.arrayBuffer();
-            
-            // Retrieve metadata from list (optional, might need caching if critical)
-            // For now, return basic structure with data
             return {
                 data: buffer,
-                name: filename
+                name: file.name,
+                dimensions: file.dimensions,
+                weight: file.weight
             };
         } catch (error) {
             console.error('Download error:', error);
@@ -111,8 +126,17 @@ export class ServerStorage {
      * Delete file (Not implemented in basic server yet)
      */
     async deleteFile(id) {
-        console.warn('Delete not implemented on server yet');
-        return Promise.resolve();
+        try {
+            const response = await fetch(`${this.apiBase}/api/delete?id=${id}`, {
+                method: 'DELETE'
+            });
+            
+            if (!response.ok) throw new Error('Delete failed');
+            return;
+        } catch (error) {
+            console.error('Delete error:', error);
+            throw error;
+        }
     }
     
     async getAllFiles() {
