@@ -176,10 +176,11 @@ export function extractDimensions(geometry) {
     const size = new THREE.Vector3();
     box.getSize(size);
     
+    // Three.js convention: X = length, Z = width (depth), Y = height (vertical)
     return {
         length: size.x,
-        width: size.y,
-        height: size.z
+        width: size.z,
+        height: size.y
     };
 }
 
@@ -192,12 +193,11 @@ export function centerToOrigin(geometry) {
     geometry.computeBoundingBox();
     const box = geometry.boundingBox;
     
-    // Move min corner to origin
-    const offset = new THREE.Vector3();
-    box.getCenter(offset);
-    offset.sub(box.min);
+    // Move center to origin
+    const center = new THREE.Vector3();
+    box.getCenter(center);
     
-    geometry.translate(-box.min.x, -box.min.y, -box.min.z);
+    geometry.translate(-center.x, -center.y, -center.z);
     geometry.computeBoundingBox();
     
     return geometry;
@@ -307,9 +307,11 @@ export function applyPermutation(geometry, perm) {
     geometry.setAttribute('position', new THREE.BufferAttribute(newPositions, 3));
     geometry.computeBoundingBox();
     
-    // Re-anchor to origin
-    const min = geometry.boundingBox.min;
-    geometry.translate(-min.x, -min.y, -min.z);
+    // Re-anchor to origin (center)
+    geometry.computeBoundingBox();
+    const center = new THREE.Vector3();
+    geometry.boundingBox.getCenter(center);
+    geometry.translate(-center.x, -center.y, -center.z);
     
     return geometry;
 }

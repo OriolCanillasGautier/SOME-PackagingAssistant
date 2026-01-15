@@ -47,16 +47,27 @@ export class PhysicsWorld {
         
         // Solver iterations for more accurate collision (reduces interpenetration)
         // Higher values = less interpenetration but slower
-        this.numSolverIterations = 16;
-        this.numAdditionalFrictionIterations = 8;
-        this.numVelocitySolverIterations = 8;
+        // Solver iterations for more accurate collision (reduces interpenetration)
+        // Higher values = less interpenetration but slower
+        this.numSolverIterations = 64; // Increased from 16 for stability
+        this.numAdditionalFrictionIterations = 32; // Increased from 8
+        this.numVelocitySolverIterations = 32; // Increased from 8
         
         // Vibration settings
         this.isVibrating = false;
         this.vibrationTime = 0;
         this.vibrationDuration = 5000; // 5 seconds of vibration
-        this.vibrationFrequency = 25; // Hz
-        this.vibrationAmplitude = 8; // mm - increased for better settling
+        this.vibrationFrequency = 20; // Hz - reduced from 25
+        this.vibrationAmplitude = 4.5; // mm - increased to intermediate value (2 was too weak, 8 too strong)
+
+        
+        // Lid Press settings
+        this.lidBody = null;
+        this.lidState = 'idle'; // idle, descending, holding, ascending, finished
+        this.lidTargetY = 0;
+        this.lidStartTime = 0;
+        this.lidHoldTime = 0;
+        this.onLidFinished = null;
     }
 
     /**
@@ -154,7 +165,7 @@ export class PhysicsWorld {
         const body = this.world.createRigidBody(bodyDesc);
         
         const colliderDesc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
-            .setFriction(0.6)
+            .setFriction(0.8) // Increased friction
             .setRestitution(0.05)
             .setContactForceEventThreshold(0.1);
         this.world.createCollider(colliderDesc, body);
@@ -259,8 +270,8 @@ export class PhysicsWorld {
         // Create dynamic rigid body
         const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
             .setTranslation(position.x, position.y, position.z)
-            .setLinearDamping(0.1)
-            .setAngularDamping(0.3)
+            .setLinearDamping(0.5) // Increased damping for stability
+            .setAngularDamping(0.8) // Increased angular damping
             .setCcdEnabled(true); // Continuous collision detection
         
         // Apply rotation if provided
@@ -272,11 +283,11 @@ export class PhysicsWorld {
         const body = this.world.createRigidBody(bodyDesc);
         
         // Create cuboid collider (half-extents)
-        // Use slightly smaller collider (0.95 scale) to prevent interpenetration
-        const colliderDesc = RAPIER.ColliderDesc.cuboid(l / 2 * 0.95, h / 2 * 0.95, w / 2 * 0.95)
+        // Use nearly exact collider (0.999 scale) for accurate physics
+        const colliderDesc = RAPIER.ColliderDesc.cuboid(l / 2 * 0.999, h / 2 * 0.999, w / 2 * 0.999)
             .setDensity(2.0) // Moderate density
-            .setFriction(0.5) // Higher friction for better stacking
-            .setRestitution(0.01) // Almost no bounce
+            .setFriction(0.8) // High friction for stable stacking
+            .setRestitution(0.0) // No bounce
             .setContactForceEventThreshold(0.01);
         
         this.world.createCollider(colliderDesc, body);
@@ -296,8 +307,8 @@ export class PhysicsWorld {
     addConvexHull(vertices, position, rotation = null, mesh = null) {
         const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
             .setTranslation(position.x, position.y, position.z)
-            .setLinearDamping(0.1)
-            .setAngularDamping(0.3)
+            .setLinearDamping(0.5) // Increased damping
+            .setAngularDamping(0.8) // Increased damping
             .setCcdEnabled(true);
         
         if (rotation) {
@@ -331,13 +342,13 @@ export class PhysicsWorld {
             }
             
             colliderDesc = RAPIER.ColliderDesc.cuboid(
-                (maxX - minX) / 2,
-                (maxY - minY) / 2,
-                (maxZ - minZ) / 2
+                (maxX - minX) / 2 * 0.999,
+                (maxY - minY) / 2 * 0.999,
+                (maxZ - minZ) / 2 * 0.999
             );
         }
         
-        colliderDesc.setDensity(2.0).setFriction(0.5).setRestitution(0.01);
+        colliderDesc.setDensity(2.0).setFriction(0.8).setRestitution(0.0);
         this.world.createCollider(colliderDesc, body);
         
         this.bodies.push(body);
@@ -355,9 +366,17 @@ export class PhysicsWorld {
     step() {
         if (!this.world || !this.isRunning) return false;
         
-        // Step physics with fixed timestep for stability
-        this.world.timestep = 1 / 60; // Fixed 60 Hz
+        // Step physics with sub-stepping for higher stability
+        // Run 2 steps of 1/120s per frame (total 1/60s)
+        this.world.timestep = 1 / 120; 
         this.world.step();
+        this.world.step();
+        this.world.step();
+        
+        // Update Lid animation if active
+        if (this.lidState !== 'idle' && this.lidState !== 'finished') {
+            this.updateLid(1000/60); // approx 16ms
+        }
         
         // Sync Three.js meshes with physics bodies
         for (const { body, mesh } of this.meshBodies) {
@@ -442,12 +461,12 @@ export class PhysicsWorld {
      * @returns {number} Number of pieces removed
      */
     /**
-     * Remove pieces that are outside the box or sticking out, and update scene
-     * @param {Object} scene - SceneManager to remove meshes from
-     * @param {Object} pieceDims - Dimensions of pieces {l, w, h} for accurate bounds check
-     * @returns {number} Number of pieces removed
+     * Remove pieces that are outside the box or sticking out
+     * @param {Object} scene - SceneManager (optional)
+     * @param {Object} pieceDims - Dimensions (optional)
+     * @param {number} strictness - 0: Relaxed (fallouts), 1: Semi (>50% out), 2: Strict (>height)
      */
-    removePiecesOutsideBox(scene, pieceDims = null) {
+    removePiecesOutsideBox(scene, pieceDims = null, strictness = 0) {
         if (!this.boxDims) return 0;
         
         const { length, width, height } = this.boxDims;
@@ -487,14 +506,30 @@ export class PhysicsWorld {
                 minZ = pos.z - halfW; maxZ = pos.z + halfW;
             }
             
-            // ONLY CHECK TOP: Remove pieces that stick out above the box height
-            // Pieces can touch walls (X, Z sides) - that's fine
-            // We only care about pieces protruding ABOVE the box
-            const margin = 2; // Very small tolerance (2mm)
-            const sticksOutTop = maxY > height + margin;
-            const completelyOutside = maxY < -50 || pos.y > height + 200; // Fell out or flew away
+            // ONLY remove pieces that have fallen out of the box limits (e.g. fallen off floor)
+            // Do NOT remove pieces just because they stick out the top during Simulation
+            // because they might settle down.
+            // Removal logic based on strictness
+            let shouldRemove = false;
             
-            if (sticksOutTop || completelyOutside) {
+            // Level 0: ONLY remove completely outside (fallen off floor etc)
+            const completelyOutside = maxY < -50 || pos.y > height + 1000 || 
+                                    pos.x < -200 || pos.x > length + 200 || 
+                                    pos.z < -200 || pos.z > width + 200;
+            
+            if (strictness === 0) {
+                shouldRemove = completelyOutside;
+            } 
+            // Level 1: Remove pieces sticking out more than 50% (center above height)
+            else if (strictness === 1) {
+                shouldRemove = completelyOutside || pos.y > height;
+            }
+            // Level 2: Strict - Remove ANY piece protruding above height
+            else if (strictness === 2) {
+                shouldRemove = completelyOutside || maxY > height;
+            }
+
+            if (shouldRemove) {
                 toRemove.push(i);
             }
         }
@@ -525,6 +560,154 @@ export class PhysicsWorld {
         }
         
         return toRemove.length;
+    }
+    
+    /**
+     * Create kinetic Lid
+     */
+    createLid(sceneManager) {
+        if (this.lidBody) return;
+        if (!this.boxDims) return;
+        
+        const { length, width, height } = this.boxDims;
+        const thickness = 50;
+        
+        // Start high up
+        const startY = height + 200;
+        
+        // Kinematic body
+        const bodyDesc = RAPIER.RigidBodyDesc.kinematicPositionBased()
+            .setTranslation(length/2, startY, width/2);
+        this.lidBody = this.world.createRigidBody(bodyDesc);
+        
+        // Collider (slightly smaller than box to fit inside walls)
+        const margin = 5;
+        const colliderDesc = RAPIER.ColliderDesc.cuboid(
+            (length/2 - margin), 
+            thickness/2, 
+            (width/2 - margin)
+        )
+        .setFriction(0.2)
+        .setRestitution(0.0);
+        
+        this.world.createCollider(colliderDesc, this.lidBody);
+        
+        // VISUAL MESH
+        if (sceneManager) {
+            const geometry = new THREE.BoxGeometry(length - margin*2, thickness, width - margin*2);
+            const material = new THREE.MeshPhongMaterial({
+                color: 0x00ff00, // Bright Green Lid
+                transparent: true,
+                opacity: 0.5,
+                side: THREE.DoubleSide
+            });
+            this.lidMesh = new THREE.Mesh(geometry, material);
+            this.lidMesh.position.set(length/2, startY, width/2);
+            sceneManager.scene.add(this.lidMesh);
+        }
+        
+        console.log('Lid created and added to scene');
+    }
+    
+    /**
+     * Start the Lid Press sequence
+     */
+    startLidSequence(sceneManager, callback) {
+        if (!this.boxDims) {
+            if (callback) callback();
+            return;
+        }
+        
+        this.createLid(sceneManager);
+        
+        // Wake up all bodies to ensure they react to the lid
+        for (const { body } of this.meshBodies) {
+            if (body && body.isValid()) body.wakeUp();
+        }
+        
+        this.lidState = 'descending';
+        
+        // Target: Bottom of lid should be at Box Height
+        // Lid center = Box Height + Lid Half-Height (25mm)
+        this.lidTargetY = this.boxDims.height + 25; 
+        
+        this.onLidFinished = callback;
+        this.lidHoldTime = 0;
+        
+        // Start vibration to help settlement while pressing
+        // Vibrate for enough time to cover descent + hold
+        this.startVibration(8000); 
+        
+        console.log('Starting Lid Sequence with Vibration...');
+    }
+    
+    /**
+     * Update Lid position/state
+     */
+    updateLid(dtMs) {
+        if (!this.lidBody || !this.lidBody.isValid()) return;
+        
+        const pos = this.lidBody.translation();
+        
+        // Sync Visual Mesh
+        if (this.lidMesh) {
+            this.lidMesh.position.set(pos.x, pos.y, pos.z);
+        }
+        
+        const speed = 0.1 * dtMs; // Increased speed (was 0.05)
+        
+        switch (this.lidState) {
+            case 'descending':
+                if (pos.y > this.lidTargetY) {
+                    this.lidBody.setNextKinematicTranslation({
+                        x: pos.x,
+                        y: Math.max(this.lidTargetY, pos.y - speed),
+                        z: pos.z
+                    });
+                } else {
+                    this.lidState = 'holding';
+                    this.lidHoldTime = 0;
+                    console.log('Lid holding (compacting)...');
+                }
+                break;
+                
+            case 'holding':
+                this.lidHoldTime += dtMs;
+                if (this.lidHoldTime > 3000) { // Hold 3 seconds
+                    this.lidState = 'ascending';
+                    this.stopVibration(); // Stop vibration when we start lifting
+                    console.log('Lid ascending...');
+                }
+                break;
+                
+            case 'ascending':
+                const startY = this.boxDims.height + 200;
+                if (pos.y < startY) {
+                    this.lidBody.setNextKinematicTranslation({
+                        x: pos.x,
+                        y: Math.min(startY, pos.y + speed * 4), // Go up fast
+                        z: pos.z
+                    });
+                } else {
+                    this.lidState = 'finished';
+                    // Remove lid body and mesh
+                    this.world.removeRigidBody(this.lidBody);
+                    this.lidBody = null;
+                    if (this.lidMesh) {
+                        if (this.lidMesh.parent) this.lidMesh.parent.remove(this.lidMesh);
+                        if (this.lidMesh.geometry) this.lidMesh.geometry.dispose();
+                        if (this.lidMesh.material) this.lidMesh.material.dispose();
+                        this.lidMesh = null;
+                    }
+                    console.log('Lid finished');
+                    
+                    if (this.onLidFinished) {
+                        this.onLidFinished();
+                        this.onLidFinished = null;
+                    }
+                }
+                break;
+        }
     }
 
     start() {
@@ -670,6 +853,7 @@ export class BulkSimulation {
         this.randomRotation = randomRotation;
         this.droppedCount = 0;
         this.autoMode = autoMode;
+        this.maxOverflow = autoMode ? 50 : 20; // Allow more overflow in auto mode
         this.overflowCount = 0;
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
@@ -691,63 +875,11 @@ export class BulkSimulation {
         // Initialize physics world
         await this.physics.init(boxDims);
 
-        // Setup settled callback
+        // Setup settled callback (FINAL completion only)
+        // Setup settled callback (FINAL completion only)
         this.physics.onSettled = (count) => {
-            // Remove pieces outside box before final count
-            const removed = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims);
-            const finalCount = this.physics.countPiecesInBox();
-            
-            // If pieces were removed and we haven't retried yet, drop HALF of them again
-            // This fills potential gaps without overcrowding
-            if (removed > 0 && !this.hasRetried) {
-                this.hasRetried = true;
-                const toRetry = Math.max(1, Math.floor(removed / 2)); // Drop half, minimum 1
-                this.retryCount = toRetry;
-                
-                if (this.onStatusUpdate) {
-                    this.onStatusUpdate({
-                        status: 'retrying',
-                        message: `🔄 ${removed} peces sobresortien. Reintentant amb ${toRetry} peces...`
-                    });
-                }
-                
-                // Drop the retry pieces
-                this.physics.isRunning = true;
-                this.isRunning = true;
-                this.allDropped = false;
-                
-                // Drop retry pieces with a slight delay between each
-                let retryDropped = 0;
-                const retryInterval = setInterval(() => {
-                    if (retryDropped >= toRetry || !this.isRunning) {
-                        clearInterval(retryInterval);
-                        this.allDropped = true;
-                        // Start another vibration phase
-                        this.vibrationPhase = true;
-                        this.physics.startVibration(3000);
-                        return;
-                    }
-                    this.dropPiece();
-                    retryDropped++;
-                }, this.dropIntervalMs);
-                
-                // Continue physics update
-                this.update();
-                return;
-            }
-            
-            this.stop();
-            if (this.onStatusUpdate) {
-                const removedText = removed > 0 ? ` (${removed} eliminades per sobresortir)` : '';
-                const retriedText = this.hasRetried ? ' (després de reintent)' : '';
-                this.onStatusUpdate({
-                    status: 'settled',
-                    dropped: this.droppedCount,
-                    inside: finalCount,
-                    removed: removed,
-                    message: `✅ Simulació completada: ${finalCount} peces dins la caixa${removedText}${retriedText}`
-                });
-            }
+            // This is now only called via the manual check in the Lid callback
+            this.finishSimulation();
         };
 
         // Create box visualization
@@ -769,6 +901,10 @@ export class BulkSimulation {
         this.lastUpdateTime = 0;
         this.hasRetried = false;
         this.retryCount = 0;
+        this.hasRetried = false;
+        this.hasRefilled = false;
+        this.retryCount = 0;
+        this.hasPressedLid = false;
         
         // Clear any existing timeout
         if (this.settlingTimeout) {
@@ -808,12 +944,24 @@ export class BulkSimulation {
             const stillVibrating = this.physics.updateVibration(deltaMs);
             if (!stillVibrating) {
                 this.vibrationPhase = false;
-                // Update status after vibration ends
-                if (this.onStatusUpdate) {
-                    this.onStatusUpdate({
-                        status: 'settling',
-                        dropped: this.droppedCount,
-                        message: `⏳ Vibració completada. Esperant estabilització final...`
+                
+                // FORCE START LID SEQUENCE
+                if (!this.hasPressedLid) {
+                    this.hasPressedLid = true;
+                    
+                    // Pre-cleanup (optional but good)
+                    const semiRemoved = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 1);
+                    
+                    if (this.onStatusUpdate) {
+                        this.onStatusUpdate({
+                            status: 'compacting',
+                            message: `🚜 Premsant amb tapa... (${semiRemoved} eliminades prèviament)`
+                        });
+                    }
+                    
+                    this.physics.startLidSequence(this.scene, () => {
+                        // After lid finishes, we finish the simulation
+                        this.finishSimulation();
                     });
                 }
             }
@@ -993,6 +1141,8 @@ export class BulkSimulation {
             if (!body.isValid()) continue;
             const pos = body.translation();
             // Check if outside box bounds or fallen below
+            // Relaxed check: Only count if fallen BELOW floor or FAR outside XY
+            // Ignore pieces bouncing UP (y > 0)
             if (pos.y < -margin || 
                 pos.x < -margin || pos.x > length + margin ||
                 pos.z < -margin || pos.z > width + margin) {
@@ -1070,24 +1220,91 @@ export class BulkSimulation {
     /**
      * Force finish after timeout
      */
-    forceFinish() {
-        if (!this.isRunning) return;
+    /**
+     * Finalize simulation after Lid Press
+     */
+    finishSimulation() {
+         // Final Cleanup (Strict)
+        const strictRemoved = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 2);
+        const finalCount = this.physics.countPiecesInBox();
         
-        // Remove pieces outside box before final count
-        const removed = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims);
-        const count = this.physics.countPiecesInBox();
+        // SMART REFILL LOGIC
+        // If we removed pieces, it means we might have created space during compaction.
+        // Let's try to add back some of the pieces we just removed?
+        // Or better: if we removed X pieces, maybe we can fit X/2 back in now that it's compacted?
+        if (strictRemoved > 0 && !this.hasRefilled) {
+            this.hasRefilled = true;
+            this.hasPressedLid = false; // Reset lid flag so we can press again later
+            
+            // Calculate how many to try adding back
+            // Let's be optimistic: try adding back 50% of what was removed
+            const toRefill = Math.max(1, Math.floor(strictRemoved * 0.5));
+            
+            if (this.onStatusUpdate) {
+                this.onStatusUpdate({
+                    status: 'refilling',
+                    message: `🔄 Compactació feta. ${strictRemoved} peces tretes. Intentant re-afegir ${toRefill} peces als forats...`
+                });
+            }
+            
+            // Start refill phase
+            this.startRefill(toRefill);
+            return;
+        }
+
         this.stop();
         
         if (this.onStatusUpdate) {
-            const removedText = removed > 0 ? ` (${removed} eliminades per sobresortir)` : '';
+            const removedText = strictRemoved > 0 ? ` (${strictRemoved} eliminades post-tapa)` : '';
+            const refillText = this.hasRefilled ? ' (amb re-farcit automàtic)' : '';
             this.onStatusUpdate({
-                status: 'timeout',
+                status: 'settled',
                 dropped: this.droppedCount,
-                inside: count,
-                removed: removed,
-                message: `⏱️ Timeout! ${count} peces dins la caixa${removedText}`
+                inside: finalCount,
+                removed: strictRemoved,
+                message: `✅ Finalitzat: ${finalCount} peces dins la caixa (compactat amb tapa${refillText})`
             });
         }
+    }
+
+    /**
+     * Start the refill phase
+     */
+    startRefill(count) {
+        this.refillTarget = count;
+        this.refillDropped = 0;
+        this.isRunning = true;
+        this.physics.isRunning = true;
+        this.lastUpdateTime = performance.now();
+        
+        // Drop loop for refill
+        this.refillInterval = setInterval(() => {
+            if (this.refillDropped >= this.refillTarget) {
+                clearInterval(this.refillInterval);
+                this.refillInterval = null;
+                
+                // After refill drops, vibrate briefly then Lid Press again
+                this.vibrationPhase = true;
+                this.physics.startVibration(3000); // Shorter vibration
+                // The update loop will catch end of vibration and trigger Lid Press (since hasPressedLid is false)
+                return;
+            }
+            this.dropPiece();
+            this.refillDropped++;
+        }, this.dropIntervalMs);
+        
+        // Ensure update loop is running
+        this.update();
+    }
+    
+    /**
+     * Force finish after timeout
+     */
+    forceFinish() {
+        // If timeout hits, just finish (maybe skip lid if it stuck?)
+        // Or try to run lid if we haven't?
+        // Let's just standard finish to be safe.
+        this.finishSimulation();
     }
 
     /**
@@ -1100,6 +1317,11 @@ export class BulkSimulation {
         if (this.dropInterval) {
             clearInterval(this.dropInterval);
             this.dropInterval = null;
+        }
+        
+        if (this.refillInterval) {
+            clearInterval(this.refillInterval);
+            this.refillInterval = null;
         }
         
         if (this.settlingTimeout) {

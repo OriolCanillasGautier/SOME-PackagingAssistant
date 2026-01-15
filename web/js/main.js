@@ -3,13 +3,13 @@
  * Connects UI with packing calculator, 3D visualization, and physics simulation
  */
 
-import { calcularEmpaquetatge, getDistribution, getPieceDimensions } from './packing/calculator.js';
-import { loadMesh, loadSTL, extractDimensions, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS } from './mesh/mesh-utils.js';
-import { SceneManager } from './visualization/scene.js';
-import { BulkSimulation, initRapier } from './physics/physics-world.js';
-import { ReportGenerator } from './report/report-generator.js';
-import { getSimplificationModal } from './mesh/simplification-modal.js';
-import { StorageManager } from './storage/storage-manager.js';
+import { calcularEmpaquetatge, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_15';
+import { loadMesh, loadSTL, extractDimensions, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation } from './mesh/mesh-utils.js?v=force_update_15';
+import { SceneManager } from './visualization/scene.js?v=force_update_15';
+import { BulkSimulation, initRapier } from './physics/physics-world.js?v=force_update_15';
+import { ReportGenerator } from './report/report-generator.js?v=force_update_15';
+import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_15';
+import { StorageManager } from './storage/storage-manager.js?v=force_update_15';
 
 // Application state
 const state = {
@@ -191,7 +191,10 @@ function setupEventListeners() {
     
     // Packing gap slider
     elements.packingGap.addEventListener('input', (e) => {
-        elements.packingGapValue.textContent = e.target.value;
+        const val = e.target.value;
+        const label = val < 0 ? `Solapament: ${Math.abs(val)}` : `Espaiat: ${val}`;
+        elements.packingGapValue.textContent = label;
+        // Optionally update text content of span next to slider if exists, here it's elements.packingGapValue
     });
     
     // Bulk mode sliders
@@ -697,15 +700,47 @@ async function handleCalculate() {
         if (nx > 0 && ny > 0 && nz > 0) {
             let drawn;
             
-            // Use STL geometry if available, otherwise use cuboids
             if (state.stlGeometry) {
+                // Deterministic permutation based on calculator's permIndex
+                // Calculator inputs: L(X=0), W(Z=2), H(Y=1) -> Note: main.js inputs order matches X,Z,Y
+                // But extractDimensions returns {length:x, width:z, height:y}
+                // Handler input mapped: objL=X, objW=Z, objH=Y
+                
+                // Calculator permutations (resL, resW, resH):
+                // 0: L, W, H (X, Z, Y) -> NewX=X(0), NewY=Y(1), NewZ=Z(2) -> [0, 1, 2]
+                // 1: L, H, W (X, Y, Z) -> NewX=X(0), NewY=Z(2), NewZ=Y(1) -> [0, 2, 1]
+                // 2: W, L, H (Z, X, Y) -> NewX=Z(2), NewY=Y(1), NewZ=X(0) -> [2, 1, 0]
+                // 3: W, H, L (Z, Y, X) -> NewX=Z(2), NewY=X(0), NewZ=Y(1) -> [2, 0, 1]
+                // 4: H, L, W (Y, X, Z) -> NewX=Y(1), NewY=Z(2), NewZ=X(0) -> [1, 2, 0]
+                // 5: H, W, L (Y, Z, X) -> NewX=Y(1), NewY=X(0), NewZ=Z(2) -> [1, 0, 2]
+                
+                const permIndex = result.data.bestOrientation.permIndex;
+                const permTable = [
+                    [0, 1, 2], // 0
+                    [0, 2, 1], // 1
+                    [2, 1, 0], // 2
+                    [2, 0, 1], // 3
+                    [1, 2, 0], // 4
+                    [1, 0, 2]  // 5
+                ];
+                
+                // Fallback to 0 if undefined (should be defined)
+                const perm = permTable[permIndex !== undefined ? permIndex : 0];
+                
+                // Clone and permute geometry
+                const orientedGeometry = state.stlGeometry.clone();
+                applyPermutation(orientedGeometry, perm);
+                
                 drawn = state.sceneManager.addPackedSTLPieces({
-                    stlGeometry: state.stlGeometry,
+                    stlGeometry: orientedGeometry,
                     pieceL, pieceW, pieceH,
                     nx, ny, nz,
                     maxDraw: 500,
                     packingGap: values.packingGap,
-                    colorCount: values.colorCount
+                    colorCount: values.colorCount,
+                    boxL: values.boxL,
+                    boxW: values.boxW,
+                    boxH: values.boxH
                 });
             } else {
                 drawn = state.sceneManager.addPackedPieces({
@@ -713,7 +748,10 @@ async function handleCalculate() {
                     nx, ny, nz,
                     maxDraw: 500,
                     packingGap: values.packingGap,
-                    colorCount: values.colorCount
+                    colorCount: values.colorCount,
+                    boxL: values.boxL,
+                    boxW: values.boxW,
+                    boxH: values.boxH
                 });
             }
             

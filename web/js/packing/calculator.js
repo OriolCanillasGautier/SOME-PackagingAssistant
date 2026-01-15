@@ -232,9 +232,32 @@ export function calcularEmpaquetatge(params) {
         const [ol, ow, oh] = orientations[i];
         
         // Calculate how many fit in each direction (amb gap entre peces)
-        const fitL = (ol + packingGap) <= boxDims[0] ? Math.floor(boxDims[0] / (ol + packingGap)) : 0;
-        const fitW = (ow + packingGap) <= boxDims[1] ? Math.floor(boxDims[1] / (ow + packingGap)) : 0;
-        const fitH = (oh + packingGap) <= boxDims[2] ? Math.floor(boxDims[2] / (oh + packingGap)) : 0;
+        // Correct formula: gap only applies BETWEEN pieces, not after the last one
+        // So for N pieces we need: N * pieceDim + (N-1) * gap <= boxDim
+        // Solving: N <= (boxDim + gap) / (pieceDim + gap)
+        // First check that at least one piece fits (without gap requirement)
+        
+        let fitL = 0, fitW = 0, fitH = 0;
+        
+        if (ol <= boxDims[0]) {
+            const effL = ol + packingGap;
+            fitL = effL <= 0.001 ? Math.floor(boxDims[0] / (ol * 0.1)) : Math.floor((boxDims[0] + packingGap) / effL);
+        }
+        
+        if (ow <= boxDims[1]) {
+            const effW = ow + packingGap;
+            fitW = effW <= 0.001 ? Math.floor(boxDims[1] / (ow * 0.1)) : Math.floor((boxDims[1] + packingGap) / effW);
+        }
+        
+        if (oh <= boxDims[2]) {
+            const effH = oh + packingGap;
+            fitH = effH <= 0.001 ? Math.floor(boxDims[2] / (oh * 0.1)) : Math.floor((boxDims[2] + packingGap) / effH);
+        }
+        
+        // Safety cap to prevent infinite loop or memory crash with extreme nesting
+        fitL = Math.max(0, Math.min(fitL, 1000));
+        fitW = Math.max(0, Math.min(fitW, 1000));
+        fitH = Math.max(0, Math.min(fitH, 1000));
 
         const totalUnits = fitL * fitW * fitH;
         const totalWeight = totalUnits * objWeight;
@@ -247,6 +270,7 @@ export function calcularEmpaquetatge(params) {
         const orientationData = {
             name: orientationNames[i],
             dimensions: [ol, ow, oh],
+            permIndex: i, // Store which permutation was used
             units: totalUnits,
             distribution: `${fitL}×${fitW}×${fitH}`,
             weight: totalWeight,

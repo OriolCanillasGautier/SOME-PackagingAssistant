@@ -201,8 +201,11 @@ export class SceneManager {
      * @param {number} params.nz - Number in Z direction
      * @param {number} params.maxDraw - Maximum pieces to draw
      * @param {number} [params.packingGap=0] - Gap between pieces in mm
+     * @param {number} [params.boxL] - Box length (for boundary check)
+     * @param {number} [params.boxW] - Box width (for boundary check)
+     * @param {number} [params.boxH] - Box height (for boundary check)
      */
-    addPackedPieces({ pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0, colorCount = null }) {
+    addPackedPieces({ pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null }) {
         this.clearPieces();
         
         // Use provided colorCount or default
@@ -210,10 +213,12 @@ export class SceneManager {
 
         const geometry = new THREE.BoxGeometry(pieceL, pieceH, pieceW);
         const material = new THREE.MeshPhongMaterial({
-            color: 0x3b82f6,
-            opacity: 0.85,
+            color: 0xffffff, // White base for vertex colors
+            opacity: 0.92,
             transparent: true,
-            flatShading: true
+            flatShading: false,
+            shininess: 60,
+            specular: 0x444444
         });
 
         // Use instancing for performance
@@ -228,12 +233,18 @@ export class SceneManager {
         for (let iz = 0; iz < nz && index < totalPieces; iz++) {
             for (let iy = 0; iy < ny && index < totalPieces; iy++) {
                 for (let ix = 0; ix < nx && index < totalPieces; ix++) {
-                    // Position piece with gap spacing
-                    dummy.position.set(
-                        ix * (pieceL + packingGap) + pieceL / 2,
-                        iz * (pieceH + packingGap) + pieceH / 2,
-                        iy * (pieceW + packingGap) + pieceW / 2
-                    );
+                    // Calculate position with gap spacing
+                    const posX = ix * (pieceL + packingGap) + pieceL / 2;
+                    const posY = iz * (pieceH + packingGap) + pieceH / 2;
+                    const posZ = iy * (pieceW + packingGap) + pieceW / 2;
+                    
+                    // Skip pieces that would overflow the box (with relaxed tolerance)
+                    const tolerance = 1.0;
+                    if (boxL !== null && posX + pieceL / 2 > boxL + tolerance) continue;
+                    if (boxW !== null && posZ + pieceW / 2 > boxW + tolerance) continue;
+                    if (boxH !== null && posY + pieceH / 2 > boxH + tolerance) continue;
+                    
+                    dummy.position.set(posX, posY, posZ);
                     dummy.updateMatrix();
                     instancedMesh.setMatrixAt(index, dummy.matrix);
                     
@@ -255,7 +266,7 @@ export class SceneManager {
         this.scene.add(instancedMesh);
         this.pieces.push(instancedMesh);
 
-        return totalPieces;
+        return index; // Return actual count drawn (may be less if pieces were skipped)
     }
 
     /**
@@ -266,12 +277,14 @@ export class SceneManager {
      * @param {number} params.pieceW - Piece width  
      * @param {number} params.pieceH - Piece height
      * @param {number} params.nx - Number in X direction
-     * @param {number} params.ny - Number in Y direction
      * @param {number} params.nz - Number in Z direction
      * @param {number} [params.maxDraw=500] - Maximum pieces to draw
      * @param {number} [params.packingGap=0] - Gap between pieces in mm
+     * @param {number} [params.boxL] - Box length (for boundary check)
+     * @param {number} [params.boxW] - Box width (for boundary check)
+     * @param {number} [params.boxH] - Box height (for boundary check)
      */
-    addPackedSTLPieces({ stlGeometry, pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0, colorCount = null }) {
+    addPackedSTLPieces({ stlGeometry, pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null }) {
         this.clearPieces();
         
         // Use provided colorCount or default
@@ -282,10 +295,12 @@ export class SceneManager {
         geometry.computeVertexNormals();
 
         const material = new THREE.MeshPhongMaterial({
-            color: 0x3b82f6,
-            opacity: 0.85,
+            color: 0xffffff, // White base for vertex colors
+            opacity: 0.92,
             transparent: true,
-            flatShading: true
+            flatShading: false,
+            shininess: 60,
+            specular: 0x444444
         });
 
         // Use instancing for performance
@@ -300,12 +315,18 @@ export class SceneManager {
         for (let iz = 0; iz < nz && index < totalPieces; iz++) {
             for (let iy = 0; iy < ny && index < totalPieces; iy++) {
                 for (let ix = 0; ix < nx && index < totalPieces; ix++) {
-                    // Position piece with gap spacing
-                    dummy.position.set(
-                        ix * (pieceL + packingGap) + pieceL / 2,
-                        iz * (pieceH + packingGap) + pieceH / 2,
-                        iy * (pieceW + packingGap) + pieceW / 2
-                    );
+                    // Calculate position with gap spacing
+                    const posX = ix * (pieceL + packingGap) + pieceL / 2;
+                    const posY = iz * (pieceH + packingGap) + pieceH / 2;
+                    const posZ = iy * (pieceW + packingGap) + pieceW / 2;
+                    
+                    // Skip pieces that would overflow the box (with relaxed tolerance)
+                    const tolerance = 1.0;
+                    if (boxL !== null && posX + pieceL / 2 > boxL + tolerance) continue;
+                    if (boxW !== null && posZ + pieceW / 2 > boxW + tolerance) continue;
+                    if (boxH !== null && posY + pieceH / 2 > boxH + tolerance) continue;
+                    
+                    dummy.position.set(posX, posY, posZ);
                     dummy.updateMatrix();
                     instancedMesh.setMatrixAt(index, dummy.matrix);
                     
@@ -327,7 +348,7 @@ export class SceneManager {
         this.scene.add(instancedMesh);
         this.pieces.push(instancedMesh);
 
-        return totalPieces;
+        return index; // Return actual count drawn (may be less if pieces were skipped)
     }
 
     /**
