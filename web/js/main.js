@@ -3,13 +3,32 @@
  * Connects UI with packing calculator, 3D visualization, and physics simulation
  */
 
-import { calcularEmpaquetatge, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_15';
-import { loadMesh, loadSTL, extractDimensions, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation } from './mesh/mesh-utils.js?v=force_update_15';
-import { SceneManager } from './visualization/scene.js?v=force_update_15';
-import { BulkSimulation, initRapier } from './physics/physics-world.js?v=force_update_15';
-import { ReportGenerator } from './report/report-generator.js?v=force_update_15';
-import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_15';
-import { StorageManager } from './storage/storage-manager.js?v=force_update_15';
+import { calcularEmpaquetatge, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_38';
+import { loadMesh, loadSTL, extractDimensions, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation } from './mesh/mesh-utils.js?v=force_update_38';
+import { SceneManager } from './visualization/scene.js?v=force_update_38';
+import { BulkSimulation, initRapier } from './physics/physics-world.js?v=force_update_38';
+import { ReportGenerator } from './report/report-generator.js?v=force_update_38';
+import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_38';
+import { StorageManager } from './storage/storage-manager.js?v=force_update_38';
+
+// Helper for dynamic limits
+function updateMaxPiecesLimit() {
+    const maxWeight = parseFloat(elements.maxWeight.value) || 0;
+    const objWeight = parseFloat(elements.objWeight.value) || 0;
+    
+    if (maxWeight > 0 && objWeight > 0) {
+        const theoreticalMax = Math.floor(maxWeight / objWeight);
+        // Set a reasonable absolute max (5000) but allow what's calculated
+        const newMax = Math.min(5000, Math.max(1, theoreticalMax));
+        elements.maxPieces.max = newMax;
+        
+        // If current value too high, adjust
+        if (parseInt(elements.maxPieces.value) > newMax) {
+            elements.maxPieces.value = newMax;
+            elements.maxPiecesValue.textContent = newMax;
+        }
+    }
+}
 
 // Application state
 const state = {
@@ -233,6 +252,10 @@ function setupEventListeners() {
         }
     });
     
+    // Weights change
+    elements.objWeight.addEventListener('input', updateMaxPiecesLimit);
+    elements.maxWeight.addEventListener('input', updateMaxPiecesLimit);
+
     // STL upload
     elements.stlUpload.addEventListener('change', handleSTLUpload);
     
@@ -299,8 +322,10 @@ function switchMode(mode) {
     elements.bulkOptions.style.display = isOptimized ? 'none' : 'block';
     elements.calculateBtn.style.display = isOptimized ? 'block' : 'none';
     elements.startSimBtn.style.display = isOptimized ? 'none' : 'block';
+    
+    // Reset button is now redundant as Start handles reset, but we can keep it hidden
     elements.stopSimBtn.style.display = 'none';
-    elements.resetSimBtn.style.display = isOptimized ? 'none' : 'block';
+    elements.resetSimBtn.style.display = 'none'; // User requested to remove it
     
     // Reset results
     if (!isOptimized) {
@@ -388,6 +413,16 @@ async function handleSTLUpload(event) {
         // Save to history
         await saveSTLToHistory();
         
+        // Update dynamic limits
+        const maxWeight = parseFloat(elements.maxWeight.value) || 0;
+        const objWeight = parseFloat(elements.objWeight.value) || 0;
+        if (maxWeight > 0 && objWeight > 0) {
+            const maxByWeight = Math.floor(maxWeight / objWeight);
+            const newMax = Math.min(5000, Math.max(50, maxByWeight));
+            elements.maxPieces.max = newMax;
+        }
+        
+
     } catch (error) {
         elements.stlStatus.className = 'stl-status error';
         elements.stlStatus.textContent = `❌ Error: ${error.message}`;
@@ -796,6 +831,13 @@ async function saveCalculationToHistory(results) {
  * Start bulk simulation
  */
 async function startSimulation() {
+    // If already simulating or has results, reset first
+    if (state.bulkSimulation && (state.bulkSimulation.isRunning || state.bulkSimulation.droppedCount > 0)) {
+        await resetSimulation();
+        // Small delay to ensure clean state
+        await new Promise(r => setTimeout(r, 100));
+    }
+
     const values = getInputValues();
     
     // Validate inputs

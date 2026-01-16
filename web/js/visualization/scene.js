@@ -239,7 +239,7 @@ export class SceneManager {
                     const posZ = iy * (pieceW + packingGap) + pieceW / 2;
                     
                     // Skip pieces that would overflow the box (with relaxed tolerance)
-                    const tolerance = 1.0;
+                    const tolerance = 0.1;
                     if (boxL !== null && posX + pieceL / 2 > boxL + tolerance) continue;
                     if (boxW !== null && posZ + pieceW / 2 > boxW + tolerance) continue;
                     if (boxH !== null && posY + pieceH / 2 > boxH + tolerance) continue;
@@ -321,7 +321,7 @@ export class SceneManager {
                     const posZ = iy * (pieceW + packingGap) + pieceW / 2;
                     
                     // Skip pieces that would overflow the box (with relaxed tolerance)
-                    const tolerance = 1.0;
+                    const tolerance = 0.1;
                     if (boxL !== null && posX + pieceL / 2 > boxL + tolerance) continue;
                     if (boxW !== null && posZ + pieceW / 2 > boxW + tolerance) continue;
                     if (boxH !== null && posY + pieceH / 2 > boxH + tolerance) continue;
