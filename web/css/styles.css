@@ -405,7 +405,9 @@ body {
 .calculate-btn,
 .simulate-btn,
 .stop-btn,
-.reset-btn {
+.reset-btn,
+.gravity-btn,
+.collision-btn {
     width: 100%;
     padding: 14px 24px;
     border: none;
@@ -445,6 +447,26 @@ body {
     background: #dc2626;
     color: white;
     margin-top: 8px;
+}
+
+.gravity-btn {
+    background: var(--accent-green-hover);
+    color: white;
+    margin-top: 8px;
+}
+
+.gravity-btn:hover {
+    transform: translateY(-2px);
+}
+
+.collision-btn {
+    background: var(--accent-blue);
+    color: white;
+    margin-top: 8px;
+}
+
+.collision-btn:hover {
+    transform: translateY(-2px);
 }
 
 .reset-btn {
@@ -491,6 +513,7 @@ body {
     top: 12px;
     right: 12px;
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
 }
 
@@ -652,6 +675,16 @@ body {
 
 .results-content tr:hover td {
     background: rgba(59, 130, 246, 0.1);
+}
+
+.results-content .warning-text {
+    margin-top: 12px;
+    padding: 8px 10px;
+    background: rgba(245, 158, 11, 0.15);
+    border-left: 4px solid var(--accent-yellow);
+    color: var(--text-primary);
+    border-radius: var(--radius-sm);
+    font-weight: 600;
 }
 
 /* Footer */
@@ -929,7 +962,9 @@ body {
 .floating-actions .calculate-btn,
 .floating-actions .simulate-btn,
 .floating-actions .stop-btn,
-.floating-actions .reset-btn {
+.floating-actions .reset-btn,
+.floating-actions .gravity-btn,
+.floating-actions .collision-btn {
     margin-top: 0;
     box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.15);
 }

@@ -5,6 +5,22 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {
+    acceleratedRaycast,
+    computeBoundsTree,
+    disposeBoundsTree
+} from 'https://unpkg.com/three-mesh-bvh@0.7.8/build/index.module.js';
+
+// Enable BVH acceleration utilities (safe no-ops if already applied)
+if (!THREE.BufferGeometry.prototype.computeBoundsTree) {
+    THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+}
+if (!THREE.BufferGeometry.prototype.disposeBoundsTree) {
+    THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+}
+if (THREE.Mesh.prototype.raycast !== acceleratedRaycast) {
+    THREE.Mesh.prototype.raycast = acceleratedRaycast;
+}
 
 export class SceneManager {
     constructor(container) {
@@ -17,6 +33,8 @@ export class SceneManager {
         this.pieces = [];
         this.boxMesh = null;
         this.gridHelper = null;
+        this.lastPlacement = null;
+        this.boxFloor = null;
         
         // 20 distinct colors for pieces - matching physics-world.js
         this.pieceColors = [
@@ -136,6 +154,13 @@ export class SceneManager {
             this.boxMesh.geometry.dispose();
             this.boxMesh.material.dispose();
         }
+        // Remove existing floor
+        if (this.boxFloor) {
+            this.scene.remove(this.boxFloor);
+            this.boxFloor.geometry.dispose();
+            this.boxFloor.material.dispose();
+            this.boxFloor = null;
+        }
 
         // Create wireframe box
         const geometry = new THREE.BoxGeometry(length, height, width);
@@ -158,11 +183,11 @@ export class SceneManager {
             transparent: true,
             side: THREE.DoubleSide
         });
-        const floor = new THREE.Mesh(floorGeometry, floorMaterial);
-        floor.rotation.x = -Math.PI / 2;
-        floor.position.set(length / 2, 0.1, width / 2);
-        floor.name = 'boxFloor';
-        this.scene.add(floor);
+        this.boxFloor = new THREE.Mesh(floorGeometry, floorMaterial);
+        this.boxFloor.rotation.x = -Math.PI / 2;
+        this.boxFloor.position.set(length / 2, 0.1, width / 2);
+        this.boxFloor.name = 'boxFloor';
+        this.scene.add(this.boxFloor);
 
         // Update grid
         const maxDim = Math.max(length, width, height);
@@ -229,6 +254,7 @@ export class SceneManager {
 
         const dummy = new THREE.Object3D();
         let index = 0;
+        const positions = [];
 
         for (let iz = 0; iz < nz && index < totalPieces; iz++) {
             for (let iy = 0; iy < ny && index < totalPieces; iy++) {
@@ -247,6 +273,8 @@ export class SceneManager {
                     dummy.position.set(posX, posY, posZ);
                     dummy.updateMatrix();
                     instancedMesh.setMatrixAt(index, dummy.matrix);
+
+                    positions.push(new THREE.Vector3(posX, posY, posZ));
                     
                     // Use colors from pieceColors array
                     const colorIndex = index % numColors;
@@ -258,6 +286,7 @@ export class SceneManager {
             }
         }
 
+        instancedMesh.count = index;
         instancedMesh.instanceMatrix.needsUpdate = true;
         if (instancedMesh.instanceColor) {
             instancedMesh.instanceColor.needsUpdate = true;
@@ -265,6 +294,15 @@ export class SceneManager {
 
         this.scene.add(instancedMesh);
         this.pieces.push(instancedMesh);
+
+        this.lastPlacement = {
+            type: 'box',
+            dims: { l: pieceL, w: pieceW, h: pieceH },
+            positions,
+            boxDims: boxL !== null && boxW !== null && boxH !== null
+                ? { l: boxL, w: boxW, h: boxH }
+                : null
+        };
 
         return index; // Return actual count drawn (may be less if pieces were skipped)
     }
@@ -284,7 +322,7 @@ export class SceneManager {
      * @param {number} [params.boxW] - Box width (for boundary check)
      * @param {number} [params.boxH] - Box height (for boundary check)
      */
-    addPackedSTLPieces({ stlGeometry, pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null }) {
+    addPackedSTLPieces({ stlGeometry, pieceL, pieceW, pieceH, nx, ny, nz, maxDraw = 500, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null, strictGeometryCheck = true }) {
         this.clearPieces();
         
         // Use provided colorCount or default
@@ -293,6 +331,25 @@ export class SceneManager {
         // Clone and prepare geometry
         const geometry = stlGeometry.clone();
         geometry.computeVertexNormals();
+        geometry.computeBoundingBox();
+
+        // Use real geometry bounds for placement (avoid floating/protrusion)
+        let sizeX = pieceL;
+        let sizeY = pieceH;
+        let sizeZ = pieceW;
+        let baseAlignedY = false;
+        if (geometry.boundingBox) {
+            const bbox = geometry.boundingBox;
+            const center = new THREE.Vector3();
+            bbox.getCenter(center);
+            sizeX = bbox.max.x - bbox.min.x;
+            sizeY = bbox.max.y - bbox.min.y;
+            sizeZ = bbox.max.z - bbox.min.z;
+
+            // Align base to y=0 and center in X/Z
+            geometry.translate(-center.x, -bbox.min.y, -center.z);
+            baseAlignedY = true;
+        }
 
         const material = new THREE.MeshPhongMaterial({
             color: 0xffffff, // White base for vertex colors
@@ -310,25 +367,96 @@ export class SceneManager {
         instancedMesh.receiveShadow = true;
 
         const dummy = new THREE.Object3D();
+        const positions = geometry.getAttribute('position');
+        const vertexCount = positions ? positions.count : 0;
+        const boxTolerance = 0.1;
+        const hasBoxLimits = boxL !== null && boxW !== null && boxH !== null;
+        let maxNx = 0;
+        let maxNy = 0;
+        let maxNz = 0;
+        const placementPositions = [];
+
+        // Compute a conservative footprint size from base vertices to allow slightly tighter packing
+        let footprintX = sizeX;
+        let footprintZ = sizeZ;
+        if (positions && vertexCount > 0) {
+            let minY = Infinity;
+            for (let i = 0; i < vertexCount; i++) {
+                minY = Math.min(minY, positions.getY(i));
+            }
+            const epsilon = Math.max(0.5, sizeY * 0.02);
+            const maxY = minY + epsilon;
+            let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+            let count = 0;
+            for (let i = 0; i < vertexCount; i++) {
+                const y = positions.getY(i);
+                if (y <= maxY) {
+                    const x = positions.getX(i);
+                    const z = positions.getZ(i);
+                    minX = Math.min(minX, x);
+                    maxX = Math.max(maxX, x);
+                    minZ = Math.min(minZ, z);
+                    maxZ = Math.max(maxZ, z);
+                    count++;
+                }
+            }
+            if (count >= 3) {
+                footprintX = Math.max(0.1, maxX - minX);
+                footprintZ = Math.max(0.1, maxZ - minZ);
+            }
+        }
+
+        const spacingX = Math.max(sizeX, footprintX) + packingGap;
+        const spacingZ = Math.max(sizeZ, footprintZ) + packingGap;
         let index = 0;
 
         for (let iz = 0; iz < nz && index < totalPieces; iz++) {
             for (let iy = 0; iy < ny && index < totalPieces; iy++) {
                 for (let ix = 0; ix < nx && index < totalPieces; ix++) {
                     // Calculate position with gap spacing
-                    const posX = ix * (pieceL + packingGap) + pieceL / 2;
-                    const posY = iz * (pieceH + packingGap) + pieceH / 2;
-                    const posZ = iy * (pieceW + packingGap) + pieceW / 2;
+                    const posX = ix * spacingX + sizeX / 2;
+                    const posY = baseAlignedY
+                        ? iy * (sizeY + packingGap)
+                        : iy * (sizeY + packingGap) + sizeY / 2;
+                    const posZ = iz * spacingZ + sizeZ / 2;
                     
                     // Skip pieces that would overflow the box (with relaxed tolerance)
-                    const tolerance = 0.1;
-                    if (boxL !== null && posX + pieceL / 2 > boxL + tolerance) continue;
-                    if (boxW !== null && posZ + pieceW / 2 > boxW + tolerance) continue;
-                    if (boxH !== null && posY + pieceH / 2 > boxH + tolerance) continue;
+                    if (boxL !== null && posX + sizeX / 2 > boxL + boxTolerance) continue;
+                    if (boxW !== null && posZ + sizeZ / 2 > boxW + boxTolerance) continue;
+                    const topY = baseAlignedY ? posY + sizeY : posY + sizeY / 2;
+                    if (boxH !== null && topY > boxH + boxTolerance) continue;
                     
                     dummy.position.set(posX, posY, posZ);
                     dummy.updateMatrix();
+
+                    // Strict geometry check: ensure no vertex protrudes the box
+                    if (strictGeometryCheck && hasBoxLimits && vertexCount > 0) {
+                        let fits = true;
+                        for (let vi = 0; vi < vertexCount; vi++) {
+                            const x = positions.getX(vi);
+                            const y = positions.getY(vi);
+                            const z = positions.getZ(vi);
+                            const vx = x + dummy.position.x;
+                            const vy = y + dummy.position.y;
+                            const vz = z + dummy.position.z;
+                            if (
+                                vx < -boxTolerance || vx > boxL + boxTolerance ||
+                                vy < -boxTolerance || vy > boxH + boxTolerance ||
+                                vz < -boxTolerance || vz > boxW + boxTolerance
+                            ) {
+                                fits = false;
+                                break;
+                            }
+                        }
+                        if (!fits) continue;
+                    }
+
                     instancedMesh.setMatrixAt(index, dummy.matrix);
+                    maxNx = Math.max(maxNx, ix + 1);
+                    maxNy = Math.max(maxNy, iy + 1);
+                    maxNz = Math.max(maxNz, iz + 1);
+
+                    placementPositions.push(new THREE.Vector3(posX, posY, posZ));
                     
                     // Use colors from pieceColors array
                     const colorIndex = index % numColors;
@@ -340,6 +468,7 @@ export class SceneManager {
             }
         }
 
+        instancedMesh.count = index;
         instancedMesh.instanceMatrix.needsUpdate = true;
         if (instancedMesh.instanceColor) {
             instancedMesh.instanceColor.needsUpdate = true;
@@ -348,7 +477,311 @@ export class SceneManager {
         this.scene.add(instancedMesh);
         this.pieces.push(instancedMesh);
 
-        return index; // Return actual count drawn (may be less if pieces were skipped)
+        this.lastPlacement = {
+            type: 'stl',
+            dims: { l: sizeX, w: sizeZ, h: sizeY },
+            geometry,
+            vertices: positions ? new Float32Array(positions.array) : null,
+            positions: placementPositions,
+            boxDims: boxL !== null && boxW !== null && boxH !== null
+                ? { l: boxL, w: boxW, h: boxH }
+                : null
+        };
+
+        return {
+            count: index,
+            distribution: { nx: maxNx, ny: maxNy, nz: maxNz },
+            distributionText: `${maxNx}×${maxNy}×${maxNz}`
+        };
+    }
+
+    /**
+     * Add packed STL pieces using a simple height-map nesting (experimental)
+     * @param {Object} params
+     * @param {THREE.BufferGeometry} params.stlGeometry
+     * @param {number} [params.maxDraw=500]
+     * @param {number} [params.packingGap=0]
+     * @param {number} [params.boxL]
+     * @param {number} [params.boxW]
+     * @param {number} [params.boxH]
+     */
+    addPackedSTLHeightMap({ stlGeometry, maxDraw = 500, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null }) {
+        this.clearPieces();
+
+        if (boxL === null || boxW === null || boxH === null) {
+            // Fallback to regular packing if box dims are missing
+            return this.addPackedSTLPieces({
+                stlGeometry,
+                pieceL: 0,
+                pieceW: 0,
+                pieceH: 0,
+                nx: 0,
+                ny: 0,
+                nz: 0,
+                maxDraw,
+                packingGap,
+                colorCount,
+                boxL,
+                boxW,
+                boxH,
+                strictGeometryCheck: true
+            });
+        }
+
+        const numColors = colorCount || this.colorCount;
+
+        // Clone and prepare geometry
+        const geometry = stlGeometry.clone();
+        geometry.computeVertexNormals();
+        geometry.computeBoundingBox();
+
+        const bbox = geometry.boundingBox;
+        const center = new THREE.Vector3();
+        bbox.getCenter(center);
+        const sizeX = bbox.max.x - bbox.min.x;
+        const sizeY = bbox.max.y - bbox.min.y;
+        const sizeZ = bbox.max.z - bbox.min.z;
+
+        if (sizeX > boxL || sizeZ > boxW || sizeY > boxH) {
+            return { count: 0 };
+        }
+
+        // Align base to y=0 and center in X/Z
+        geometry.translate(-center.x, -bbox.min.y, -center.z);
+
+        // Build BVH once for robust intersection testing
+        if (typeof geometry.computeBoundsTree === 'function') {
+            geometry.computeBoundsTree();
+        }
+
+        const positions = geometry.getAttribute('position');
+        const vertexCount = positions ? positions.count : 0;
+        if (!positions || vertexCount === 0) return { count: 0 };
+
+        // Height-map resolution
+        const cellSize = Math.max(2, Math.min(8, Math.min(sizeX, sizeZ) / 12));
+        const pieceNX = Math.max(1, Math.ceil(sizeX / cellSize));
+        const pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize));
+        const pieceHeights = new Float32Array(pieceNX * pieceNZ);
+        const pieceMask = new Uint8Array(pieceNX * pieceNZ);
+        const heightEps = Math.max(0.5, packingGap * 0.25);
+
+        // Build piece height map + base footprint mask
+        let minY = Infinity;
+        for (let i = 0; i < vertexCount; i++) {
+            minY = Math.min(minY, positions.getY(i));
+        }
+        const baseEps = Math.max(0.5, sizeY * 0.02);
+
+        for (let i = 0; i < vertexCount; i++) {
+            const x = positions.getX(i) + sizeX / 2;
+            const y = positions.getY(i);
+            const z = positions.getZ(i) + sizeZ / 2;
+            const ix = Math.min(pieceNX - 1, Math.max(0, Math.floor(x / cellSize)));
+            const iz = Math.min(pieceNZ - 1, Math.max(0, Math.floor(z / cellSize)));
+            const idx = iz * pieceNX + ix;
+            if (y > pieceHeights[idx]) pieceHeights[idx] = y;
+            if (y <= minY + baseEps) pieceMask[idx] = 1;
+        }
+
+        // Keep footprint mask exact; collisions are handled via BVH checks
+        const expandedMask = pieceMask;
+
+        // Container height map
+        const gridNX = Math.max(1, Math.ceil(boxL / cellSize));
+        const gridNZ = Math.max(1, Math.ceil(boxW / cellSize));
+        const heightMap = new Float32Array(gridNX * gridNZ);
+
+        const material = new THREE.MeshPhongMaterial({
+            color: 0xffffff,
+            opacity: 0.92,
+            transparent: true,
+            flatShading: false,
+            shininess: 60,
+            specular: 0x444444
+        });
+
+        const positionsOut = [];
+        let placed = 0;
+
+        // Cache for fast broadphase + precise intersection
+        const placedAabbs = [];
+        const placedMatrices = [];
+        const localBbox = new THREE.Box3(
+            new THREE.Vector3(-sizeX / 2, 0, -sizeZ / 2),
+            new THREE.Vector3(sizeX / 2, sizeY, sizeZ / 2)
+        );
+
+        const tmpMatA = new THREE.Matrix4();
+        const tmpMatB = new THREE.Matrix4();
+        const tmpInv = new THREE.Matrix4();
+        const tmpBox = new THREE.Box3();
+
+        const aabbInflatedOverlaps = (a, b, inflate = 0) => {
+            return !(
+                (a.max.x + inflate) < (b.min.x - inflate) ||
+                (a.min.x - inflate) > (b.max.x + inflate) ||
+                (a.max.y + inflate) < (b.min.y - inflate) ||
+                (a.min.y - inflate) > (b.max.y + inflate) ||
+                (a.max.z + inflate) < (b.min.z - inflate) ||
+                (a.min.z - inflate) > (b.max.z + inflate)
+            );
+        };
+
+        const candidateIntersectsAny = (candidateMatrix, candidateAabb) => {
+            if (!geometry.boundsTree) return false;
+
+            // Broadphase (inflated AABB for user gap)
+            const inflate = Math.max(0, packingGap * 0.5);
+            for (let i = 0; i < placedAabbs.length; i++) {
+                const otherAabb = placedAabbs[i];
+                if (!aabbInflatedOverlaps(candidateAabb, otherAabb, inflate)) continue;
+
+                // Precise: BVH intersectsGeometry with relative transform
+                const otherMatrix = placedMatrices[i];
+                tmpInv.copy(otherMatrix).invert();
+                tmpMatA.multiplyMatrices(tmpInv, candidateMatrix);
+                if (geometry.boundsTree.intersectsGeometry(geometry, tmpMatA)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        const maxTry = maxDraw;
+        let collisionSkips = 0;
+        const maxCollisionSkips = Math.max(50, maxTry * 3);
+
+        while (placed < maxTry) {
+            let bestX = -1;
+            let bestZ = -1;
+            let bestH = Infinity;
+
+            for (let gz = 0; gz <= gridNZ - pieceNZ; gz++) {
+                for (let gx = 0; gx <= gridNX - pieceNX; gx++) {
+                    const x0 = gx * cellSize;
+                    const z0 = gz * cellSize;
+                    if (x0 + sizeX > boxL || z0 + sizeZ > boxW) continue;
+
+                    let baseH = 0;
+                    for (let pz = 0; pz < pieceNZ; pz++) {
+                        for (let px = 0; px < pieceNX; px++) {
+                            const pIdx = pz * pieceNX + px;
+                            if (!expandedMask[pIdx]) continue;
+                            const hIdx = (gz + pz) * gridNX + (gx + px);
+                            if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
+                        }
+                    }
+
+                    if (baseH >= bestH) continue;
+
+                    let fits = true;
+                    for (let pz = 0; pz < pieceNZ && fits; pz++) {
+                        for (let px = 0; px < pieceNX; px++) {
+                            const pIdx = pz * pieceNX + px;
+                            if (!expandedMask[pIdx]) continue;
+                            const top = baseH + pieceHeights[pIdx];
+                            if (top + heightEps > boxH) {
+                                fits = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (fits) {
+                        bestH = baseH;
+                        bestX = gx;
+                        bestZ = gz;
+                    }
+                }
+            }
+
+            if (bestX < 0 || bestZ < 0 || !Number.isFinite(bestH)) break;
+
+            // Build candidate transform + AABB
+            const posX = bestX * cellSize + sizeX / 2;
+            const posZ = bestZ * cellSize + sizeZ / 2;
+            const posY = bestH;
+            tmpMatB.makeTranslation(posX, posY, posZ);
+            tmpBox.copy(localBbox).applyMatrix4(tmpMatB);
+
+            // Box boundary clamp (defensive)
+            const tol = 0.0001;
+            if (
+                tmpBox.min.x < -tol || tmpBox.min.y < -tol || tmpBox.min.z < -tol ||
+                tmpBox.max.x > boxL + tol || tmpBox.max.y > boxH + tol || tmpBox.max.z > boxW + tol
+            ) {
+                // Mark this footprint as blocked and retry
+                const blockTop = Math.min(boxH, bestH + Math.max(1, sizeY * 0.25));
+                for (let pz = 0; pz < pieceNZ; pz++) {
+                    for (let px = 0; px < pieceNX; px++) {
+                        const pIdx = pz * pieceNX + px;
+                        if (!expandedMask[pIdx]) continue;
+                        const hIdx = (bestZ + pz) * gridNX + (bestX + px);
+                        if (blockTop > heightMap[hIdx]) heightMap[hIdx] = blockTop;
+                    }
+                }
+                if (++collisionSkips > maxCollisionSkips) break;
+                continue;
+            }
+
+            // Collision check against already placed pieces
+            if (candidateIntersectsAny(tmpMatB, tmpBox)) {
+                // Block this footprint at this height and retry a different spot
+                const blockTop = Math.min(boxH, bestH + sizeY + packingGap);
+                for (let pz = 0; pz < pieceNZ; pz++) {
+                    for (let px = 0; px < pieceNX; px++) {
+                        const pIdx = pz * pieceNX + px;
+                        if (!expandedMask[pIdx]) continue;
+                        const hIdx = (bestZ + pz) * gridNX + (bestX + px);
+                        if (blockTop > heightMap[hIdx]) heightMap[hIdx] = blockTop;
+                    }
+                }
+
+                if (++collisionSkips > maxCollisionSkips) break;
+                continue;
+            }
+
+            const mesh = new THREE.Mesh(geometry.clone(), material.clone());
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.position.set(posX, posY, posZ);
+            this.scene.add(mesh);
+            this.pieces.push(mesh);
+
+            const colorIndex = placed % numColors;
+            mesh.material.color = new THREE.Color(this.pieceColors[colorIndex]);
+
+            positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+
+            // Cache placement for subsequent collision checks
+            placedAabbs.push(tmpBox.clone());
+            placedMatrices.push(tmpMatB.clone());
+
+            // Update height map
+            for (let pz = 0; pz < pieceNZ; pz++) {
+                for (let px = 0; px < pieceNX; px++) {
+                    const pIdx = pz * pieceNX + px;
+                    if (!expandedMask[pIdx]) continue;
+                    const hIdx = (bestZ + pz) * gridNX + (bestX + px);
+                    const top = bestH + pieceHeights[pIdx] + packingGap;
+                    if (top > heightMap[hIdx]) heightMap[hIdx] = top;
+                }
+            }
+
+            placed++;
+        }
+
+        this.lastPlacement = {
+            type: 'stl',
+            dims: { l: sizeX, w: sizeZ, h: sizeY },
+            geometry,
+            vertices: positions ? new Float32Array(positions.array) : null,
+            positions: positionsOut,
+            boxDims: { l: boxL, w: boxW, h: boxH }
+        };
+
+        return { count: placed };
     }
 
     /**

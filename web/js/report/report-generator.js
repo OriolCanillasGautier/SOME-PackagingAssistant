@@ -447,13 +447,13 @@ export class ReportGenerator {
     <!-- PAGE 1: Info + Isometric View -->
     <div class="page">
         <div class="header">
-            <h1>📦 ${this.t.title}</h1>
+            <h1>${this.t.title}</h1>
             <div class="subtitle">${this.t.subtitle} — ${currentDate}</div>
         </div>
 
         <div class="info-row">
             <div class="info-box">
-                <h3>🔧 ${this.t.pieceInfo}</h3>
+                <h3>${this.t.pieceInfo}</h3>
                 <table>
                     <tr><td>${this.t.dimensions}</td><td>${pieceDims.l} × ${pieceDims.w} × ${pieceDims.h} mm</td></tr>
                     <tr><td>${this.t.weight}</td><td>${pieceWeight} kg</td></tr>
@@ -461,7 +461,7 @@ export class ReportGenerator {
                 </table>
             </div>
             <div class="info-box">
-                <h3>📦 ${this.t.containerInfo}</h3>
+                <h3>${this.t.containerInfo}</h3>
                 <table>
                     <tr><td>${this.t.innerDims}</td><td>${boxDims.length} × ${boxDims.width} × ${boxDims.height} mm</td></tr>
                     <tr><td>${this.t.maxWeight}</td><td>${maxWeight} kg</td></tr>
@@ -469,7 +469,7 @@ export class ReportGenerator {
                 </table>
             </div>
             <div class="info-box results-box">
-                <h3>✅ ${this.t.results}</h3>
+                <h3>${this.t.results}</h3>
                 <table>
                     <tr><td>${this.t.pieceCount}</td><td class="result-value">${pieceCount}</td></tr>
                     <tr><td>${this.t.totalWeight}</td><td>${totalWeight.toFixed(2)} kg</td></tr>

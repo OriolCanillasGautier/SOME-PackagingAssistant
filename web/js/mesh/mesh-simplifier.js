@@ -62,7 +62,7 @@ export class MeshSimplifier {
         this.originalFaceCount = this.faces.length;
         this.originalVolume = this._calculateVolume(this.originalGeometry);
         
-        console.log(`📊 Malla carregada: ${this.originalVertexCount} vèrtexs, ${this.originalFaceCount} triangles`);
+        console.log(`Malla carregada: ${this.originalVertexCount} vèrtexs, ${this.originalFaceCount} triangles`);
     }
     
     /**
@@ -432,7 +432,7 @@ export class MeshSimplifier {
      * Simplifica a un nombre específic de vèrtexs
      */
     simplifyToVertexCount(targetVertices, preserveFeatures = true) {
-        console.log(`🔄 Simplificant a ${targetVertices} vèrtexs...`);
+        console.log(`Simplificant a ${targetVertices} vèrtexs...`);
         const startTime = performance.now();
         
         // Reset
@@ -497,7 +497,7 @@ export class MeshSimplifier {
         
         const elapsed = performance.now() - startTime;
         const finalCount = this.vertices.filter(v => !v.removed).length;
-        console.log(`✅ Simplificació completada en ${elapsed.toFixed(0)}ms (${finalCount} vèrtexs)`);
+        console.log(`Simplificació completada en ${elapsed.toFixed(0)}ms (${finalCount} vèrtexs)`);
         
         return this._buildOutputGeometry();
     }

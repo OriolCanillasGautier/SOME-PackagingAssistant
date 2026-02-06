@@ -5,6 +5,15 @@
 
 export const DEFAULT_SAFETY_FACTOR = 1.0;
 
+function calculateFit(pieceDim, boxDim, gap) {
+    if (pieceDim > boxDim) return 0;
+    if (Math.abs(gap) < 0.001) return Math.floor(boxDim / pieceDim);
+    const fit = Math.floor((boxDim + gap) / (pieceDim + gap));
+    const requiredSpace = fit * pieceDim + Math.max(0, fit - 1) * gap;
+    if (requiredSpace > boxDim) return fit - 1;
+    return fit;
+}
+
 /**
  * Find the best distribution limited by weight, prioritizing fewer stacking layers
  * @param {number} maxL - Max pieces in length direction
@@ -25,8 +34,9 @@ export function optimizeByWeight(maxL, maxW, maxH, targetUnits) {
             const units = l * w * h;
             if (units > targetUnits) continue;
             
-            // Score: more units is better, but penalize height
-            const score = units - (h * 0.01);
+            // Score: more units is better, then prefer larger base and fewer layers
+            const base = l * w;
+            const score = units * 1000 + base * 10 - h * 5;
             if (score > bestScore) {
                 bestScore = score;
                 bestDist = { l, w, h, units };
@@ -47,16 +57,16 @@ export function optimizeByWeight(maxL, maxW, maxH, targetUnits) {
 function createDebugInfo(orientations, maxWeight, objWeight) {
     const maxByWeight = objWeight > 0 ? Math.floor(maxWeight / objWeight) : 0;
     
-    let debug = '<h3>📋 Orientacions provades:</h3><ul>';
+    let debug = '<h3>Orientacions provades:</h3><ul>';
     
     for (const ori of orientations) {
-        const status = ori.fitsWeight ? '✅' : '⚖️';
+        const status = ori.fitsWeight ? '' : '';
         debug += `<li>${status} <strong>${ori.name}</strong>: ${ori.units} unitats `;
         debug += `(${ori.distribution}) - Pes: ${ori.weight.toFixed(2)}kg</li>`;
     }
     debug += '</ul>';
 
-    debug += '<h3>💡 Diagnòstic:</h3><ul>';
+    debug += '<h3>Diagnòstic:</h3><ul>';
     debug += `<li>Capacitat màxima: ${maxWeight.toFixed(1)} kg</li>`;
     debug += `<li>Pes per unitat: ${objWeight.toFixed(3)} kg</li>`;
     debug += `<li>Màxim teòric per pes: ${maxByWeight} unitats</li>`;
@@ -65,12 +75,12 @@ function createDebugInfo(orientations, maxWeight, objWeight) {
     const hasUnits = orientations.some(ori => ori.units > 0);
     if (hasUnits) {
         if (maxByWeight > 0) {
-            debug += `<p>✅ <strong>Solució</strong>: ${maxByWeight} unitats limitades per pes</p>`;
+            debug += `<p><strong>Solució</strong>: ${maxByWeight} unitats limitades per pes</p>`;
         } else {
-            debug += '<p>❌ <strong>Problema</strong>: El pes individual és massa alt</p>';
+            debug += '<p><strong>Problema</strong>: El pes individual és massa alt</p>';
         }
     } else {
-        debug += '<p>❌ <strong>Problema</strong>: Les dimensions són massa grans per la caixa</p>';
+        debug += '<p><strong>Problema</strong>: Les dimensions són massa grans per la caixa</p>';
     }
 
     return debug;
@@ -90,9 +100,9 @@ function createSummary(theoretical, real, config, safety, allOrientations) {
     const safetyPercent = Math.round(safety * 100);
     
     let summary = `
-    <h1>📦 RESULTATS</h1>
+    <h1>RESULTATS</h1>
     
-    <h2>🎯 Resultat Principal</h2>
+    <h2>Resultat Principal</h2>
     <ul>
         <li><strong>Unitats teòriques màximes:</strong> ${theoretical} <em>(per volum)</em></li>
         <li><strong>Unitats reals (seguretat ${safetyPercent}%):</strong> ${real}</li>
@@ -100,14 +110,14 @@ function createSummary(theoretical, real, config, safety, allOrientations) {
         <li><strong>Distribució:</strong> ${config?.distribution || '0×0×0'} (L×W×H)</li>
     </ul>
 
-    <h2>⚖️ Anàlisi de Pes i Volum</h2>
+    <h2>Anàlisi de Pes i Volum</h2>
     <ul>
         <li><strong>Pes total:</strong> ${(config?.weight || 0).toFixed(2)} kg</li>
         <li><strong>Eficiència volumètrica:</strong> ${(config?.volEfficiency || 0).toFixed(1)}%</li>
         <li><strong>Eficiència de pes:</strong> ${(config?.weightEfficiency || 0).toFixed(1)}%</li>
     </ul>
 
-    <h2>📐 Dimensions de l'Orientació Òptima</h2>
+    <h2>Dimensions de l'Orientació Òptima</h2>
     <ul>
         <li><strong>Llargada:</strong> ${dims[0].toFixed(2)} mm</li>
         <li><strong>Amplada:</strong> ${dims[1].toFixed(2)} mm</li>
@@ -116,12 +126,12 @@ function createSummary(theoretical, real, config, safety, allOrientations) {
     `;
 
     if (config?.limitedBy === 'weight') {
-        summary += '<p>⚖️ <strong>Factor limitant:</strong> PES (no dimensions)</p>';
+        summary += '<p><strong>Factor limitant:</strong> PES (no dimensions)</p>';
     }
 
     if (allOrientations.length > 1) {
         summary += `
-        <h2>📊 Comparació d'Orientacions</h2>
+        <h2>Comparació d'Orientacions</h2>
         <table>
             <thead>
                 <tr>
@@ -137,7 +147,7 @@ function createSummary(theoretical, real, config, safety, allOrientations) {
         `;
         
         for (const ori of allOrientations) {
-            const status = ori.fitsWeight ? '✅' : '❌';
+            const status = ori.fitsWeight ? '' : '';
             summary += `
                 <tr>
                     <td>${status} ${ori.name}</td>
@@ -168,6 +178,7 @@ function createSummary(theoretical, real, config, safety, allOrientations) {
  * @param {number} params.boxH - Box height (mm)
  * @param {number} params.maxWeight - Max box weight (kg)
  * @param {boolean} params.allowRotation - Allow 6 orientations
+ * @param {Array} params.orientationOverrides - Optional orientation overrides [{dims:[l,w,h], name, permIndex}]
  * @param {number} params.safetyFactor - Safety factor (0.5-1.0)
  * @returns {Object} {summary: string, data: Object}
  */
@@ -177,20 +188,21 @@ export function calcularEmpaquetatge(params) {
         boxL, boxW, boxH, maxWeight,
         allowRotation = true,
         safetyFactor = DEFAULT_SAFETY_FACTOR,
-        packingGap = 0 // Separació entre peces en mm (0 = sense gap)
+        packingGap = 0, // Separació entre peces en mm (0 = sense gap)
+        orientationOverrides = null
     } = params;
 
     // Validation
     if ([objL, objW, objH, objWeight, boxL, boxW, boxH, maxWeight].some(v => v <= 0)) {
         return {
-            summary: '<p>❌ Tots els valors han de ser majors que 0.</p>',
+            summary: '<p>Tots els valors han de ser majors que 0.</p>',
             data: null
         };
     }
 
     if (objWeight > maxWeight) {
         return {
-            summary: '<p>❌ El pes d\'una sola unitat supera la capacitat màxima de la caixa.</p>',
+            summary: '<p>El pes d\'una sola unitat supera la capacitat màxima de la caixa.</p>',
             data: null
         };
     }
@@ -198,11 +210,15 @@ export function calcularEmpaquetatge(params) {
     // Object dimensions
     const objDims = [objL, objW, objH];
     const boxDims = [boxL, boxW, boxH];
+    const volBox = boxDims[0] * boxDims[1] * boxDims[2];
 
     // Generate orientations (6 permutations or just 1)
     let orientations, orientationNames;
     
-    if (allowRotation) {
+    if (Array.isArray(orientationOverrides) && orientationOverrides.length > 0) {
+        orientations = orientationOverrides.map(o => o.dims);
+        orientationNames = orientationOverrides.map((o, i) => o.name || `Orientació ${i + 1}`);
+    } else if (allowRotation) {
         orientations = [
             [objDims[0], objDims[1], objDims[2]],
             [objDims[0], objDims[2], objDims[1]],
@@ -228,6 +244,15 @@ export function calcularEmpaquetatge(params) {
     let bestConfig = null;
     const allOrientations = [];
 
+    const isMoreStable = (a, b) => {
+        if (!b) return true;
+        if (!a) return false;
+        const baseA = (a.fitL || 0) * (a.fitW || 0);
+        const baseB = (b.fitL || 0) * (b.fitW || 0);
+        if (baseA !== baseB) return baseA > baseB;
+        return (a.fitH || 0) < (b.fitH || 0);
+    };
+
     for (let i = 0; i < orientations.length; i++) {
         const [ol, ow, oh] = orientations[i];
         
@@ -237,22 +262,9 @@ export function calcularEmpaquetatge(params) {
         // Solving: N <= (boxDim + gap) / (pieceDim + gap)
         // First check that at least one piece fits (without gap requirement)
         
-        let fitL = 0, fitW = 0, fitH = 0;
-        
-        if (ol <= boxDims[0]) {
-            const effL = ol + packingGap;
-            fitL = effL <= 0.001 ? Math.floor(boxDims[0] / (ol * 0.1)) : Math.floor((boxDims[0] + packingGap) / effL);
-        }
-        
-        if (ow <= boxDims[1]) {
-            const effW = ow + packingGap;
-            fitW = effW <= 0.001 ? Math.floor(boxDims[1] / (ow * 0.1)) : Math.floor((boxDims[1] + packingGap) / effW);
-        }
-        
-        if (oh <= boxDims[2]) {
-            const effH = oh + packingGap;
-            fitH = effH <= 0.001 ? Math.floor(boxDims[2] / (oh * 0.1)) : Math.floor((boxDims[2] + packingGap) / effH);
-        }
+        let fitL = calculateFit(ol, boxDims[0], packingGap);
+        let fitW = calculateFit(ow, boxDims[1], packingGap);
+        let fitH = calculateFit(oh, boxDims[2], packingGap);
         
         // Safety cap to prevent infinite loop or memory crash with extreme nesting
         fitL = Math.max(0, Math.min(fitL, 1000));
@@ -263,16 +275,24 @@ export function calcularEmpaquetatge(params) {
         const totalWeight = totalUnits * objWeight;
 
         const volObj = ol * ow * oh;
-        const volBox = boxDims[0] * boxDims[1] * boxDims[2];
         const volEfficiency = volBox > 0 ? (totalUnits * volObj / volBox * 100) : 0;
         const weightEfficiency = maxWeight > 0 ? (totalWeight / maxWeight * 100) : 0;
 
         const orientationData = {
             name: orientationNames[i],
             dimensions: [ol, ow, oh],
-            permIndex: i, // Store which permutation was used
+            permIndex: Array.isArray(orientationOverrides) && orientationOverrides[i]?.permIndex !== undefined
+                ? orientationOverrides[i].permIndex
+                : i,
+            rotation: Array.isArray(orientationOverrides) && orientationOverrides[i]?.rotation
+                ? orientationOverrides[i].rotation
+                : null,
             units: totalUnits,
             distribution: `${fitL}×${fitW}×${fitH}`,
+            maxFit: { l: fitL, w: fitW, h: fitH },
+            fitL,
+            fitW,
+            fitH,
             weight: totalWeight,
             volEfficiency,
             weightEfficiency,
@@ -281,10 +301,12 @@ export function calcularEmpaquetatge(params) {
         allOrientations.push(orientationData);
 
         // If fits both dimensions and weight
-        if (totalUnits > 0 && totalWeight <= maxWeight && totalUnits > bestFit) {
-            bestFit = totalUnits;
-            bestConfig = { ...orientationData };
-            continue;
+        if (totalUnits > 0 && totalWeight <= maxWeight) {
+            if (totalUnits > bestFit || (totalUnits === bestFit && isMoreStable(orientationData, bestConfig))) {
+                bestFit = totalUnits;
+                bestConfig = { ...orientationData };
+                continue;
+            }
         }
 
         // If doesn't fit due to weight, try optimization
@@ -294,27 +316,88 @@ export function calcularEmpaquetatge(params) {
         if (maxByWeight <= bestFit) continue;
 
         const bestDist = optimizeByWeight(fitL, fitW, fitH, maxByWeight);
-        if (!bestDist || bestDist.units <= bestFit) continue;
+        if (!bestDist) continue;
 
-        bestFit = bestDist.units;
-        bestConfig = {
+        const weightConfig = {
             name: `${orientationNames[i]} (Limitat per pes)`,
             dimensions: [ol, ow, oh],
+            rotation: Array.isArray(orientationOverrides) && orientationOverrides[i]?.rotation
+                ? orientationOverrides[i].rotation
+                : null,
             units: bestDist.units,
             distribution: `${bestDist.l}×${bestDist.w}×${bestDist.h}`,
+            maxFit: { l: fitL, w: fitW, h: fitH },
+            fitL: bestDist.l,
+            fitW: bestDist.w,
+            fitH: bestDist.h,
             weight: bestDist.units * objWeight,
             volEfficiency: volBox > 0 ? (bestDist.units * volObj / volBox * 100) : 0,
             weightEfficiency: maxWeight > 0 ? (bestDist.units * objWeight / maxWeight * 100) : 0,
             fitsWeight: true,
             limitedBy: 'weight',
         };
+
+        if (bestDist.units > bestFit || (bestDist.units === bestFit && isMoreStable(weightConfig, bestConfig))) {
+            bestFit = bestDist.units;
+            bestConfig = weightConfig;
+        }
+    }
+
+    // Prefer stable orientation when close to max capacity
+    if (bestFit > 0) {
+        const stabilitySlack = 0.7; // Allow up to 30% fewer units for stability
+        const candidates = [];
+
+        for (const ori of allOrientations) {
+            if (ori.units > 0 && ori.fitsWeight) {
+                candidates.push({ ...ori });
+                continue;
+            }
+
+            if (ori.units > 0 && !ori.fitsWeight && objWeight > 0 && maxWeight > 0) {
+                const maxByWeight = Math.floor(maxWeight / objWeight);
+                const bestDist = optimizeByWeight(ori.fitL, ori.fitW, ori.fitH, maxByWeight);
+                if (bestDist && bestDist.units > 0) {
+                    candidates.push({
+                        name: `${ori.name} (Limitat per pes)`,
+                        dimensions: [...ori.dimensions],
+                        permIndex: ori.permIndex,
+                        rotation: ori.rotation || null,
+                        units: bestDist.units,
+                        distribution: `${bestDist.l}×${bestDist.w}×${bestDist.h}`,
+                        maxFit: { ...ori.maxFit },
+                        fitL: bestDist.l,
+                        fitW: bestDist.w,
+                        fitH: bestDist.h,
+                        weight: bestDist.units * objWeight,
+                        volEfficiency: volBox > 0 ? (bestDist.units * (ori.dimensions[0] * ori.dimensions[1] * ori.dimensions[2]) / volBox * 100) : 0,
+                        weightEfficiency: maxWeight > 0 ? (bestDist.units * objWeight / maxWeight * 100) : 0,
+                        fitsWeight: true,
+                        limitedBy: 'weight',
+                    });
+                }
+            }
+        }
+
+        const stableCandidates = candidates.filter(c => c.units >= bestFit * stabilitySlack);
+        if (stableCandidates.length > 0) {
+            stableCandidates.sort((a, b) => {
+                const baseA = (a.fitL || 0) * (a.fitW || 0);
+                const baseB = (b.fitL || 0) * (b.fitW || 0);
+                if (baseA !== baseB) return baseB - baseA;
+                if ((a.fitH || 0) !== (b.fitH || 0)) return (a.fitH || 0) - (b.fitH || 0);
+                return b.units - a.units;
+            });
+            bestConfig = { ...stableCandidates[0] };
+            bestFit = bestConfig.units;
+        }
     }
 
     // No solution found
     if (bestFit === 0 || !bestConfig) {
         const debug = createDebugInfo(allOrientations, maxWeight, objWeight);
         return {
-            summary: `<p>❌ No cap cap unitat a la caixa.</p>${debug}`,
+            summary: `<p>No cap cap unitat a la caixa.</p>${debug}`,
             data: null
         };
     }
@@ -323,6 +406,19 @@ export function calcularEmpaquetatge(params) {
     const safety = Math.max(0.0, Math.min(1.0, safetyFactor));
     let realFit = Math.max(1, Math.floor(bestFit * safety));
     realFit = Math.min(realFit, bestFit);
+
+    let realDistribution = bestConfig.distribution;
+    if (bestConfig?.maxFit) {
+        const bestDist = optimizeByWeight(
+            bestConfig.maxFit.l,
+            bestConfig.maxFit.w,
+            bestConfig.maxFit.h,
+            realFit
+        );
+        if (bestDist && bestDist.units > 0) {
+            realDistribution = `${bestDist.l}×${bestDist.w}×${bestDist.h}`;
+        }
+    }
 
     const summary = createSummary(bestFit, realFit, bestConfig, safety, allOrientations);
 
@@ -333,6 +429,7 @@ export function calcularEmpaquetatge(params) {
             realUnits: realFit,
             bestOrientation: bestConfig,
             allOrientations,
+            realDistribution,
             packingGap: packingGap,
         }
     };
@@ -344,10 +441,11 @@ export function calcularEmpaquetatge(params) {
  * @returns {Array} [nx, ny, nz] distribution
  */
 export function getDistribution(data) {
-    if (!data?.bestOrientation?.distribution) {
+    const distribution = data?.realDistribution || data?.bestOrientation?.distribution;
+    if (!distribution) {
         return [0, 0, 0];
     }
-    const parts = data.bestOrientation.distribution.split('×');
+    const parts = distribution.split('×');
     return parts.map(p => parseInt(p, 10) || 0);
 }
 

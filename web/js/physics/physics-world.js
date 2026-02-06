@@ -19,10 +19,10 @@ export async function initRapier() {
     try {
         RAPIER = await import('@dimforge/rapier3d-compat');
         await RAPIER.init();
-        console.log('✅ Rapier physics engine initialized');
+        console.log('Rapier physics engine initialized');
         return true;
     } catch (error) {
-        console.error('❌ Failed to initialize Rapier:', error);
+        console.error('Failed to initialize Rapier:', error);
         return false;
     }
 }
@@ -47,18 +47,20 @@ export class PhysicsWorld {
         
         // Solver iterations for more accurate collision (reduces interpenetration)
         // Higher values = less interpenetration but slower
-        // Solver iterations for more accurate collision (reduces interpenetration)
-        // Higher values = less interpenetration but slower
-        this.numSolverIterations = 128; // Increased from 64 for extreme stability
-        this.numAdditionalFrictionIterations = 64; // Increased from 32
-        this.numVelocitySolverIterations = 64; // Increased from 32
+        this.numSolverIterations = 32;
+        this.numAdditionalFrictionIterations = 16;
+        this.numVelocitySolverIterations = 16;
         
         // Vibration settings
         this.isVibrating = false;
         this.vibrationTime = 0;
         this.vibrationDuration = 5000; // 5 seconds of vibration
-        this.vibrationFrequency = 12.0; // Hz - stronger
-        this.vibrationAmplitude = 1.0; // mm - visible shake
+        this.vibrationFrequency = 8.0; // Hz
+        this.vibrationAmplitude = 0.5; // mm
+        this.vibrationPhaseOffsets = [];
+        this.vibrationFrequencyJitter = 0.25; // +/- 25%
+        this.vibrationAmplitudeJitter = 0.35; // +/- 35%
+        this.vibrationNoise = 0.15; // mm random jitter per step
 
         
         // Lid Press settings
@@ -180,6 +182,14 @@ export class PhysicsWorld {
         this.isVibrating = true;
         this.vibrationTime = 0;
         this.vibrationDuration = duration;
+        // Randomize phase per wall to avoid coherent motion
+        this.vibrationPhaseOffsets = this.wallBodies.map(() => ({
+            px: Math.random() * Math.PI * 2,
+            py: Math.random() * Math.PI * 2,
+            pz: Math.random() * Math.PI * 2,
+            freqScale: 1 + (Math.random() * 2 - 1) * this.vibrationFrequencyJitter,
+            ampScale: 1 + (Math.random() * 2 - 1) * this.vibrationAmplitudeJitter
+        }));
         console.log(`Starting box vibration for ${duration}ms`);
     }
     
@@ -215,41 +225,41 @@ export class PhysicsWorld {
         // Calculate vibration offset using sine waves
         const t = this.vibrationTime / 1000; // seconds
         const progress = this.vibrationTime / this.vibrationDuration; // 0 to 1
-        const freq = this.vibrationFrequency;
-        let amp = this.vibrationAmplitude;
+        const baseFreq = this.vibrationFrequency;
+        const baseAmp = this.vibrationAmplitude;
         
-        // LID BOOST: Increase vibration if lid is pressing
-        let lidBoost = 1.0;
-        if (this.lidState === 'descending' || this.lidState === 'holding') {
-            lidBoost = 2.0; // Double vibration during compression
-        }
+        // LID BOOST: keep neutral to avoid ejecting pieces
+        const lidBoost = 1.0;
 
         // Amplitude factor: decrease over time UNLESS we are in lid boost phase
         const ampFactor = lidBoost > 1.0 ? 1.0 : Math.max(0, 1.0 - progress);
         
-        amp *= lidBoost;
-
         // Multi-frequency vibration with stronger vertical component
         const lateralFactor = (lidBoost > 1.0 || progress < 0.5) ? 1.0 : 0.5;
         const verticalFactor = (lidBoost > 1.0 || progress < 0.5) ? 0.8 : 1.2;
-        
-        const offsetX = amp * ampFactor * lateralFactor * (
-            Math.sin(2 * Math.PI * freq * t) + 
-            0.5 * Math.sin(2 * Math.PI * freq * 2.3 * t)
-        );
-        const offsetY = amp * ampFactor * verticalFactor * (
-            Math.sin(2 * Math.PI * freq * 1.5 * t + 0.5) +
-            0.3 * Math.sin(2 * Math.PI * freq * 3.7 * t)
-        );
-        const offsetZ = amp * ampFactor * lateralFactor * (
-            Math.sin(2 * Math.PI * freq * 1.1 * t + 1.0) +
-            0.5 * Math.sin(2 * Math.PI * freq * 2.7 * t + 0.3)
-        );
         
         // Apply offset to all walls
         for (let i = 0; i < this.wallBodies.length; i++) {
             const body = this.wallBodies[i];
             const orig = this.wallOriginalPositions[i];
+            const phase = this.vibrationPhaseOffsets[i] || { px: 0, py: 0, pz: 0, freqScale: 1, ampScale: 1 };
+            const freq = baseFreq * phase.freqScale;
+            const amp = baseAmp * phase.ampScale * lidBoost;
+            const noise = (Math.random() * 2 - 1) * this.vibrationNoise;
+
+            const offsetX = amp * ampFactor * lateralFactor * (
+                Math.sin(2 * Math.PI * freq * t + phase.px) +
+                0.5 * Math.sin(2 * Math.PI * freq * 2.3 * t + phase.px * 0.7)
+            ) + noise;
+            const offsetY = amp * ampFactor * verticalFactor * (
+                Math.sin(2 * Math.PI * freq * 1.5 * t + phase.py + 0.5) +
+                0.3 * Math.sin(2 * Math.PI * freq * 3.7 * t + phase.py * 0.9)
+            ) + noise * 0.5;
+            const offsetZ = amp * ampFactor * lateralFactor * (
+                Math.sin(2 * Math.PI * freq * 1.1 * t + phase.pz + 1.0) +
+                0.5 * Math.sin(2 * Math.PI * freq * 2.7 * t + phase.pz * 0.6)
+            ) + noise;
+
             if (body.isValid()) {
                 // EXCLUDE vertical vibration from floor (index 0) to prevent launching pieces
                 const actualOffsetY = (i === 0) ? 0 : offsetY;
@@ -279,8 +289,8 @@ export class PhysicsWorld {
         // Create dynamic rigid body
         const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
             .setTranslation(position.x, position.y, position.z)
-            .setLinearDamping(0.5) // Increased damping for stability
-            .setAngularDamping(1.5) // Increased from 0.8 to prevent wild spinning pieces
+            .setLinearDamping(0.1)
+            .setAngularDamping(0.3)
             .setCcdEnabled(true); // Continuous collision detection
         
         // Apply rotation if provided
@@ -302,6 +312,15 @@ export class PhysicsWorld {
         }
         
         // Create cuboid collider (half-extents)
+        // Use slightly smaller collider to reduce interpenetration
+        const colliderDesc = RAPIER.ColliderDesc.cuboid(l / 2 * 0.95, h / 2 * 0.95, w / 2 * 0.95)
+            .setDensity(2.0)
+            .setFriction(0.5)
+            .setRestitution(0.01)
+            .setContactForceEventThreshold(0.01);
+
+        this.world.createCollider(colliderDesc, body);
+        this.bodies.push(body);
 
         return body;
     }
@@ -312,8 +331,8 @@ export class PhysicsWorld {
     addConvexHull(vertices, position, rotation = null, mesh = null) {
         const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
             .setTranslation(position.x, position.y, position.z)
-            .setLinearDamping(0.5) // Increased damping
-            .setAngularDamping(1.5) // Increased from 0.8
+            .setLinearDamping(0.2)
+            .setAngularDamping(0.5)
             .setCcdEnabled(true);
         
         if (rotation) {
@@ -545,7 +564,8 @@ export class PhysicsWorld {
         // Level 2: Strict - Final report cleanup
         else if (strictness === 2) {
             const horizOutside = maxX < 0 || minX > length || maxZ < 0 || minZ > width;
-            shouldRemove = completelyOutside || horizOutside || maxY > height;
+            const heightTolerance = pieceDims ? Math.min(20, pieceDims.h * 0.3) : 20;
+            shouldRemove = completelyOutside || horizOutside || maxY > height + heightTolerance;
         }
         
         if (shouldRemove) {
@@ -663,9 +683,8 @@ export class PhysicsWorld {
         this.onLidFinished = callback;
         this.lidHoldTime = 0;
         
-        // Start vibration to help settlement while pressing
-        // Vibrate for enough time to cover descent + hold (10+ seconds)
-        this.startVibration(12000); 
+        // Start vibration to help settlement while pressing (only if not already vibrating)
+        if (!this.isVibrating) this.startVibration(6000);
         
         console.log('Starting Lid Sequence with Vibration...');
     }
@@ -683,7 +702,7 @@ export class PhysicsWorld {
             this.lidMesh.position.set(pos.x, pos.y, pos.z);
         }
         
-        const speed = 0.02 * dtMs; // Reduced from 0.1 to be MUCH more gradual and stable
+        const speed = 0.1 * dtMs;
         
         switch (this.lidState) {
             case 'descending':
@@ -742,6 +761,26 @@ export class PhysicsWorld {
     start() {
         this.isRunning = true;
         console.log('Physics simulation started');
+    }
+
+    setGravity(value) {
+        this.gravity = value;
+        if (this.world) {
+            this.world.gravity = { x: 0.0, y: value, z: 0.0 };
+        }
+    }
+
+    lockAllRotations(lock = true) {
+        const bodies = this.meshBodies.map(m => m.body).concat(this.bodies);
+        for (const body of bodies) {
+            if (!body || !body.isValid?.()) continue;
+            if (typeof body.lockRotations === 'function') {
+                body.lockRotations(lock, true);
+            } else if (typeof body.setEnabledRotations === 'function') {
+                const enable = !lock;
+                body.setEnabledRotations(enable, enable, enable, true);
+            }
+        }
     }
 
     pause() {
@@ -818,12 +857,12 @@ export class BulkSimulation {
         // Saturation detection - stop if no new pieces enter box after X drops
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
-        this.maxStagnantDrops = 20; // Stop after 20 consecutive checks without increase (was 5)
-        this.checkInterval = 10; // Check every 10 drops (was 2, too aggressive)
+        this.maxStagnantDrops = 50; // Stop after 50 consecutive checks without increase
+        this.checkInterval = 20; // Check every 20 drops
         
         // Track pieces above box to detect overflow faster
         this.piecesAboveBox = 0;
-        this.maxPiecesAboveBox = 15; // If 15+ pieces are stuck above, box is full (was 3)
+        this.maxPiecesAboveBox = 30; // If 30+ pieces are stuck above, box is full
         
         // 20 distinct colors for pieces - configurable
         this.pieceColors = [
@@ -863,6 +902,9 @@ export class BulkSimulation {
         // Refill cycles tracking
         this.currentCycle = 1;
         this.maxRefillCycles = 1; // Up to 1 refill attempt (Total 2 cycles)
+
+        // Disable lid by default to avoid creating a floating platform during drop
+        this.enableLidPress = false;
     }
 
     /**
@@ -880,6 +922,9 @@ export class BulkSimulation {
             autoMode = false,
             settlingTimeoutMs = 30000,
             colorCount = 10,
+            vibrationFrequency = null,
+            vibrationAmplitude = null,
+            vibrationNoise = null,
             pieceWeight = 0,
             maxWeight = 0
         } = options;
@@ -893,7 +938,7 @@ export class BulkSimulation {
         this.randomRotation = randomRotation;
         this.droppedCount = 0;
         this.autoMode = autoMode;
-        this.maxOverflow = autoMode ? 50 : 20; // Allow more overflow in auto mode
+        this.maxOverflow = autoMode ? 100 : 20; // Allow more overflow in auto mode
         this.overflowCount = 0;
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
@@ -914,6 +959,17 @@ export class BulkSimulation {
 
         // Initialize physics world
         await this.physics.init(boxDims);
+
+        // Apply vibration tuning if provided
+        if (Number.isFinite(vibrationFrequency)) {
+            this.physics.vibrationFrequency = vibrationFrequency;
+        }
+        if (Number.isFinite(vibrationAmplitude)) {
+            this.physics.vibrationAmplitude = vibrationAmplitude;
+        }
+        if (Number.isFinite(vibrationNoise)) {
+            this.physics.vibrationNoise = vibrationNoise;
+        }
 
         // Setup settled callback (FINAL completion only)
         // Setup settled callback (FINAL completion only)
@@ -942,7 +998,6 @@ export class BulkSimulation {
         this.hasRetried = false;
         this.retryCount = 0;
         this.hasRefilled = false;
-        this.retryCount = 0;
         this.hasPressedLid = false;
         this.currentCycle = 1;
         
@@ -954,6 +1009,10 @@ export class BulkSimulation {
         
         // Start dropping pieces at intervals
         this.dropInterval = setInterval(() => this.dropPiece(), this.dropIntervalMs);
+        
+        // Apply constant vibration during dropping to help pieces settle
+        // The vibration should stop when the drop phase ends (managed in stop/reset)
+        this.physics.startVibration(3600000); // 1 hour (effectively until stopped)
         
         // Start physics update loop
         this.update();
@@ -1133,12 +1192,12 @@ export class BulkSimulation {
             if (this.autoMode) {
                 if (this.pieceWeight > 0 && this.maxWeight > 0) {
                     const weightStr = this.currentTotalWeight.toFixed(2);
-                    progressText = `🌊 Mode automàtic: ${this.droppedCount} peces | ⚖️ ${weightStr}/${this.maxWeight} kg`;
+                    progressText = `Mode automàtic: ${this.droppedCount} peces | ${weightStr}/${this.maxWeight} kg`;
                 } else {
-                    progressText = `🌊 Mode automàtic: ${this.droppedCount} peces (fins que la caixa es plenarà)`;
+                    progressText = `Mode automàtic: ${this.droppedCount} peces (fins que la caixa es plenarà)`;
                 }
             } else {
-                progressText = `🌊 Deixant caure peces: ${this.droppedCount}/${this.maxPieces}`;
+                progressText = `Deixant caure peces: ${this.droppedCount}/${this.maxPieces}`;
             }
             this.onStatusUpdate({
                 status: 'running',
@@ -1220,39 +1279,48 @@ export class BulkSimulation {
             ? `(pes màxim assolit: ${this.currentTotalWeight.toFixed(2)} kg)`
             : '';
 
-        // 1. PRE-CLEANUP (Level 1: 100% outside)
-        const removed = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 1);
+        // 1. PRE-CLEANUP (Level 0: only completely outside)
+        const removed = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 0);
         
         // 2. START VIBRATION
         this.vibrationPhase = true;
-        this.physics.startVibration(10000); // 10 seconds of vibration
+        this.physics.startVibration(6000); // 6 seconds of vibration
         
         if (this.onStatusUpdate) {
             this.onStatusUpdate({
                 status: 'vibrating',
                 dropped: this.droppedCount,
-                message: `📳 ${removed} peces fora. Vibrant i encaixant peces... ${reasonText}`
+                message: `${removed} peces fora. Vibrant i encaixant peces... ${reasonText}`
             });
         }
         
-        // 3. START CONCURRENT LID (after 1s delay)
-        setTimeout(() => {
-            if (!this.isRunning) return;
-            this.hasPressedLid = true;
-            
-            if (this.onStatusUpdate) {
-                this.onStatusUpdate({
-                    status: 'compacting',
-                    message: `🚜 Vibració activa + Premsatge amb tapa...`
+        // 3. START CONCURRENT LID (after 1s delay) or finish after vibration
+        if (this.enableLidPress) {
+            setTimeout(() => {
+                if (!this.isRunning) return;
+                this.hasPressedLid = true;
+                
+                if (this.onStatusUpdate) {
+                    this.onStatusUpdate({
+                        status: 'compacting',
+                        message: `Vibració activa + Premsatge amb tapa...`
+                    });
+                }
+                
+                this.physics.startLidSequence(this.scene, () => {
+                    this.vibrationPhase = false; // Ensure vibration phase flag is cleared
+                    this.physics.stopVibration(); // Stop shaking immediately to speed up cycle
+                    this.finishSimulation();
                 });
-            }
-            
-            this.physics.startLidSequence(this.scene, () => {
-                this.vibrationPhase = false; // Ensure vibration phase flag is cleared
-                this.physics.stopVibration(); // Stop shaking immediately to speed up cycle
+            }, 1000); // 1 second headstart for vibration
+        } else {
+            setTimeout(() => {
+                if (!this.isRunning) return;
+                this.vibrationPhase = false;
+                this.physics.stopVibration();
                 this.finishSimulation();
-            });
-        }, 1000); // 1 second headstart for vibration
+            }, 6000);
+        }
         
         // Start settling timeout (safety)
         this.settlingTimeout = setTimeout(() => {
@@ -1267,8 +1335,8 @@ export class BulkSimulation {
      * Finalize simulation after Lid Press
      */
     finishSimulation() {
-        // Final Cleanup for this cycle (Semi-Strict Level 1)
-        const semiRemoved = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 1);
+        // Final Cleanup for this cycle (Relaxed Level 0)
+        const semiRemoved = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 0);
         const currentCount = this.physics.countPiecesInBox();
         
         // DECIDE IF WE NEED ANOTHER CYCLE
@@ -1286,7 +1354,7 @@ export class BulkSimulation {
             if (this.onStatusUpdate) {
                 this.onStatusUpdate({
                     status: 'refilling',
-                    message: `🔄 Cicle ${this.currentCycle-1} completat. Afegint ${refillCount} peces més per omplir buits...`
+                    message: `Cicle ${this.currentCycle-1} completat. Afegint ${refillCount} peces més per omplir buits...`
                 });
             }
             
@@ -1305,7 +1373,7 @@ export class BulkSimulation {
                 dropped: this.droppedCount,
                 inside: finalCount,
                 removed: finalRemoved,
-                message: `✅ Finalitzat: ${finalCount} peces dins la caixa (compactat en ${this.currentCycle} cicles)`
+                message: `Finalitzat: ${finalCount} peces dins la caixa (compactat en ${this.currentCycle} cicles)`
             });
         }
     }
@@ -1363,6 +1431,7 @@ export class BulkSimulation {
     stop() {
         this.isRunning = false;
         this.physics.pause();
+        this.physics.stopVibration(); // Stop any active vibration
         
         if (this.dropInterval) {
             clearInterval(this.dropInterval);
@@ -1407,7 +1476,7 @@ export class BulkSimulation {
             this.onStatusUpdate({
                 status: 'reset',
                 dropped: 0,
-                message: '🔄 Simulació reiniciada'
+                message: 'Simulació reiniciada'
             });
         }
     }

@@ -3,10 +3,11 @@
  * Connects UI with packing calculator, 3D visualization, and physics simulation
  */
 
+import * as THREE from 'three';
 import { calcularEmpaquetatge, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_38';
-import { loadMesh, loadSTL, extractDimensions, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation } from './mesh/mesh-utils.js?v=force_update_38';
+import { loadMesh, loadSTL, extractDimensions, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability } from './mesh/mesh-utils.js?v=force_update_38';
 import { SceneManager } from './visualization/scene.js?v=force_update_38';
-import { BulkSimulation, initRapier } from './physics/physics-world.js?v=force_update_38';
+import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-world.js?v=force_update_38';
 import { ReportGenerator } from './report/report-generator.js?v=force_update_38';
 import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_38';
 import { StorageManager } from './storage/storage-manager.js?v=force_update_38';
@@ -30,6 +31,7 @@ function updateMaxPiecesLimit() {
     }
 }
 
+
 // Application state
 const state = {
     mode: 'optimized', // 'optimized' or 'bulk'
@@ -40,6 +42,8 @@ const state = {
     sceneManager: null,
     bulkSimulation: null,
     isSimulating: false,
+    gravitySimulation: null,
+    physicsWorld: null,
     reportGenerator: null,
     lastResults: null, // Store last results for report generation
     storage: null // StorageManager instance
@@ -56,6 +60,7 @@ const elements = {
     objHeight: document.getElementById('obj-height'),
     objWeight: document.getElementById('obj-weight'),
     allowRotation: document.getElementById('allow-rotation'),
+    heightMapNesting: document.getElementById('heightmap-nesting'),
     stlUpload: document.getElementById('stl-upload'),
     stlStatus: document.getElementById('stl-status'),
     optPieceColors: document.getElementById('opt-piece-colors'),
@@ -80,6 +85,12 @@ const elements = {
     maxPiecesGroup: document.getElementById('max-pieces-group'),
     dropInterval: document.getElementById('drop-interval'),
     dropIntervalValue: document.getElementById('drop-interval-value'),
+    vibrationFrequency: document.getElementById('vibration-frequency'),
+    vibrationFrequencyValue: document.getElementById('vibration-frequency-value'),
+    vibrationAmplitude: document.getElementById('vibration-amplitude'),
+    vibrationAmplitudeValue: document.getElementById('vibration-amplitude-value'),
+    vibrationNoise: document.getElementById('vibration-noise'),
+    vibrationNoiseValue: document.getElementById('vibration-noise-value'),
     pieceColors: document.getElementById('piece-colors'),
     pieceColorsValue: document.getElementById('piece-colors-value'),
     randomRotation: document.getElementById('random-rotation'),
@@ -91,6 +102,8 @@ const elements = {
     startSimBtn: document.getElementById('start-simulation-btn'),
     stopSimBtn: document.getElementById('stop-simulation-btn'),
     resetSimBtn: document.getElementById('reset-simulation-btn'),
+    applyGravityBtn: document.getElementById('apply-gravity-btn'),
+    testCollisionsBtn: document.getElementById('test-collisions-btn'),
     
     // Report buttons
     reportButtons: document.getElementById('report-buttons'),
@@ -122,177 +135,116 @@ const elements = {
  * Initialize the application
  */
 async function init() {
-    // Initialize 3D scene
     state.sceneManager = new SceneManager(elements.threeCanvas);
-    
-    // Initialize report generator
     state.reportGenerator = new ReportGenerator(state.sceneManager);
-    
-    // Initialize storage manager
     state.storage = new StorageManager();
     await state.storage.init();
-    
-    // Setup event listeners
     setupEventListeners();
-    
-    // Load STL history
     await loadSTLHistory();
-    
-    // Check for URL parameters (from history page)
-    loadFromURLParams();
-    
-    // Initialize physics (preload)
-    try {
-        await initRapier();
+    switchMode(state.mode);
+    initRapier().then(() => {
         console.log('Physics engine ready');
-    } catch (e) {
-        console.warn('Physics engine not available:', e);
-    }
-}
-
-/**
- * Load data from URL parameters (for history page integration)
- */
-function loadFromURLParams() {
-    const params = new URLSearchParams(window.location.search);
-    
-    // Check if we have parameters
-    if (params.has('objL')) {
-        elements.objLength.value = params.get('objL') || elements.objLength.value;
-    }
-    if (params.has('objW')) {
-        elements.objWidth.value = params.get('objW') || elements.objWidth.value;
-    }
-    if (params.has('objH')) {
-        elements.objHeight.value = params.get('objH') || elements.objHeight.value;
-    }
-    if (params.has('objWeight')) {
-        elements.objWeight.value = params.get('objWeight') || elements.objWeight.value;
-    }
-    if (params.has('boxL')) {
-        elements.boxLength.value = params.get('boxL') || elements.boxLength.value;
-    }
-    if (params.has('boxW')) {
-        elements.boxWidth.value = params.get('boxW') || elements.boxWidth.value;
-    }
-    if (params.has('boxH')) {
-        elements.boxHeight.value = params.get('boxH') || elements.boxHeight.value;
-    }
-    if (params.has('maxWeight')) {
-        elements.maxWeight.value = params.get('maxWeight') || elements.maxWeight.value;
-    }
-    if (params.has('mode')) {
-        const mode = params.get('mode');
-        if (mode === 'bulk' || mode === 'optimized') {
-            switchMode(mode);
-        }
-    }
-    
-    // Clear URL params after loading (clean URL)
-    if (params.toString()) {
-        window.history.replaceState({}, document.title, window.location.pathname);
-    }
+    }).catch(() => {});
 }
 
 /**
  * Setup all event listeners
  */
 function setupEventListeners() {
-    // Mode switching
     elements.modeButtons.forEach(btn => {
         btn.addEventListener('click', () => switchMode(btn.dataset.mode));
     });
-    
-    // Safety factor slider
-    elements.safetyFactor.addEventListener('input', (e) => {
-        elements.safetyValue.textContent = e.target.value;
+
+    elements.safetyFactor?.addEventListener('input', (e) => {
+        if (elements.safetyValue) {
+            elements.safetyValue.textContent = e.target.value;
+        }
     });
-    
-    // Packing gap slider
+
     elements.packingGap.addEventListener('input', (e) => {
         const val = e.target.value;
-        const label = val < 0 ? `Solapament: ${Math.abs(val)}` : `Espaiat: ${val}`;
-        elements.packingGapValue.textContent = label;
-        // Optionally update text content of span next to slider if exists, here it's elements.packingGapValue
+        elements.packingGapValue.textContent = `${val}`;
     });
-    
-    // Bulk mode sliders
-    elements.dropHeight.addEventListener('input', (e) => {
-        elements.dropHeightValue.textContent = e.target.value;
-    });
-    
-    elements.maxPieces.addEventListener('input', (e) => {
-        elements.maxPiecesValue.textContent = e.target.value;
-    });
-    
-    elements.dropInterval.addEventListener('input', (e) => {
-        elements.dropIntervalValue.textContent = e.target.value;
-    });
-    
-    // Piece colors slider (for optimized mode)
+
     elements.optPieceColors?.addEventListener('input', (e) => {
         elements.optPieceColorsValue.textContent = e.target.value;
     });
-    
-    // Piece colors slider (for bulk mode)
-    elements.pieceColors?.addEventListener('input', (e) => {
+
+    elements.dropHeight.addEventListener('input', (e) => {
+        elements.dropHeightValue.textContent = e.target.value;
+    });
+
+    elements.maxPieces.addEventListener('input', (e) => {
+        elements.maxPiecesValue.textContent = e.target.value;
+    });
+
+    elements.dropInterval.addEventListener('input', (e) => {
+        elements.dropIntervalValue.textContent = e.target.value;
+    });
+
+    elements.vibrationFrequency?.addEventListener('input', (e) => {
+        if (elements.vibrationFrequencyValue) {
+            elements.vibrationFrequencyValue.textContent = parseFloat(e.target.value).toFixed(1);
+        }
+    });
+
+    elements.vibrationAmplitude?.addEventListener('input', (e) => {
+        if (elements.vibrationAmplitudeValue) {
+            elements.vibrationAmplitudeValue.textContent = parseFloat(e.target.value).toFixed(2);
+        }
+    });
+
+    elements.vibrationNoise?.addEventListener('input', (e) => {
+        if (elements.vibrationNoiseValue) {
+            elements.vibrationNoiseValue.textContent = parseFloat(e.target.value).toFixed(2);
+        }
+    });
+
+    elements.pieceColors.addEventListener('input', (e) => {
         elements.pieceColorsValue.textContent = e.target.value;
     });
-    
-    // Auto-capacity mode toggle
+
     elements.autoCapacity.addEventListener('change', (e) => {
         const autoMode = e.target.checked;
-        // Hide/show max pieces slider
         if (elements.maxPiecesGroup) {
             elements.maxPiecesGroup.style.display = autoMode ? 'none' : 'block';
         }
-        // Show/hide hint
         if (elements.autoModeHint) {
             elements.autoModeHint.style.display = autoMode ? 'block' : 'none';
         }
     });
-    
-    // Weights change
+
     elements.objWeight.addEventListener('input', updateMaxPiecesLimit);
     elements.maxWeight.addEventListener('input', updateMaxPiecesLimit);
 
-    // STL upload
     elements.stlUpload.addEventListener('change', handleSTLUpload);
-    
-    // Calculate button
+
     elements.calculateBtn.addEventListener('click', handleCalculate);
-    
-    // Simulation buttons
     elements.startSimBtn.addEventListener('click', startSimulation);
     elements.stopSimBtn.addEventListener('click', stopSimulation);
     elements.resetSimBtn.addEventListener('click', resetSimulation);
-    
-    // Report button - opens preview modal
+    elements.applyGravityBtn?.addEventListener('click', applyGravityTest);
+    elements.testCollisionsBtn?.addEventListener('click', testCollisions);
+
     elements.reportPreviewBtn?.addEventListener('click', openReportModal);
-    
-    // Report modal controls
     elements.modalClose?.addEventListener('click', closeReportModal);
     elements.modalCancel?.addEventListener('click', closeReportModal);
     elements.modalDownload?.addEventListener('click', downloadReportFromModal);
-    
-    // Color count slider
+
     elements.colorCount?.addEventListener('input', (e) => {
         elements.colorCountValue.textContent = e.target.value;
     });
-    
-    // Language change - update preview
+
     document.querySelectorAll('input[name="report-lang"]').forEach(radio => {
         radio.addEventListener('change', updateReportPreview);
     });
-    
-    // Close modal on backdrop click
+
     elements.reportModal?.addEventListener('click', (e) => {
         if (e.target === elements.reportModal) {
             closeReportModal();
         }
     });
-    
-    // View buttons
+
     elements.viewButtons.forEach(btn => {
         btn.addEventListener('click', () => {
             if (btn.dataset.view === 'fullscreen') {
@@ -322,6 +274,12 @@ function switchMode(mode) {
     elements.bulkOptions.style.display = isOptimized ? 'none' : 'block';
     elements.calculateBtn.style.display = isOptimized ? 'block' : 'none';
     elements.startSimBtn.style.display = isOptimized ? 'none' : 'block';
+    if (elements.applyGravityBtn) {
+        elements.applyGravityBtn.style.display = 'none';
+    }
+    if (elements.testCollisionsBtn) {
+        elements.testCollisionsBtn.style.display = 'none';
+    }
     
     // Reset button is now redundant as Start handles reset, but we can keep it hidden
     elements.stopSimBtn.style.display = 'none';
@@ -329,7 +287,7 @@ function switchMode(mode) {
     
     // Reset results
     if (!isOptimized) {
-        elements.results.innerHTML = '<p class="placeholder-text">👆 Configura les opcions i inicia la simulació</p>';
+        elements.results.innerHTML = '<p class="placeholder-text">Configura les opcions i inicia la simulació</p>';
         state.sceneManager.clearPieces();
     }
 }
@@ -342,10 +300,11 @@ async function handleSTLUpload(event) {
     const file = event.target.files[0];
     if (!file) return;
     
+
     // Check if format is supported
     if (!isSupported(file.name)) {
         elements.stlStatus.className = 'stl-status error';
-        elements.stlStatus.textContent = `❌ Format no suportat. Formats vàlids: ${SUPPORTED_EXTENSIONS.join(', ')}`;
+        elements.stlStatus.textContent = `Format no suportat. Formats vàlids: ${SUPPORTED_EXTENSIONS.join(', ')}`;
         elements.stlStatus.style.display = 'block';
         return;
     }
@@ -372,7 +331,7 @@ async function handleSTLUpload(event) {
         if (vertexCount > VERTEX_THRESHOLD) {
             // Mostrar opció de simplificació
             elements.stlStatus.className = 'stl-status warning';
-            elements.stlStatus.innerHTML = `⚠️ Malla complexa (${vertexCount.toLocaleString()} vèrtexs). <button id="simplify-mesh-btn" class="btn-small">🔧 Simplificar</button>`;
+            elements.stlStatus.innerHTML = `Malla complexa (${vertexCount.toLocaleString()} vèrtexs). <button id="simplify-mesh-btn" class="btn-small">Simplificar</button>`;
             
             // Afegir handler pel botó
             document.getElementById('simplify-mesh-btn')?.addEventListener('click', () => {
@@ -392,7 +351,7 @@ async function handleSTLUpload(event) {
                     
                     const newPositions = geometry.getAttribute('position');
                     elements.stlStatus.className = 'stl-status success';
-                    elements.stlStatus.textContent = `✅ Simplificat: ${newPositions.count.toLocaleString()} vèrtexs | ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm`;
+                    elements.stlStatus.textContent = `Simplificat: ${newPositions.count.toLocaleString()} vèrtexs | ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm`;
                 });
             });
         }
@@ -407,7 +366,7 @@ async function handleSTLUpload(event) {
         
         if (vertexCount <= VERTEX_THRESHOLD) {
             elements.stlStatus.className = 'stl-status success';
-            elements.stlStatus.textContent = `✅ Dimensions: ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm`;
+            elements.stlStatus.textContent = `Dimensions: ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm`;
         }
         
         // Save to history
@@ -425,7 +384,7 @@ async function handleSTLUpload(event) {
 
     } catch (error) {
         elements.stlStatus.className = 'stl-status error';
-        elements.stlStatus.textContent = `❌ Error: ${error.message}`;
+        elements.stlStatus.textContent = `Error: ${error.message}`;
         state.stlGeometry = null;
         state.stlDimensions = null;
         state.stlFileName = null;
@@ -479,7 +438,7 @@ async function loadSTLHistory() {
             
             return `
             <div class="stl-history-item ${isActive ? 'active' : ''}" data-id="${file.id}">
-                <span class="stl-icon">📦</span>
+                <span class="stl-icon"></span>
                 <div class="stl-info">
                     <input type="text" class="stl-name-input" value="${escapeHtml(file.name)}" 
                            data-id="${file.id}" data-field="name" 
@@ -493,8 +452,8 @@ async function loadSTLHistory() {
                     </div>
                 </div>
                 <div class="stl-actions">
-                    <button class="stl-btn load" data-id="${file.id}" title="Carregar">📥</button>
-                    <button class="stl-btn delete" data-id="${file.id}" title="Eliminar">🗑️</button>
+                    <button class="stl-btn load" data-id="${file.id}" title="Carregar">Carregar</button>
+                    <button class="stl-btn delete" data-id="${file.id}" title="Eliminar">Eliminar</button>
                 </div>
             </div>
             `;
@@ -651,7 +610,7 @@ async function loadSTLFromHistory(id) {
         }
         
         elements.stlStatus.className = 'stl-status success';
-        elements.stlStatus.textContent = `✅ ${file.name}: ${file.dimensions.length.toFixed(2)} × ${file.dimensions.width.toFixed(2)} × ${file.dimensions.height.toFixed(2)} mm`;
+        elements.stlStatus.textContent = `${file.name}: ${file.dimensions.length.toFixed(2)} × ${file.dimensions.width.toFixed(2)} × ${file.dimensions.height.toFixed(2)} mm`;
         
         // Refresh history to show updated order and active state
         await loadSTLHistory();
@@ -659,7 +618,7 @@ async function loadSTLFromHistory(id) {
     } catch (error) {
         console.error('Error loading STL from history:', error);
         elements.stlStatus.className = 'stl-status error';
-        elements.stlStatus.textContent = `❌ Error carregant: ${error.message}`;
+        elements.stlStatus.textContent = `Error carregant: ${error.message}`;
         elements.stlStatus.style.display = 'block';
     }
 }
@@ -696,88 +655,198 @@ function getInputValues() {
         boxH: parseFloat(elements.boxHeight.value) || 0,
         maxWeight: parseFloat(elements.maxWeight.value) || 0,
         allowRotation: elements.allowRotation.checked,
-        safetyFactor: parseInt(elements.safetyFactor.value) / 100,
-        packingGap: parseFloat(elements.packingGap.value) || 0,
+        heightMapNesting: elements.heightMapNesting?.checked ?? true,
+        safetyFactor: 1.0,
+        packingGap: Math.max(0, parseFloat(elements.packingGap.value) || 0),
         // Bulk mode
         dropHeight: parseInt(elements.dropHeight.value),
         maxPieces: parseInt(elements.maxPieces.value),
         dropIntervalMs: parseInt(elements.dropInterval.value),
+        vibrationFrequency: parseFloat(elements.vibrationFrequency?.value) || 8.0,
+        vibrationAmplitude: parseFloat(elements.vibrationAmplitude?.value) || 0.5,
+        vibrationNoise: parseFloat(elements.vibrationNoise?.value) || 0.15,
         colorCount: colorCount,
         randomRotation: elements.randomRotation.checked,
         autoCapacity: elements.autoCapacity.checked
     };
 }
 
+function buildOrientationOverrides(geometry, allowRotation) {
+    const orientationNames = ['Original (L×W×H)'];
+    const overrides = [];
+
+    const rotations = [];
+    rotations.push({ name: orientationNames[0], rotation: [0, 0, 0, 1] });
+
+    if (allowRotation) {
+        const sampleCount = 12;
+        const spinSteps = 2;
+        const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+        for (let i = 0; i < sampleCount; i++) {
+            const y = 1 - (i + 0.5) * (2 / sampleCount);
+            const r = Math.sqrt(Math.max(0, 1 - y * y));
+            const phi = i * goldenAngle;
+            const x = r * Math.cos(phi);
+            const z = r * Math.sin(phi);
+            const dir = new THREE.Vector3(x, y, z).normalize();
+            const baseQuat = new THREE.Quaternion().setFromUnitVectors(
+                new THREE.Vector3(0, 1, 0),
+                dir
+            );
+
+            for (let s = 0; s < spinSteps; s++) {
+                const spin = (Math.PI * 2 * s) / spinSteps;
+                const spinQuat = new THREE.Quaternion().setFromAxisAngle(dir, spin);
+                const q = spinQuat.multiply(baseQuat);
+                rotations.push({
+                    name: `Rotació ${i + 1}.${s + 1}`,
+                    rotation: [q.x, q.y, q.z, q.w]
+                });
+            }
+        }
+    }
+
+    const seen = new Set();
+    for (const rot of rotations) {
+        const key = rot.rotation.map(v => v.toFixed(4)).join(',');
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const orientedGeometry = geometry.clone();
+        const quat = new THREE.Quaternion(...rot.rotation);
+        const matrix = new THREE.Matrix4().makeRotationFromQuaternion(quat);
+        orientedGeometry.applyMatrix4(matrix);
+        orientedGeometry.computeBoundingBox();
+        const stability = getSupportStability(orientedGeometry);
+        orientedGeometry.computeBoundingBox();
+        const bbox = orientedGeometry.boundingBox;
+        const dims = [
+            bbox.max.x - bbox.min.x,
+            bbox.max.z - bbox.min.z,
+            bbox.max.y - bbox.min.y
+        ];
+        overrides.push({
+            dims,
+            name: rot.name,
+            permIndex: 0,
+            rotation: rot.rotation,
+            stable: stability.stable
+        });
+    }
+
+    const stableOnly = overrides.filter(o => o.stable);
+    return stableOnly.length > 0 ? stableOnly : overrides;
+}
+
 /**
  * Handle calculate button click (optimized mode)
  */
 async function handleCalculate() {
+    elements.results.innerHTML = '<p class="loading-text">Calculant...</p>';
+    
+    // Delay to allow UI update
+    await new Promise(resolve => setTimeout(resolve, 10));
+
+    // Get input values
     const values = getInputValues();
+
+    let orientationOverrides = null;
+
+    // Normal STL mode overrides
+    if (state.stlGeometry) {
+        if (!state.stlDimensions) {
+            state.stlDimensions = extractDimensions(state.stlGeometry);
+        }
+        if (state.stlDimensions) {
+            // Only update if not in nesting mode
+            values.objL = state.stlDimensions.length;
+            values.objW = state.stlDimensions.width;
+            values.objH = state.stlDimensions.height;
+
+            elements.objLength.value = state.stlDimensions.length.toFixed(2);
+            elements.objWidth.value = state.stlDimensions.width.toFixed(2);
+            elements.objHeight.value = state.stlDimensions.height.toFixed(2);
+        }
+        orientationOverrides = buildOrientationOverrides(state.stlGeometry, values.allowRotation);
+    }
     
     // Run packing calculation
-    const result = calcularEmpaquetatge(values);
+    const result = calcularEmpaquetatge({
+        ...values,
+        orientationOverrides
+    });
+
     
     // Display results
     elements.results.innerHTML = result.summary;
     elements.results.classList.add('fade-in');
     
     // Update 3D visualization
+    state.sceneManager.clearPieces();
+    
+    // Always create box even if no data fits
+    state.sceneManager.createBox(values.boxL, values.boxW, values.boxH);
+
     if (result.data) {
-        const boxL = values.boxL;
-        const boxW = values.boxW;
-        const boxH = values.boxH;
-        
-        state.sceneManager.createBox(boxL, boxW, boxH);
-        
         const [pieceL, pieceW, pieceH] = getPieceDimensions(result.data);
         const [nx, ny, nz] = getDistribution(result.data);
         
         if (nx > 0 && ny > 0 && nz > 0) {
             let drawn;
+            let realDistributionText = null;
             
+            // Decide what geometry to draw
             if (state.stlGeometry) {
-                // Deterministic permutation based on calculator's permIndex
-                // Calculator inputs: L(X=0), W(Z=2), H(Y=1) -> Note: main.js inputs order matches X,Z,Y
-                // But extractDimensions returns {length:x, width:z, height:y}
-                // Handler input mapped: objL=X, objW=Z, objH=Y
-                
-                // Calculator permutations (resL, resW, resH):
-                // 0: L, W, H (X, Z, Y) -> NewX=X(0), NewY=Y(1), NewZ=Z(2) -> [0, 1, 2]
-                // 1: L, H, W (X, Y, Z) -> NewX=X(0), NewY=Z(2), NewZ=Y(1) -> [0, 2, 1]
-                // 2: W, L, H (Z, X, Y) -> NewX=Z(2), NewY=Y(1), NewZ=X(0) -> [2, 1, 0]
-                // 3: W, H, L (Z, Y, X) -> NewX=Z(2), NewY=X(0), NewZ=Y(1) -> [2, 0, 1]
-                // 4: H, L, W (Y, X, Z) -> NewX=Y(1), NewY=Z(2), NewZ=X(0) -> [1, 2, 0]
-                // 5: H, W, L (Y, Z, X) -> NewX=Y(1), NewY=X(0), NewZ=Z(2) -> [1, 0, 2]
-                
-                const permIndex = result.data.bestOrientation.permIndex;
-                const permTable = [
-                    [0, 1, 2], // 0
-                    [0, 2, 1], // 1
-                    [2, 1, 0], // 2
-                    [2, 0, 1], // 3
-                    [1, 2, 0], // 4
-                    [1, 0, 2]  // 5
-                ];
-                
-                // Fallback to 0 if undefined (should be defined)
-                const perm = permTable[permIndex !== undefined ? permIndex : 0];
-                
-                // Clone and permute geometry
                 const orientedGeometry = state.stlGeometry.clone();
-                applyPermutation(orientedGeometry, perm);
+                const best = result.data.bestOrientation || {};
+
+                if (best.rotation && Array.isArray(best.rotation)) {
+                    const quat = new THREE.Quaternion(...best.rotation);
+                    const matrix = new THREE.Matrix4().makeRotationFromQuaternion(quat);
+                    orientedGeometry.applyMatrix4(matrix);
+                } else {
+                    // Deterministic permutation based on calculator's permIndex
+                    const permIndex = best.permIndex;
+                    const permTable = [
+                        [0, 1, 2], // 0
+                        [0, 2, 1], // 1
+                        [2, 1, 0], // 2
+                        [2, 0, 1], // 3
+                        [1, 2, 0], // 4
+                        [1, 0, 2]  // 5
+                    ];
+                    const perm = permTable[permIndex !== undefined ? permIndex : 0];
+                    applyPermutation(orientedGeometry, perm);
+                }
                 
-                drawn = state.sceneManager.addPackedSTLPieces({
-                    stlGeometry: orientedGeometry,
-                    pieceL, pieceW, pieceH,
-                    nx, ny, nz,
-                    maxDraw: 500,
-                    packingGap: values.packingGap,
-                    colorCount: values.colorCount,
-                    boxL: values.boxL,
-                    boxW: values.boxW,
-                    boxH: values.boxH
-                });
+                if (values.heightMapNesting) {
+                    drawn = state.sceneManager.addPackedSTLHeightMap({
+                        stlGeometry: orientedGeometry,
+                        maxDraw: 500,
+                        packingGap: values.packingGap,
+                        colorCount: values.colorCount,
+                        boxL: values.boxL,
+                        boxW: values.boxW,
+                        boxH: values.boxH
+                    });
+                } else {
+                    drawn = state.sceneManager.addPackedSTLPieces({
+                        stlGeometry: orientedGeometry,
+                        pieceL, pieceW, pieceH,
+                        nx, ny, nz,
+                        maxDraw: 500,
+                        packingGap: values.packingGap,
+                        colorCount: values.colorCount,
+                        boxL: values.boxL,
+                        boxW: values.boxW,
+                        boxH: values.boxH,
+                        strictGeometryCheck: true
+                    });
+                }
             } else {
+                // Fallback to Box Drawing OR Nested Box drawing
+                // For now, if nesting is active, we just draw cuboids representing the pairs
+                // TODO: Ideally we would draw the two meshes for each pair
                 drawn = state.sceneManager.addPackedPieces({
                     pieceL, pieceW, pieceH,
                     nx, ny, nz,
@@ -790,13 +859,44 @@ async function handleCalculate() {
                 });
             }
             
-            console.log(`Rendered ${drawn} pieces with ${values.packingGap}mm gap`);
+            // ... Result handling ...
+            const drawnCount = typeof drawn === 'number' ? drawn : drawn.count;
+            if (typeof drawn === 'object' && drawn?.distributionText) {
+                realDistributionText = drawn.distributionText;
+            }
             
-            // Store results for report
-            state.lastResults = {
+            const displayCount = drawnCount;
+
+            console.log(`Rendered ${drawnCount} items (${displayCount} pieces)`);
+
+            // If render count differs due to real geometry, warn and use rendered count for reports
+            const resultRealUnits = result.data.realUnits; // This is already multiplied
+            
+            if (displayCount < resultRealUnits || realDistributionText) {
+                if (displayCount < resultRealUnits) {
+                    const safetyPercent = Math.round(values.safetyFactor * 100);
+                    const listItems = elements.results.querySelectorAll('li');
+                    listItems.forEach(li => {
+                        if (li.textContent.includes('Unitats reals (seguretat')) {
+                            li.innerHTML = `<strong>Unitats reals (seguretat ${safetyPercent}%):</strong> ${displayCount}`;
+                        }
+                    });
+                }
+                if (realDistributionText) {
+                    const listItems = elements.results.querySelectorAll('li');
+                    listItems.forEach(li => {
+                        if (li.textContent.includes('Distribució:')) {
+                            li.innerHTML = `<strong>Distribució:</strong> ${realDistributionText} (L×W×H)`;
+                        }
+                    });
+                }
+            }
+            
+            // Store results logic ...
+             state.lastResults = {
                 pieceDims: { l: values.objL, w: values.objW, h: values.objH },
                 boxDims: { length: values.boxL, width: values.boxW, height: values.boxH },
-                pieceCount: result.data.totalUnitats,
+                pieceCount: displayCount,
                 pieceWeight: values.objWeight,
                 maxWeight: values.maxWeight,
                 mode: 'optimized',
@@ -804,13 +904,171 @@ async function handleCalculate() {
                 stlFileName: state.stlFileName || null
             };
             
-            // Save to calculation history
             await saveCalculationToHistory(state.lastResults);
             
-            // Show report buttons
+             // Show report buttons
             elements.reportButtons.style.display = 'flex';
+            if (elements.applyGravityBtn) {
+                elements.applyGravityBtn.style.display = 'block';
+            }
+            if (elements.testCollisionsBtn) {
+                elements.testCollisionsBtn.style.display = 'block';
+            }
         }
     }
+}
+
+
+function stopGravitySimulation() {
+    if (!state.gravitySimulation) return;
+    const sim = state.gravitySimulation;
+    sim.running = false;
+    if (sim.animationId) {
+        cancelAnimationFrame(sim.animationId);
+    }
+    if (sim.physics) {
+        sim.physics.pause();
+    }
+    state.gravitySimulation = null;
+}
+
+async function initGravitySimulation() {
+    if (!state.sceneManager?.lastPlacement) return null;
+
+    const placement = state.sceneManager.lastPlacement;
+    if (!placement.boxDims) return null;
+
+    const physics = new PhysicsWorld();
+    await physics.init({
+        length: placement.boxDims.l,
+        width: placement.boxDims.w,
+        height: placement.boxDims.h
+    });
+
+    state.sceneManager.clearPieces();
+
+    const pieceColors = state.sceneManager.pieceColors || [];
+    const colorCount = Math.min(pieceColors.length || 1, (state.mode === 'optimized'
+        ? parseInt(elements.optPieceColors?.value) || 10
+        : parseInt(elements.pieceColors?.value) || 10));
+
+    placement.positions.forEach((pos, idx) => {
+        const color = pieceColors.length > 0 ? pieceColors[idx % colorCount] : 0x3b82f6;
+        let mesh;
+
+        if (placement.type === 'stl' && placement.geometry) {
+            const geometry = placement.geometry.clone();
+            const material = new THREE.MeshPhongMaterial({
+                color,
+                flatShading: true,
+                transparent: true,
+                opacity: 0.92
+            });
+            mesh = new THREE.Mesh(geometry, material);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            state.sceneManager.scene.add(mesh);
+            state.sceneManager.pieces.push(mesh);
+
+            if (placement.vertices) {
+                physics.addConvexHull(placement.vertices, pos, null, mesh);
+            } else {
+                physics.addCuboid({
+                    l: placement.dims.l,
+                    w: placement.dims.w,
+                    h: placement.dims.h
+                }, pos, null, mesh);
+            }
+        } else {
+            const geometry = new THREE.BoxGeometry(placement.dims.l, placement.dims.h, placement.dims.w);
+            const material = new THREE.MeshPhongMaterial({
+                color,
+                flatShading: true,
+                transparent: true,
+                opacity: 0.92
+            });
+            mesh = new THREE.Mesh(geometry, material);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.position.copy(pos);
+            state.sceneManager.scene.add(mesh);
+            state.sceneManager.pieces.push(mesh);
+
+            physics.addCuboid({
+                l: placement.dims.l,
+                w: placement.dims.w,
+                h: placement.dims.h
+            }, pos, null, mesh);
+        }
+    });
+
+    physics.start();
+
+    return {
+        physics,
+        running: true,
+        animationId: null
+    };
+}
+
+async function testCollisions() {
+    stopGravitySimulation();
+
+    const sim = await initGravitySimulation();
+    if (!sim) return;
+
+    sim.physics.setGravity(0);
+    sim.physics.lockAllRotations(true);
+    state.gravitySimulation = sim;
+
+    if (elements.simulationStatus) {
+        elements.simulationStatus.textContent = '🔧 Test col·lisions (gravetat 0)';
+        elements.simulationStatus.style.display = 'block';
+    }
+
+    const endTime = performance.now() + 1200;
+    const animate = () => {
+        if (!sim.running) return;
+        sim.physics.step();
+        if (performance.now() >= endTime) {
+            sim.running = false;
+            if (elements.simulationStatus) {
+                elements.simulationStatus.textContent = '✅ Col·lisió estabilitzada';
+            }
+            return;
+        }
+        sim.animationId = requestAnimationFrame(animate);
+    };
+
+    animate();
+}
+
+async function applyGravityTest() {
+    if (!state.sceneManager?.lastPlacement) return;
+
+    if (!state.gravitySimulation) {
+        const sim = await initGravitySimulation();
+        if (!sim) return;
+        state.gravitySimulation = sim;
+    }
+
+    const sim = state.gravitySimulation;
+    sim.running = true;
+    sim.physics.setGravity(-9810);
+    sim.physics.lockAllRotations(true);
+
+    if (elements.simulationStatus) {
+        elements.simulationStatus.textContent = '⚖️ Gravetat aplicada (rotacions bloquejades)';
+        elements.simulationStatus.style.display = 'block';
+    }
+
+    const animate = () => {
+        if (!sim.running) return;
+        sim.physics.step();
+        sim.animationId = requestAnimationFrame(animate);
+    };
+
+    animate();
 }
 
 /**
@@ -842,7 +1100,7 @@ async function startSimulation() {
     
     // Validate inputs
     if ([values.objL, values.objW, values.objH, values.boxL, values.boxW, values.boxH].some(v => v <= 0)) {
-        elements.results.innerHTML = '<p>❌ Totes les dimensions han de ser majors que 0</p>';
+        elements.results.innerHTML = '<p>Totes les dimensions han de ser majors que 0</p>';
         return;
     }
     
@@ -857,6 +1115,9 @@ async function startSimulation() {
             maxPieces: values.maxPieces,
             dropHeight: values.dropHeight,
             dropIntervalMs: values.dropIntervalMs,
+            vibrationFrequency: values.vibrationFrequency,
+            vibrationAmplitude: values.vibrationAmplitude,
+            vibrationNoise: values.vibrationNoise,
             randomRotation: values.randomRotation,
             autoMode: values.autoCapacity,
             settlingTimeoutMs: 30000,
@@ -880,7 +1141,7 @@ async function startSimulation() {
         elements.resetSimBtn.style.display = 'block';
         
     } catch (error) {
-        elements.results.innerHTML = `<p>❌ Error inicialitzant simulació: ${error.message}</p>`;
+        elements.results.innerHTML = `<p>Error inicialitzant simulació: ${error.message}</p>`;
     }
 }
 
@@ -921,7 +1182,7 @@ function resetSimulation() {
     elements.simulationStatus.className = 'simulation-status';
     elements.simulationStatus.textContent = '';
     
-    elements.results.innerHTML = '<p class="placeholder-text">👆 Configura les opcions i inicia la simulació</p>';
+    elements.results.innerHTML = '<p class="placeholder-text">Configura les opcions i inicia la simulació</p>';
 }
 
 /**
@@ -937,14 +1198,14 @@ async function updateSimulationStatus(status) {
         const removedText = status.removed > 0 ? `<li><strong>Peces eliminades (fora):</strong> ${status.removed}</li>` : '';
         
         elements.results.innerHTML = `
-            <h1>🌊 Resultat Simulació a Granel</h1>
+            <h1>Resultat Simulació a Granel</h1>
             <ul>
                 <li><strong>Peces deixades caure:</strong> ${status.dropped}</li>
                 <li><strong>Peces dins la caixa:</strong> ${status.inside}</li>
                 ${removedText}
                 <li><strong>Eficiència:</strong> ${((status.inside / status.dropped) * 100).toFixed(1)}%</li>
             </ul>
-            <p>💡 En mode a granel, les peces s'acomoden de forma natural per gravetat. 
+            <p>En mode a granel, les peces s'acomoden de forma natural per gravetat. 
             El resultat pot variar entre execucions degut a la física.</p>
         `;
         

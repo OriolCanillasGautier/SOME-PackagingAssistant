@@ -143,7 +143,7 @@ function renderTable() {
         });
         
         const modeClass = item.mode === 'optimized' ? 'optimized' : 'bulk';
-        const modeIcon = item.mode === 'optimized' ? '🎯' : '🌊';
+        const modeIcon = item.mode === 'optimized' ? '' : '';
         const modeName = item.mode === 'optimized' ? 'Optimitzat' : 'A Granel';
         
         const pieceDims = item.pieceDims ? 
@@ -170,8 +170,8 @@ function renderTable() {
                 <td>${stlName}</td>
                 <td>
                     <div class="action-btns">
-                        <button class="action-btn view" data-id="${item.id}" title="Veure detalls">👁️</button>
-                        <button class="action-btn delete" data-id="${item.id}" title="Eliminar">🗑️</button>
+                        <button class="action-btn view" data-id="${item.id}" title="Veure detalls">Veure</button>
+                        <button class="action-btn delete" data-id="${item.id}" title="Eliminar">Eliminar</button>
                     </div>
                 </td>
             </tr>
@@ -214,9 +214,9 @@ function updateStats() {
     const bulk = state.history.filter(h => h.mode === 'bulk').length;
     
     elements.historyStats.innerHTML = `
-        <span class="stat">📊 Total: <span class="stat-value">${total}</span></span>
-        <span class="stat">🎯 Optimitzat: <span class="stat-value">${optimized}</span></span>
-        <span class="stat">🌊 A Granel: <span class="stat-value">${bulk}</span></span>
+        <span class="stat">Total: <span class="stat-value">${total}</span></span>
+        <span class="stat">Optimitzat: <span class="stat-value">${optimized}</span></span>
+        <span class="stat">A Granel: <span class="stat-value">${bulk}</span></span>
     `;
 }
 
@@ -239,17 +239,17 @@ function showDetailModal(id) {
         minute: '2-digit'
     });
     
-    const modeIcon = item.mode === 'optimized' ? '🎯' : '🌊';
+    const modeIcon = item.mode === 'optimized' ? '' : '';
     const modeName = item.mode === 'optimized' ? 'Mode Optimitzat' : 'Mode a Granel';
     
     elements.modalBody.innerHTML = `
         <div class="detail-header">
-            <p style="color: var(--text-muted); margin-bottom: 20px;">📅 ${dateStr}</p>
+            <p style="color: var(--text-muted); margin-bottom: 20px;">${dateStr}</p>
         </div>
         
         <div class="detail-grid">
             <div class="detail-section">
-                <h3>📏 Dimensions de la Peça</h3>
+                <h3>Dimensions de la Peça</h3>
                 <div class="detail-row">
                     <span class="detail-label">Llargada</span>
                     <span class="detail-value">${item.pieceDims?.l?.toFixed(2) || '-'} mm</span>
@@ -269,7 +269,7 @@ function showDetailModal(id) {
             </div>
             
             <div class="detail-section">
-                <h3>📦 Dimensions de la Caixa</h3>
+                <h3>Dimensions de la Caixa</h3>
                 <div class="detail-row">
                     <span class="detail-label">Llargada</span>
                     <span class="detail-value">${item.boxDims?.length?.toFixed(0) || '-'} mm</span>
@@ -289,7 +289,7 @@ function showDetailModal(id) {
             </div>
             
             <div class="detail-section">
-                <h3>📊 Resultat</h3>
+                <h3>Resultat</h3>
                 <div class="detail-row">
                     <span class="detail-label">Mode</span>
                     <span class="detail-value">${modeIcon} ${modeName}</span>
@@ -305,7 +305,7 @@ function showDetailModal(id) {
             </div>
             
             <div class="detail-section">
-                <h3>📁 Fitxer STL</h3>
+                <h3>Fitxer STL</h3>
                 <div class="detail-row">
                     <span class="detail-label">Nom</span>
                     <span class="detail-value">${item.stlFileName || 'Cap STL associat'}</span>
@@ -425,8 +425,8 @@ function exportToCSV() {
  * Confirm clear history
  */
 async function confirmClearHistory() {
-    if (!confirm('⚠️ Segur que vols esborrar TOT l\'historial?\n\nAquesta acció no es pot desfer.')) return;
-    if (!confirm('🔴 ÚLTIMA OPORTUNITAT: S\'esborraran tots els càlculs. Continuar?')) return;
+    if (!confirm('Segur que vols esborrar TOT l\'historial?\n\nAquesta acció no es pot desfer.')) return;
+    if (!confirm('ÚLTIMA OPORTUNITAT: S\'esborraran tots els càlculs. Continuar?')) return;
     
     try {
         await state.storage.clearHistory();
@@ -444,7 +444,7 @@ function showError(message) {
     elements.historyBody.innerHTML = `
         <tr>
             <td colspan="8" class="loading-cell" style="color: var(--accent-red);">
-                ❌ ${message}
+                ${message}
             </td>
         </tr>
     `;

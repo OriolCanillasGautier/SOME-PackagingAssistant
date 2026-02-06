@@ -397,6 +397,97 @@ export function getConvexHullVertices(geometry) {
     return new Float32Array(vertices);
 }
 
+function convexHull2D(points) {
+    if (points.length <= 3) return points.slice();
+    const pts = points.slice().sort((a, b) => (a.x - b.x) || (a.z - b.z));
+    const cross = (o, a, b) => (a.x - o.x) * (b.z - o.z) - (a.z - o.z) * (b.x - o.x);
+    const lower = [];
+    for (const p of pts) {
+        while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) {
+            lower.pop();
+        }
+        lower.push(p);
+    }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+        const p = pts[i];
+        while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) {
+            upper.pop();
+        }
+        upper.push(p);
+    }
+    upper.pop();
+    lower.pop();
+    return lower.concat(upper);
+}
+
+function polygonArea2D(poly) {
+    if (poly.length < 3) return 0;
+    let area = 0;
+    for (let i = 0; i < poly.length; i++) {
+        const j = (i + 1) % poly.length;
+        area += poly[i].x * poly[j].z - poly[j].x * poly[i].z;
+    }
+    return Math.abs(area) / 2;
+}
+
+function pointInPolygon2D(point, poly) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+        const xi = poly[i].x, zi = poly[i].z;
+        const xj = poly[j].x, zj = poly[j].z;
+        const intersect = ((zi > point.z) !== (zj > point.z)) &&
+            (point.x < (xj - xi) * (point.z - zi) / ((zj - zi) || 1e-9) + xi);
+        if (intersect) inside = !inside;
+    }
+    return inside;
+}
+
+/**
+ * Estimate stability on flat surface using support polygon of lowest vertices
+ * @param {THREE.BufferGeometry} geometry
+ * @param {number} epsilon - height tolerance in mm
+ * @returns {{stable: boolean, supportArea: number, basePointCount: number}}
+ */
+export function getSupportStability(geometry, epsilon = 0.5) {
+    const positions = geometry.getAttribute('position');
+    if (!positions || positions.count === 0) {
+        return { stable: false, supportArea: 0, basePointCount: 0 };
+    }
+
+    let minY = Infinity;
+    for (let i = 0; i < positions.count; i++) {
+        minY = Math.min(minY, positions.getY(i));
+    }
+
+    const basePoints = [];
+    const maxY = minY + epsilon;
+    for (let i = 0; i < positions.count; i++) {
+        const y = positions.getY(i);
+        if (y <= maxY) {
+            basePoints.push({ x: positions.getX(i), z: positions.getZ(i) });
+        }
+    }
+
+    if (basePoints.length < 3) {
+        return { stable: false, supportArea: 0, basePointCount: basePoints.length };
+    }
+
+    const hull = convexHull2D(basePoints);
+    const supportArea = polygonArea2D(hull);
+
+    const com = new THREE.Vector3();
+    for (let i = 0; i < positions.count; i++) {
+        com.x += positions.getX(i);
+        com.y += positions.getY(i);
+        com.z += positions.getZ(i);
+    }
+    com.divideScalar(positions.count);
+
+    const stable = pointInPolygon2D({ x: com.x, z: com.z }, hull) && supportArea > 0;
+    return { stable, supportArea, basePointCount: basePoints.length };
+}
+
 /**
  * Simplify geometry for physics (reduce vertex count)
  * @param {THREE.BufferGeometry} geometry

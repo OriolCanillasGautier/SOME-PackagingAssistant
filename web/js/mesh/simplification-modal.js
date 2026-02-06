@@ -37,7 +37,7 @@ export class SimplificationModal {
         this.modal.innerHTML = `
             <div class="modal-content modal-xlarge">
                 <div class="modal-header">
-                    <h2>🔧 Simplificació de Malla 3D</h2>
+                    <h2>Simplificació de Malla 3D</h2>
                     <button class="modal-close" id="simplify-modal-close">×</button>
                 </div>
                 <div class="modal-body simplify-modal-body">
@@ -45,7 +45,7 @@ export class SimplificationModal {
                         <!-- Panel de controls -->
                         <div class="simplify-controls">
                             <div class="control-section">
-                                <h3>📊 Malla Original</h3>
+                                <h3>Malla Original</h3>
                                 <div id="original-stats" class="stats-box">
                                     <div class="stat-row">
                                         <span>Vèrtexs:</span>
@@ -59,7 +59,7 @@ export class SimplificationModal {
                             </div>
                             
                             <div class="control-section">
-                                <h3>🎚️ Nivell de Simplificació</h3>
+                                <h3>Nivell de Simplificació</h3>
                                 <div class="slider-container">
                                     <input type="range" id="simplify-slider" min="1" max="100" value="50">
                                     <div class="slider-labels">
@@ -79,7 +79,7 @@ export class SimplificationModal {
                             </div>
                             
                             <div class="control-section">
-                                <h3>⚙️ Opcions</h3>
+                                <h3>Opcions</h3>
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="preserve-features" checked>
                                     Preservar característiques importants
@@ -91,7 +91,7 @@ export class SimplificationModal {
                             </div>
                             
                             <div class="control-section">
-                                <h3>📈 Malla Resultant</h3>
+                                <h3>Malla Resultant</h3>
                                 <div id="result-stats" class="stats-box stats-result">
                                     <div class="stat-row">
                                         <span>Vèrtexs:</span>
@@ -113,7 +113,7 @@ export class SimplificationModal {
                             </div>
                             
                             <div class="control-section">
-                                <h3>👁️ Visualització</h3>
+                                <h3>Visualització</h3>
                                 <div class="view-toggle">
                                     <button class="view-btn active" data-view="simplified">Simplificada</button>
                                     <button class="view-btn" data-view="original">Original</button>
@@ -129,13 +129,13 @@ export class SimplificationModal {
                         <!-- Visor 3D -->
                         <div class="simplify-viewer">
                             <div id="simplify-canvas"></div>
-                            <div class="viewer-hint">🖱️ Arrossega per girar | Scroll per zoom</div>
+                            <div class="viewer-hint">Arrossega per girar | Scroll per zoom</div>
                         </div>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button id="simplify-cancel" class="btn-secondary">Cancel·lar</button>
-                    <button id="simplify-apply" class="btn-primary">✅ Aplicar Simplificació</button>
+                    <button id="simplify-apply" class="btn-primary">Aplicar Simplificació</button>
                 </div>
             </div>
         `;
