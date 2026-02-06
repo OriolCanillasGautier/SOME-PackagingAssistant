@@ -159,6 +159,25 @@ export class PhysicsWorld {
     }
 
     /**
+     * Add a ceiling to close the container (useful for gravity verification)
+     * Keeps pieces from escaping above the visual box.
+     */
+    addCeiling({ length, width, height }) {
+        if (!this.world) return;
+        const wallThickness = 100;
+        const ceiling = this.createKinematicBox(
+            length / 2,
+            height + wallThickness / 2,
+            width / 2,
+            length / 2 + wallThickness,
+            wallThickness / 2,
+            width / 2 + wallThickness
+        );
+        this.wallBodies.push(ceiling);
+        this.wallOriginalPositions.push({ x: length / 2, y: height + wallThickness / 2, z: width / 2 });
+    }
+
+    /**
      * Create a kinematic box collider (can be moved for vibration)
      */
     createKinematicBox(px, py, pz, hx, hy, hz) {
@@ -283,7 +302,7 @@ export class PhysicsWorld {
      * @param {THREE.Mesh} mesh - Three.js mesh to sync
      * @returns {Object} The rigid body
      */
-    addCuboid(dims, position, rotation = null, mesh = null) {
+    addCuboid(dims, position, rotation = null, mesh = null, meshOffset = null) {
         const { l, w, h } = dims;
         
         // Create dynamic rigid body
@@ -303,12 +322,13 @@ export class PhysicsWorld {
         
         // SYNC MESH IMMEDIATELY to prevent (0,0,0) flicker
         if (mesh) {
+            // Initial sync (offset handled in step)
             mesh.position.set(position.x, position.y, position.z);
             if (rotation) {
                 const quat = new THREE.Quaternion().setFromEuler(rotation);
                 mesh.quaternion.set(quat.x, quat.y, quat.z, quat.w);
             }
-            this.meshBodies.push({ body, mesh });
+            this.meshBodies.push({ body, mesh, offset: meshOffset });
         }
         
         // Create cuboid collider (half-extents)
@@ -328,7 +348,7 @@ export class PhysicsWorld {
     /**
      * Add a convex hull piece for STL
      */
-    addConvexHull(vertices, position, rotation = null, mesh = null) {
+    addConvexHull(vertices, position, rotation = null, mesh = null, meshOffset = null) {
         const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
             .setTranslation(position.x, position.y, position.z)
             .setLinearDamping(0.2)
@@ -344,12 +364,13 @@ export class PhysicsWorld {
         
         // SYNC MESH IMMEDIATELY to prevent (0,0,0) flicker
         if (mesh) {
+            // Initial sync (offset handled in step)
             mesh.position.set(position.x, position.y, position.z);
             if (rotation) {
                 const quat = new THREE.Quaternion().setFromEuler(rotation);
                 mesh.quaternion.set(quat.x, quat.y, quat.z, quat.w);
             }
-            this.meshBodies.push({ body, mesh });
+            this.meshBodies.push({ body, mesh, offset: meshOffset });
         }
         
         // Try convex hull, fallback to bounding box
@@ -413,14 +434,22 @@ export class PhysicsWorld {
         }
         
         // Sync Three.js meshes with physics bodies once per frame (after all substeps)
-        for (const { body, mesh } of this.meshBodies) {
+        for (const { body, mesh, offset } of this.meshBodies) {
             if (!body.isValid()) continue; // Skip removed bodies
             
             const pos = body.translation();
             const rot = body.rotation();
-            
-            mesh.position.set(pos.x, pos.y, pos.z);
+
             mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+
+            if (offset && typeof offset.x === 'number') {
+                // Body translation is at COM; mesh origin may be offset (e.g. base-aligned STL)
+                const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+                const off = new THREE.Vector3(offset.x, offset.y, offset.z).applyQuaternion(q);
+                mesh.position.set(pos.x - off.x, pos.y - off.y, pos.z - off.z);
+            } else {
+                mesh.position.set(pos.x, pos.y, pos.z);
+            }
         }
         
         // Check for settled state

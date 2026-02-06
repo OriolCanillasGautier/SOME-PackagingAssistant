@@ -68,6 +68,39 @@ function applyPermIndexToGeometry(geometry, permIndex) {
     applyPermutation(geometry, perm);
 }
 
+function computeFootprintArea(geometry) {
+    const positions = geometry.getAttribute('position');
+    if (!positions || positions.count === 0) return 0;
+    geometry.computeBoundingBox();
+    const bbox = geometry.boundingBox;
+    const sizeY = bbox ? (bbox.max.y - bbox.min.y) : 0;
+
+    let minY = Infinity;
+    for (let i = 0; i < positions.count; i++) {
+        const y = positions.getY(i);
+        if (y < minY) minY = y;
+    }
+
+    const eps = Math.max(0.5, sizeY * 0.02);
+    const maxY = minY + eps;
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    let count = 0;
+    for (let i = 0; i < positions.count; i++) {
+        const y = positions.getY(i);
+        if (y <= maxY) {
+            const x = positions.getX(i);
+            const z = positions.getZ(i);
+            minX = Math.min(minX, x);
+            maxX = Math.max(maxX, x);
+            minZ = Math.min(minZ, z);
+            maxZ = Math.max(maxZ, z);
+            count++;
+        }
+    }
+    if (count < 3) return 0;
+    return Math.max(0, (maxX - minX)) * Math.max(0, (maxZ - minZ));
+}
+
 function renderOrientationAlternativesUI(evalResult) {
     if (!evalResult || !Array.isArray(evalResult.results) || evalResult.results.length === 0) return;
     const rows = evalResult.results
@@ -161,7 +194,6 @@ const elements = {
     stopSimBtn: document.getElementById('stop-simulation-btn'),
     resetSimBtn: document.getElementById('reset-simulation-btn'),
     applyGravityBtn: document.getElementById('apply-gravity-btn'),
-    testCollisionsBtn: document.getElementById('test-collisions-btn'),
     
     // Report buttons
     reportButtons: document.getElementById('report-buttons'),
@@ -282,7 +314,6 @@ function setupEventListeners() {
     elements.stopSimBtn.addEventListener('click', stopSimulation);
     elements.resetSimBtn.addEventListener('click', resetSimulation);
     elements.applyGravityBtn?.addEventListener('click', applyGravityTest);
-    elements.testCollisionsBtn?.addEventListener('click', testCollisions);
 
     elements.reportPreviewBtn?.addEventListener('click', openReportModal);
     elements.modalClose?.addEventListener('click', closeReportModal);
@@ -376,9 +407,6 @@ function switchMode(mode) {
     elements.startSimBtn.style.display = isOptimized ? 'none' : 'block';
     if (elements.applyGravityBtn) {
         elements.applyGravityBtn.style.display = 'none';
-    }
-    if (elements.testCollisionsBtn) {
-        elements.testCollisionsBtn.style.display = 'none';
     }
     
     // Reset button is now redundant as Start handles reset, but we can keep it hidden
@@ -907,6 +935,8 @@ async function handleCalculate() {
                         const oriented = state.stlGeometry.clone();
                         applyPermIndexToGeometry(oriented, c.permIndex);
 
+                        const footprintArea = computeFootprintArea(oriented);
+
                         // Stability heuristic (support polygon / COM)
                         const stability = getSupportStability(oriented);
                         const trial = state.sceneManager.addPackedSTLHeightMap({
@@ -924,16 +954,35 @@ async function handleCalculate() {
                             permIndex: c.permIndex,
                             name: c.name,
                             count: count || 0,
-                            stable: !!stability?.stable
+                            stable: !!stability?.stable,
+                            baseArea: footprintArea || 0
                         });
                     }
 
-                    // Sort by count desc, then stable desc
+                    // Sort by count desc, then stable desc, then base footprint desc
                     evalResults.sort((a, b) => {
                         if (b.count !== a.count) return b.count - a.count;
-                        return (b.stable === a.stable) ? 0 : (b.stable ? 1 : -1);
+                        if (b.stable !== a.stable) return b.stable ? 1 : -1;
+                        return (b.baseArea || 0) - (a.baseArea || 0);
                     });
-                    const best = evalResults[0] || { permIndex: 0, name: 'Perm 0 (X,Y,Z)', count: 0 };
+
+                    let best = evalResults[0] || { permIndex: 0, name: 'Perm 0 (X,Y,Z)', count: 0, stable: false, baseArea: 0 };
+
+                    // If another orientation is almost as dense, prefer a more stable / larger-base one
+                    const nearBestSlack = 0.98;
+                    const bestCount = Math.max(0, best.count || 0);
+                    if (bestCount > 0) {
+                        const nearBest = evalResults.filter(r => (r.count || 0) >= bestCount * nearBestSlack);
+                        if (nearBest.length > 0) {
+                            nearBest.sort((a, b) => {
+                                if ((b.stable !== a.stable)) return b.stable ? 1 : -1;
+                                const areaDelta = (b.baseArea || 0) - (a.baseArea || 0);
+                                if (areaDelta !== 0) return areaDelta;
+                                return (b.count || 0) - (a.count || 0);
+                            });
+                            best = nearBest[0];
+                        }
+                    }
 
                     state.orientationEval = {
                         values: { ...values },
@@ -1050,9 +1099,6 @@ async function handleCalculate() {
             if (elements.applyGravityBtn) {
                 elements.applyGravityBtn.style.display = 'block';
             }
-            if (elements.testCollisionsBtn) {
-                elements.testCollisionsBtn.style.display = 'block';
-            }
         }
     }
 }
@@ -1084,6 +1130,12 @@ async function initGravitySimulation() {
         height: placement.boxDims.h
     });
 
+    physics.addCeiling({
+        length: placement.boxDims.l,
+        width: placement.boxDims.w,
+        height: placement.boxDims.h
+    });
+
     state.sceneManager.clearPieces();
 
     const pieceColors = state.sceneManager.pieceColors || [];
@@ -1097,6 +1149,11 @@ async function initGravitySimulation() {
 
         if (placement.type === 'stl' && placement.geometry) {
             const geometry = placement.geometry.clone();
+            geometry.computeBoundingBox();
+            const bbox = geometry.boundingBox;
+            const center = new THREE.Vector3();
+            bbox.getCenter(center);
+
             const material = new THREE.MeshPhongMaterial({
                 color,
                 flatShading: true,
@@ -1110,13 +1167,24 @@ async function initGravitySimulation() {
             state.sceneManager.pieces.push(mesh);
 
             if (placement.vertices) {
-                physics.addConvexHull(placement.vertices, pos, null, mesh);
+                // Recenter vertices so Rapier body translation is at COM
+                const verts = placement.vertices;
+                const centered = new Float32Array(verts.length);
+                for (let i = 0; i < verts.length; i += 3) {
+                    centered[i] = verts[i] - center.x;
+                    centered[i + 1] = verts[i + 1] - center.y;
+                    centered[i + 2] = verts[i + 2] - center.z;
+                }
+
+                const bodyPos = new THREE.Vector3(pos.x + center.x, pos.y + center.y, pos.z + center.z);
+                physics.addConvexHull(centered, bodyPos, null, mesh, center);
             } else {
+                const bodyPos = new THREE.Vector3(pos.x + center.x, pos.y + center.y, pos.z + center.z);
                 physics.addCuboid({
                     l: placement.dims.l,
                     w: placement.dims.w,
                     h: placement.dims.h
-                }, pos, null, mesh);
+                }, bodyPos, null, mesh, center);
             }
         } else {
             const geometry = new THREE.BoxGeometry(placement.dims.l, placement.dims.h, placement.dims.w);
@@ -1150,37 +1218,6 @@ async function initGravitySimulation() {
     };
 }
 
-async function testCollisions() {
-    stopGravitySimulation();
-
-    const sim = await initGravitySimulation();
-    if (!sim) return;
-
-    sim.physics.setGravity(0);
-    sim.physics.lockAllRotations(true);
-    state.gravitySimulation = sim;
-
-    if (elements.simulationStatus) {
-        elements.simulationStatus.textContent = '🔧 Test col·lisions (gravetat 0)';
-        elements.simulationStatus.style.display = 'block';
-    }
-
-    const endTime = performance.now() + 1200;
-    const animate = () => {
-        if (!sim.running) return;
-        sim.physics.step();
-        if (performance.now() >= endTime) {
-            sim.running = false;
-            if (elements.simulationStatus) {
-                elements.simulationStatus.textContent = '✅ Col·lisió estabilitzada';
-            }
-            return;
-        }
-        sim.animationId = requestAnimationFrame(animate);
-    };
-
-    animate();
-}
 
 async function applyGravityTest() {
     if (!state.sceneManager?.lastPlacement) return;
