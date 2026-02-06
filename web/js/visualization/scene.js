@@ -505,8 +505,10 @@ export class SceneManager {
      * @param {number} [params.boxW]
      * @param {number} [params.boxH]
      */
-    addPackedSTLHeightMap({ stlGeometry, maxDraw = 500, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null }) {
-        this.clearPieces();
+    addPackedSTLHeightMap({ stlGeometry, maxDraw = 500, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null, dryRun = false }) {
+        if (!dryRun) {
+            this.clearPieces();
+        }
 
         if (boxL === null || boxW === null || boxH === null) {
             // Fallback to regular packing if box dims are missing
@@ -558,8 +560,9 @@ export class SceneManager {
         const vertexCount = positions ? positions.count : 0;
         if (!positions || vertexCount === 0) return { count: 0 };
 
-        // Height-map resolution
-        const cellSize = Math.max(2, Math.min(8, Math.min(sizeX, sizeZ) / 12));
+        // Height-map resolution (finer grid => less artificial spacing)
+        // Keep it bounded to avoid pathological O(n^3) scans.
+        const cellSize = Math.max(1, Math.min(4, Math.min(sizeX, sizeZ) / 20));
         const pieceNX = Math.max(1, Math.ceil(sizeX / cellSize));
         const pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize));
         const pieceHeights = new Float32Array(pieceNX * pieceNZ);
@@ -601,7 +604,7 @@ export class SceneManager {
             specular: 0x444444
         });
 
-        const positionsOut = [];
+        const positionsOut = dryRun ? null : [];
         let placed = 0;
 
         // Cache for fast broadphase + precise intersection
@@ -712,7 +715,8 @@ export class SceneManager {
                 tmpBox.max.x > boxL + tol || tmpBox.max.y > boxH + tol || tmpBox.max.z > boxW + tol
             ) {
                 // Mark this footprint as blocked and retry
-                const blockTop = Math.min(boxH, bestH + Math.max(1, sizeY * 0.25));
+                const bump = Math.max(0.5, Math.min(sizeY, Math.max(cellSize, packingGap, sizeY * 0.05)));
+                const blockTop = Math.min(boxH, bestH + bump);
                 for (let pz = 0; pz < pieceNZ; pz++) {
                     for (let px = 0; px < pieceNX; px++) {
                         const pIdx = pz * pieceNX + px;
@@ -728,7 +732,8 @@ export class SceneManager {
             // Collision check against already placed pieces
             if (candidateIntersectsAny(tmpMatB, tmpBox)) {
                 // Block this footprint at this height and retry a different spot
-                const blockTop = Math.min(boxH, bestH + sizeY + packingGap);
+                const bump = Math.max(0.5, Math.min(sizeY, Math.max(cellSize, packingGap, sizeY * 0.08)));
+                const blockTop = Math.min(boxH, bestH + bump);
                 for (let pz = 0; pz < pieceNZ; pz++) {
                     for (let px = 0; px < pieceNX; px++) {
                         const pIdx = pz * pieceNX + px;
@@ -742,17 +747,19 @@ export class SceneManager {
                 continue;
             }
 
-            const mesh = new THREE.Mesh(geometry.clone(), material.clone());
-            mesh.castShadow = true;
-            mesh.receiveShadow = true;
-            mesh.position.set(posX, posY, posZ);
-            this.scene.add(mesh);
-            this.pieces.push(mesh);
+            if (!dryRun) {
+                const mesh = new THREE.Mesh(geometry.clone(), material.clone());
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                mesh.position.set(posX, posY, posZ);
+                this.scene.add(mesh);
+                this.pieces.push(mesh);
 
-            const colorIndex = placed % numColors;
-            mesh.material.color = new THREE.Color(this.pieceColors[colorIndex]);
+                const colorIndex = placed % numColors;
+                mesh.material.color = new THREE.Color(this.pieceColors[colorIndex]);
 
-            positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+                positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+            }
 
             // Cache placement for subsequent collision checks
             placedAabbs.push(tmpBox.clone());
@@ -772,14 +779,16 @@ export class SceneManager {
             placed++;
         }
 
-        this.lastPlacement = {
-            type: 'stl',
-            dims: { l: sizeX, w: sizeZ, h: sizeY },
-            geometry,
-            vertices: positions ? new Float32Array(positions.array) : null,
-            positions: positionsOut,
-            boxDims: { l: boxL, w: boxW, h: boxH }
-        };
+        if (!dryRun) {
+            this.lastPlacement = {
+                type: 'stl',
+                dims: { l: sizeX, w: sizeZ, h: sizeY },
+                geometry,
+                vertices: positions ? new Float32Array(positions.array) : null,
+                positions: positionsOut,
+                boxDims: { l: boxL, w: boxW, h: boxH }
+            };
+        }
 
         return { count: placed };
     }

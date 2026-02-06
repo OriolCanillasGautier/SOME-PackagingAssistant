@@ -44,10 +44,68 @@ const state = {
     isSimulating: false,
     gravitySimulation: null,
     physicsWorld: null,
+    orientationEval: null,
     reportGenerator: null,
     lastResults: null, // Store last results for report generation
     storage: null // StorageManager instance
 };
+
+function getPermutationCandidates() {
+    const permTable = [
+        { permIndex: 0, name: 'Perm 0 (X,Y,Z)', perm: [0, 1, 2] },
+        { permIndex: 1, name: 'Perm 1 (X,Z,Y)', perm: [0, 2, 1] },
+        { permIndex: 2, name: 'Perm 2 (Z,Y,X)', perm: [2, 1, 0] },
+        { permIndex: 3, name: 'Perm 3 (Z,X,Y)', perm: [2, 0, 1] },
+        { permIndex: 4, name: 'Perm 4 (Y,Z,X)', perm: [1, 2, 0] },
+        { permIndex: 5, name: 'Perm 5 (Y,X,Z)', perm: [1, 0, 2] }
+    ];
+    return permTable;
+}
+
+function applyPermIndexToGeometry(geometry, permIndex) {
+    const permTable = getPermutationCandidates();
+    const perm = permTable.find(p => p.permIndex === permIndex)?.perm || [0, 1, 2];
+    applyPermutation(geometry, perm);
+}
+
+function renderOrientationAlternativesUI(evalResult) {
+    if (!evalResult || !Array.isArray(evalResult.results) || evalResult.results.length === 0) return;
+    const rows = evalResult.results
+        .map(r => {
+            const disabled = r.count <= 0 ? 'disabled' : '';
+            return `
+                <tr>
+                    <td>${r.name}</td>
+                    <td>${r.count}</td>
+                    <td><button class="btn-small" data-action="view-ori" data-perm="${r.permIndex}" ${disabled}>VEURE</button></td>
+                </tr>
+            `;
+        })
+        .join('');
+
+    const html = `
+        <div style="margin-top: 10px;">
+            <button class="btn-small" data-action="toggle-ori">Alternatives d'orientació</button>
+            <div data-role="ori-panel" style="display:none; margin-top: 8px;" class="results-content">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Orientació</th>
+                            <th>Peces</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${rows}
+                    </tbody>
+                </table>
+                <p class="info-text" style="margin-top:6px;">* Comparació feta amb col·lisions reals (no travessen).</p>
+            </div>
+        </div>
+    `;
+
+    elements.results.insertAdjacentHTML('beforeend', html);
+}
 
 // DOM Elements
 const elements = {
@@ -253,6 +311,48 @@ function setupEventListeners() {
                 state.sceneManager.setView(btn.dataset.view);
             }
         });
+    });
+
+    // Event delegation for orientation alternatives in results
+    elements.results?.addEventListener('click', (e) => {
+        const target = e.target;
+        if (!(target instanceof HTMLElement)) return;
+        const action = target.dataset?.action;
+        if (!action) return;
+
+        if (action === 'toggle-ori') {
+            const panel = elements.results.querySelector('[data-role="ori-panel"]');
+            if (panel) {
+                panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+            }
+            return;
+        }
+
+        if (action === 'view-ori') {
+            const permIndex = parseInt(target.dataset.perm, 10);
+            if (!Number.isFinite(permIndex)) return;
+            const evalState = state.orientationEval;
+            if (!evalState || !state.stlGeometry) return;
+
+            const values = evalState.values;
+            state.sceneManager.clearPieces();
+            state.sceneManager.createBox(values.boxL, values.boxW, values.boxH);
+            const oriented = state.stlGeometry.clone();
+            applyPermIndexToGeometry(oriented, permIndex);
+            const drawn = state.sceneManager.addPackedSTLHeightMap({
+                stlGeometry: oriented,
+                maxDraw: evalState.maxDraw,
+                packingGap: values.packingGap,
+                colorCount: values.colorCount,
+                boxL: values.boxL,
+                boxW: values.boxW,
+                boxH: values.boxH,
+                dryRun: false
+            });
+
+            const count = typeof drawn === 'number' ? drawn : drawn.count;
+            console.log(`Rendered orientation perm=${permIndex} count=${count}`);
+        }
     });
 }
 
@@ -797,39 +897,78 @@ async function handleCalculate() {
             
             // Decide what geometry to draw
             if (state.stlGeometry) {
-                const orientedGeometry = state.stlGeometry.clone();
-                const best = result.data.bestOrientation || {};
-
-                if (best.rotation && Array.isArray(best.rotation)) {
-                    const quat = new THREE.Quaternion(...best.rotation);
-                    const matrix = new THREE.Matrix4().makeRotationFromQuaternion(quat);
-                    orientedGeometry.applyMatrix4(matrix);
-                } else {
-                    // Deterministic permutation based on calculator's permIndex
-                    const permIndex = best.permIndex;
-                    const permTable = [
-                        [0, 1, 2], // 0
-                        [0, 2, 1], // 1
-                        [2, 1, 0], // 2
-                        [2, 0, 1], // 3
-                        [1, 2, 0], // 4
-                        [1, 0, 2]  // 5
-                    ];
-                    const perm = permTable[permIndex !== undefined ? permIndex : 0];
-                    applyPermutation(orientedGeometry, perm);
-                }
-                
                 if (values.heightMapNesting) {
+                    const maxDraw = 500;
+
+                    // Try multiple axis permutations (at least 4) and pick the densest by real collision-aware placement
+                    const candidates = values.allowRotation ? getPermutationCandidates() : getPermutationCandidates().slice(0, 1);
+                    const evalResults = [];
+                    for (const c of candidates) {
+                        const oriented = state.stlGeometry.clone();
+                        applyPermIndexToGeometry(oriented, c.permIndex);
+
+                        // Stability heuristic (support polygon / COM)
+                        const stability = getSupportStability(oriented);
+                        const trial = state.sceneManager.addPackedSTLHeightMap({
+                            stlGeometry: oriented,
+                            maxDraw,
+                            packingGap: values.packingGap,
+                            colorCount: values.colorCount,
+                            boxL: values.boxL,
+                            boxW: values.boxW,
+                            boxH: values.boxH,
+                            dryRun: true
+                        });
+                        const count = typeof trial === 'number' ? trial : trial.count;
+                        evalResults.push({
+                            permIndex: c.permIndex,
+                            name: c.name,
+                            count: count || 0,
+                            stable: !!stability?.stable
+                        });
+                    }
+
+                    // Sort by count desc, then stable desc
+                    evalResults.sort((a, b) => {
+                        if (b.count !== a.count) return b.count - a.count;
+                        return (b.stable === a.stable) ? 0 : (b.stable ? 1 : -1);
+                    });
+                    const best = evalResults[0] || { permIndex: 0, name: 'Perm 0 (X,Y,Z)', count: 0 };
+
+                    state.orientationEval = {
+                        values: { ...values },
+                        maxDraw,
+                        results: evalResults
+                    };
+
+                    const bestGeom = state.stlGeometry.clone();
+                    applyPermIndexToGeometry(bestGeom, best.permIndex);
+
                     drawn = state.sceneManager.addPackedSTLHeightMap({
-                        stlGeometry: orientedGeometry,
-                        maxDraw: 500,
+                        stlGeometry: bestGeom,
+                        maxDraw,
                         packingGap: values.packingGap,
                         colorCount: values.colorCount,
                         boxL: values.boxL,
                         boxW: values.boxW,
-                        boxH: values.boxH
+                        boxH: values.boxH,
+                        dryRun: false
                     });
+
+                    // Add a small UI block so you can inspect other orientations
+                    renderOrientationAlternativesUI(state.orientationEval);
                 } else {
+                    // Non-heightmap path keeps the calculator-chosen orientation
+                    const orientedGeometry = state.stlGeometry.clone();
+                    const best = result.data.bestOrientation || {};
+                    if (best.rotation && Array.isArray(best.rotation)) {
+                        const quat = new THREE.Quaternion(...best.rotation);
+                        const matrix = new THREE.Matrix4().makeRotationFromQuaternion(quat);
+                        orientedGeometry.applyMatrix4(matrix);
+                    } else {
+                        applyPermIndexToGeometry(orientedGeometry, best.permIndex ?? 0);
+                    }
+
                     drawn = state.sceneManager.addPackedSTLPieces({
                         stlGeometry: orientedGeometry,
                         pieceL, pieceW, pieceH,
@@ -1055,10 +1194,10 @@ async function applyGravityTest() {
     const sim = state.gravitySimulation;
     sim.running = true;
     sim.physics.setGravity(-9810);
-    sim.physics.lockAllRotations(true);
+    sim.physics.lockAllRotations(false);
 
     if (elements.simulationStatus) {
-        elements.simulationStatus.textContent = '⚖️ Gravetat aplicada (rotacions bloquejades)';
+        elements.simulationStatus.textContent = '⚖️ Gravetat aplicada (rotacions lliures)';
         elements.simulationStatus.style.display = 'block';
     }
 
