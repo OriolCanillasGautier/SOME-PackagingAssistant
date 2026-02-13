@@ -3,8 +3,6 @@
  * Port of packing_core.py to JavaScript
  */
 
-export const DEFAULT_SAFETY_FACTOR = 1.0;
-
 function calculateFit(pieceDim, boxDim, gap) {
     if (pieceDim > boxDim) return 0;
     if (Math.abs(gap) < 0.001) return Math.floor(boxDim / pieceDim);
@@ -88,79 +86,120 @@ function createDebugInfo(orientations, maxWeight, objWeight) {
 
 /**
  * Generate the final summary in HTML
- * @param {number} theoretical - Theoretical max units
- * @param {number} real - Real units with safety factor
+ * @param {number} count - Number of pieces that fit
  * @param {Object} config - Best configuration
- * @param {number} safety - Safety factor (0-1)
  * @param {Array} allOrientations - All orientation data
  * @returns {string} HTML summary
  */
-function createSummary(theoretical, real, config, safety, allOrientations) {
+export function createSummary(count, config, allOrientations, extra = {}) {
     const dims = config?.dimensions || [0, 0, 0];
-    const safetyPercent = Math.round(safety * 100);
-    
+
+    // Volume-based theoretical max (from real mesh volume if available)
+    const volTheoretical = extra.volumeTheoreticalMax || null;
+    const meshVolumeCC = extra.meshVolumeMM3 ? (extra.meshVolumeMM3 / 1000).toFixed(2) : null;
+    const bboxVolumeCC = (dims[0] * dims[1] * dims[2] / 1000).toFixed(2);
+    const fillRatio = extra.meshVolumeMM3 && dims[0] * dims[1] * dims[2] > 0
+        ? (extra.meshVolumeMM3 / (dims[0] * dims[1] * dims[2]) * 100).toFixed(1)
+        : null;
+
+    // Estimated weight from material density
+    const estPieceWeightG = extra.estimatedPieceWeight ? (extra.estimatedPieceWeight * 1000).toFixed(1) : null;
+    const estTotalWeightKg = extra.estimatedTotalWeight ? extra.estimatedTotalWeight.toFixed(3) : null;
+    const materialName = extra.materialName || null;
+
+    const volEff = (config?.volEfficiency || 0).toFixed(1);
+    const weightEff = (config?.weightEfficiency || 0).toFixed(1);
+    const totalWeight = (config?.weight || 0).toFixed(2);
+
     let summary = `
-    <h1>RESULTATS</h1>
-    
-    <h2>Resultat Principal</h2>
-    <ul>
-        <li><strong>Unitats teòriques màximes:</strong> ${theoretical} <em>(per volum)</em></li>
-        <li><strong>Unitats reals (seguretat ${safetyPercent}%):</strong> ${real}</li>
-        <li><strong>Orientació òptima:</strong> ${config?.name || '—'}</li>
-        <li><strong>Distribució:</strong> ${config?.distribution || '0×0×0'} (L×W×H)</li>
-    </ul>
+    <div class="results-hero">
+        <div class="hero-number">${count}</div>
+        <div class="hero-label">peces</div>
+    </div>
 
-    <h2>Anàlisi de Pes i Volum</h2>
-    <ul>
-        <li><strong>Pes total:</strong> ${(config?.weight || 0).toFixed(2)} kg</li>
-        <li><strong>Eficiència volumètrica:</strong> ${(config?.volEfficiency || 0).toFixed(1)}%</li>
-        <li><strong>Eficiència de pes:</strong> ${(config?.weightEfficiency || 0).toFixed(1)}%</li>
-    </ul>
+    <div class="results-cards">
+        <div class="result-card">
+            <div class="card-body">
+                <div class="card-value">${config?.distribution || '0×0×0'}</div>
+                <div class="card-label">Distribució (L×W×H)</div>
+            </div>
+        </div>
+        <div class="result-card">
+            <div class="card-body">
+                <div class="card-value">${estTotalWeightKg ? estTotalWeightKg + ' kg' : totalWeight + ' kg'}</div>
+                <div class="card-label">${estTotalWeightKg ? 'Pes total estimat' : 'Pes total'}</div>
+                ${estPieceWeightG ? `<div class="card-sub">${estPieceWeightG} g/peça · ${materialName || 'material'}</div>` : ''}
+            </div>
+        </div>
+        <div class="result-card">
+            <div class="card-body">
+                <div class="card-value">${volEff}%</div>
+                <div class="card-label">Eficiència volum</div>
+            </div>
+        </div>
+        <div class="result-card">
+            <div class="card-body">
+                <div class="card-value">${config?.name || '—'}</div>
+                <div class="card-label">Orientació òptima</div>
+            </div>
+        </div>
+    </div>`;
 
-    <h2>Dimensions de l'Orientació Òptima</h2>
-    <ul>
-        <li><strong>Llargada:</strong> ${dims[0].toFixed(2)} mm</li>
-        <li><strong>Amplada:</strong> ${dims[1].toFixed(2)} mm</li>
-        <li><strong>Alçada:</strong> ${dims[2].toFixed(2)} mm</li>
-    </ul>
-    `;
-
-    if (config?.limitedBy === 'weight') {
-        summary += '<p><strong>Factor limitant:</strong> PES (no dimensions)</p>';
+    // Volume info section (only if STL volume available)
+    if (meshVolumeCC) {
+        summary += `
+    <div class="results-section">
+        <h3>Volum STL</h3>
+        <div class="info-grid">
+            <div class="info-item"><span class="info-label">Volum real</span><span class="info-value">${meshVolumeCC} cm³</span></div>
+            <div class="info-item"><span class="info-label">Bounding box</span><span class="info-value">${bboxVolumeCC} cm³</span></div>
+            <div class="info-item"><span class="info-label">Ratio ompliment</span><span class="info-value">${fillRatio}%</span></div>`;
+        if (volTheoretical !== null) {
+            summary += `
+            <div class="info-item"><span class="info-label">Màx. teòric (volum)</span><span class="info-value">${volTheoretical}</span></div>`;
+        }
+        summary += `
+        </div>
+    </div>`;
     }
 
+    if (config?.limitedBy === 'weight') {
+        summary += `<div class="results-warning">⚠️ Factor limitant: PES (no dimensions)</div>`;
+    }
+
+    // Orientations comparison table
     if (allOrientations.length > 1) {
         summary += `
-        <h2>Comparació d'Orientacions</h2>
+    <details class="results-section orientations-details">
+        <summary><h3>Comparació d'Orientacions</h3></summary>
         <table>
             <thead>
                 <tr>
                     <th>Orientació</th>
-                    <th>Unitats</th>
-                    <th>Distribució</th>
-                    <th>Pes (kg)</th>
-                    <th>Vol (%)</th>
-                    <th>Pes (%)</th>
+                    <th>Units</th>
+                    <th>Dist.</th>
+                    <th>Pes</th>
+                    <th>Vol%</th>
                 </tr>
             </thead>
-            <tbody>
-        `;
+            <tbody>`;
         
         for (const ori of allOrientations) {
-            const status = ori.fitsWeight ? '' : '';
+            const isBest = ori.name === config?.name;
             summary += `
-                <tr>
-                    <td>${status} ${ori.name}</td>
+                <tr${isBest ? ' class="best-row"' : ''}>
+                    <td>${ori.name}</td>
                     <td>${ori.units}</td>
                     <td>${ori.distribution}</td>
                     <td>${ori.weight.toFixed(1)}</td>
                     <td>${ori.volEfficiency.toFixed(1)}</td>
-                    <td>${ori.weightEfficiency.toFixed(1)}</td>
-                </tr>
-            `;
+                </tr>`;
         }
         
-        summary += '</tbody></table>';
+        summary += `
+            </tbody>
+        </table>
+    </details>`;
     }
 
     return summary;
@@ -179,7 +218,7 @@ function createSummary(theoretical, real, config, safety, allOrientations) {
  * @param {number} params.maxWeight - Max box weight (kg)
  * @param {boolean} params.allowRotation - Allow 6 orientations
  * @param {Array} params.orientationOverrides - Optional orientation overrides [{dims:[l,w,h], name, permIndex}]
- * @param {number} params.safetyFactor - Safety factor (0.5-1.0)
+ * @param {number} [params.meshVolume] - Real mesh volume in mm³ (from computeMeshVolume)
  * @returns {Object} {summary: string, data: Object}
  */
 export function calcularEmpaquetatge(params) {
@@ -187,9 +226,9 @@ export function calcularEmpaquetatge(params) {
         objL, objW, objH, objWeight,
         boxL, boxW, boxH, maxWeight,
         allowRotation = true,
-        safetyFactor = DEFAULT_SAFETY_FACTOR,
         packingGap = 0, // Separació entre peces en mm (0 = sense gap)
-        orientationOverrides = null
+        orientationOverrides = null,
+        meshVolume = 0 // Real mesh volume in mm³ (0 = use bounding box)
     } = params;
 
     // Validation
@@ -274,7 +313,7 @@ export function calcularEmpaquetatge(params) {
         const totalUnits = fitL * fitW * fitH;
         const totalWeight = totalUnits * objWeight;
 
-        const volObj = ol * ow * oh;
+        const volObj = meshVolume > 0 ? meshVolume : (ol * ow * oh);
         const volEfficiency = volBox > 0 ? (totalUnits * volObj / volBox * 100) : 0;
         const weightEfficiency = maxWeight > 0 ? (totalWeight / maxWeight * 100) : 0;
 
@@ -343,56 +382,6 @@ export function calcularEmpaquetatge(params) {
         }
     }
 
-    // Prefer stable orientation when close to max capacity
-    if (bestFit > 0) {
-        const stabilitySlack = 0.7; // Allow up to 30% fewer units for stability
-        const candidates = [];
-
-        for (const ori of allOrientations) {
-            if (ori.units > 0 && ori.fitsWeight) {
-                candidates.push({ ...ori });
-                continue;
-            }
-
-            if (ori.units > 0 && !ori.fitsWeight && objWeight > 0 && maxWeight > 0) {
-                const maxByWeight = Math.floor(maxWeight / objWeight);
-                const bestDist = optimizeByWeight(ori.fitL, ori.fitW, ori.fitH, maxByWeight);
-                if (bestDist && bestDist.units > 0) {
-                    candidates.push({
-                        name: `${ori.name} (Limitat per pes)`,
-                        dimensions: [...ori.dimensions],
-                        permIndex: ori.permIndex,
-                        rotation: ori.rotation || null,
-                        units: bestDist.units,
-                        distribution: `${bestDist.l}×${bestDist.w}×${bestDist.h}`,
-                        maxFit: { ...ori.maxFit },
-                        fitL: bestDist.l,
-                        fitW: bestDist.w,
-                        fitH: bestDist.h,
-                        weight: bestDist.units * objWeight,
-                        volEfficiency: volBox > 0 ? (bestDist.units * (ori.dimensions[0] * ori.dimensions[1] * ori.dimensions[2]) / volBox * 100) : 0,
-                        weightEfficiency: maxWeight > 0 ? (bestDist.units * objWeight / maxWeight * 100) : 0,
-                        fitsWeight: true,
-                        limitedBy: 'weight',
-                    });
-                }
-            }
-        }
-
-        const stableCandidates = candidates.filter(c => c.units >= bestFit * stabilitySlack);
-        if (stableCandidates.length > 0) {
-            stableCandidates.sort((a, b) => {
-                const baseA = (a.fitL || 0) * (a.fitW || 0);
-                const baseB = (b.fitL || 0) * (b.fitW || 0);
-                if (baseA !== baseB) return baseB - baseA;
-                if ((a.fitH || 0) !== (b.fitH || 0)) return (a.fitH || 0) - (b.fitH || 0);
-                return b.units - a.units;
-            });
-            bestConfig = { ...stableCandidates[0] };
-            bestFit = bestConfig.units;
-        }
-    }
-
     // No solution found
     if (bestFit === 0 || !bestConfig) {
         const debug = createDebugInfo(allOrientations, maxWeight, objWeight);
@@ -402,35 +391,27 @@ export function calcularEmpaquetatge(params) {
         };
     }
 
-    // Apply safety factor
-    const safety = Math.max(0.0, Math.min(1.0, safetyFactor));
-    let realFit = Math.max(1, Math.floor(bestFit * safety));
-    realFit = Math.min(realFit, bestFit);
+    // Volume-based theoretical max (using real mesh volume if available)
+    const volumeTheoreticalMax = meshVolume > 0 && volBox > 0
+        ? Math.floor(volBox / meshVolume)
+        : null;
 
-    let realDistribution = bestConfig.distribution;
-    if (bestConfig?.maxFit) {
-        const bestDist = optimizeByWeight(
-            bestConfig.maxFit.l,
-            bestConfig.maxFit.w,
-            bestConfig.maxFit.h,
-            realFit
-        );
-        if (bestDist && bestDist.units > 0) {
-            realDistribution = `${bestDist.l}×${bestDist.w}×${bestDist.h}`;
-        }
-    }
-
-    const summary = createSummary(bestFit, realFit, bestConfig, safety, allOrientations);
+    const summary = createSummary(bestFit, bestConfig, allOrientations, {
+        volumeTheoreticalMax,
+        meshVolumeMM3: meshVolume > 0 ? meshVolume : null,
+    });
 
     return {
         summary,
         data: {
             theoreticalUnits: bestFit,
-            realUnits: realFit,
+            volumeTheoreticalMax,
+            realUnits: bestFit,
             bestOrientation: bestConfig,
             allOrientations,
-            realDistribution,
+            realDistribution: bestConfig.distribution,
             packingGap: packingGap,
+            meshVolume: meshVolume > 0 ? meshVolume : null,
         }
     };
 }

@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { MeshSimplifier } from './mesh-simplifier.js';
 
 /**
@@ -61,7 +62,7 @@ export class SimplificationModal {
                             <div class="control-section">
                                 <h3>Nivell de Simplificació</h3>
                                 <div class="slider-container">
-                                    <input type="range" id="simplify-slider" min="1" max="100" value="50">
+                                    <input type="range" id="simplify-slider" min="0.1" max="100" step="0.1" value="50">
                                     <div class="slider-labels">
                                         <span>Mínim</span>
                                         <span id="simplify-percent">50%</span>
@@ -70,7 +71,8 @@ export class SimplificationModal {
                                 </div>
                                 
                                 <div class="preset-buttons">
-                                    <button class="preset-btn" data-value="10">Ultra ràpid (10%)</button>
+                                    <button class="preset-btn" data-value="0.5">Mínim (0.5%)</button>
+                                    <button class="preset-btn" data-value="5">Ultra ràpid (5%)</button>
                                     <button class="preset-btn" data-value="25">Ràpid (25%)</button>
                                     <button class="preset-btn" data-value="50">Equilibrat (50%)</button>
                                     <button class="preset-btn" data-value="75">Detallat (75%)</button>
@@ -88,6 +90,7 @@ export class SimplificationModal {
                                     <input type="checkbox" id="create-envelope">
                                     Crear embolcall convex (tanca forats)
                                 </label>
+                                <div id="simplify-backend" class="backend-indicator" style="margin-top:8px;font-size:11px;color:var(--text-muted);"></div>
                             </div>
                             
                             <div class="control-section">
@@ -109,7 +112,12 @@ export class SimplificationModal {
                                         <span>Qualitat volum:</span>
                                         <span id="result-quality">-</span>
                                     </div>
+                                    <div class="stat-row">
+                                        <span>Estanqueïtat:</span>
+                                        <span id="result-watertight">-</span>
+                                    </div>
                                 </div>
+                                <div id="quality-warning" class="quality-warning" style="display:none;"></div>
                             </div>
                             
                             <div class="control-section">
@@ -337,6 +345,17 @@ export class SimplificationModal {
                 color: white;
                 border-color: var(--accent-blue);
             }
+
+            .quality-warning {
+                margin-top: 10px;
+                padding: 10px 12px;
+                border-radius: 8px;
+                background: rgba(245, 158, 11, 0.12);
+                border: 1px solid rgba(245, 158, 11, 0.4);
+                color: #f59e0b;
+                font-size: 12px;
+                line-height: 1.4;
+            }
         `;
         
         document.head.appendChild(styles);
@@ -355,13 +374,13 @@ export class SimplificationModal {
         // Slider de simplificació
         const slider = this.modal.querySelector('#simplify-slider');
         slider.addEventListener('input', (e) => {
-            this._onSliderChange(parseInt(e.target.value));
+            this._onSliderChange(parseFloat(e.target.value));
         });
         
         // Botons preset
         this.modal.querySelectorAll('.preset-btn').forEach(btn => {
             btn.addEventListener('click', () => {
-                const value = parseInt(btn.dataset.value);
+                const value = parseFloat(btn.dataset.value);
                 slider.value = value;
                 this._onSliderChange(value);
             });
@@ -392,7 +411,7 @@ export class SimplificationModal {
         
         // Aplicar
         this.modal.querySelector('#simplify-apply').addEventListener('click', () => {
-            this._applySimplification();
+            this._applySimplification().catch(err => console.error('[SimplificationModal] Apply error:', err));
         });
     }
     
@@ -400,13 +419,14 @@ export class SimplificationModal {
      * Obre el modal amb una geometria
      * @param {THREE.BufferGeometry} geometry - Geometria a simplificar
      * @param {Function} onComplete - Callback quan s'aplica la simplificació
+     * @param {ArrayBuffer|null} rawSTLData - Raw STL binary (for server-side simplification)
      */
-    open(geometry, onComplete) {
+    open(geometry, onComplete, rawSTLData = null) {
         this.originalGeometry = geometry.clone();
         this.onComplete = onComplete;
         
-        // Crear simplificador
-        this.simplifier = new MeshSimplifier(geometry);
+        // Crear simplificador (pass raw STL for server path)
+        this.simplifier = new MeshSimplifier(geometry, rawSTLData);
         
         // Mostrar estadístiques originals
         this._updateOriginalStats();
@@ -502,43 +522,71 @@ export class SimplificationModal {
     
     _updateOriginalStats() {
         const positions = this.originalGeometry.getAttribute('position');
-        
-        this.modal.querySelector('#orig-vertices').textContent = positions.count.toLocaleString();
-        this.modal.querySelector('#orig-faces').textContent = Math.floor(positions.count / 3).toLocaleString();
+        const vertexCount = positions?.count ?? 0;
+        const faceCount = this.originalGeometry.index
+            ? Math.floor(this.originalGeometry.index.count / 3)
+            : Math.floor(vertexCount / 3);
+
+        this.modal.querySelector('#orig-vertices').textContent = vertexCount.toLocaleString();
+        this.modal.querySelector('#orig-faces').textContent = faceCount.toLocaleString();
     }
     
     _onSliderChange(value) {
-        this.modal.querySelector('#simplify-percent').textContent = `${value}%`;
+        this.modal.querySelector('#simplify-percent').textContent = `${value < 1 ? value.toFixed(1) : Math.round(value)}%`;
         
-        // Debounce per evitar càlculs excessius
+        // Debounce per evitar càlculs excessius (longer for server requests)
         if (this._sliderTimeout) {
             clearTimeout(this._sliderTimeout);
         }
         
         this._sliderTimeout = setTimeout(() => {
             this._updateSimplification();
-        }, 150);
+        }, 300);
     }
     
-    _updateSimplification() {
-        const ratio = parseInt(this.modal.querySelector('#simplify-slider').value) / 100;
+    async _updateSimplification() {
+        const ratio = parseFloat(this.modal.querySelector('#simplify-slider').value) / 100;
         const preserveFeatures = this.modal.querySelector('#preserve-features').checked;
+
+        // Show loading state
+        const applyBtn = this.modal.querySelector('#simplify-apply');
+        if (applyBtn) applyBtn.disabled = true;
+        const resultBox = this.modal.querySelector('#result-stats');
+        if (resultBox) resultBox.style.opacity = '0.5';
         
-        // Simplificar
-        this.simplifiedGeometry = this.simplifier.simplify(ratio, preserveFeatures);
-        
-        // Crear embolcall si cal
-        const createEnvelope = this.modal.querySelector('#create-envelope').checked;
-        if (createEnvelope && ratio < 0.5) {
-            // Per ratios baixos, l'embolcall ajuda a mantenir la forma tancada
-            // Però per ara només ajustem la malla
+        try {
+            // simplify() is now async (may call server)
+            this.simplifiedGeometry = await this.simplifier.simplify(ratio, preserveFeatures);
+            
+            // Crear embolcall convex si cal
+            const createEnvelope = this.modal.querySelector('#create-envelope').checked;
+            if (createEnvelope) {
+                const pos = this.simplifiedGeometry.getAttribute('position');
+                const pointCount = pos?.count ?? 0;
+                if (pointCount >= 4) {
+                    const maxPoints = 5000;
+                    const step = Math.max(1, Math.floor(pointCount / maxPoints));
+                    const points = [];
+                    for (let i = 0; i < pointCount; i += step) {
+                        points.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+                    }
+                    const hull = new ConvexGeometry(points);
+                    hull.computeVertexNormals();
+                    this.simplifiedGeometry = hull;
+                }
+            }
+            
+            // Actualitzar estadístiques
+            this._updateResultStats();
+            
+            // Actualitzar visualització
+            this._updateMeshDisplay();
+        } catch (err) {
+            console.error('[SimplificationModal] Error:', err);
+        } finally {
+            if (applyBtn) applyBtn.disabled = false;
+            if (resultBox) resultBox.style.opacity = '1';
         }
-        
-        // Actualitzar estadístiques
-        this._updateResultStats();
-        
-        // Actualitzar visualització
-        this._updateMeshDisplay();
     }
     
     _updateResultStats() {
@@ -548,6 +596,45 @@ export class SimplificationModal {
         this.modal.querySelector('#result-faces').textContent = stats.newFaces.toLocaleString();
         this.modal.querySelector('#result-reduction').textContent = `${stats.vertexReduction}%`;
         this.modal.querySelector('#result-quality').textContent = `${stats.volumePreservation}%`;
+
+        // Watertight indicator
+        const wtEl = this.modal.querySelector('#result-watertight');
+        if (wtEl) {
+            const be = stats.boundaryEdges ?? -1;
+            if (be === 0) {
+                wtEl.textContent = 'Sòlida';
+                wtEl.style.color = 'var(--accent-green)';
+            } else if (be > 0) {
+                wtEl.textContent = `${be} arestes obertes`;
+                wtEl.style.color = 'var(--accent-orange, #f59e0b)';
+            } else {
+                wtEl.textContent = '-';
+                wtEl.style.color = '';
+            }
+        }
+
+        // Quality warning
+        const warnEl = this.modal.querySelector('#quality-warning');
+        if (warnEl) {
+            const vol = parseFloat(stats.volumePreservation);
+            if (vol < 80) {
+                warnEl.style.display = 'block';
+                warnEl.textContent = `Atenció: la simplificació ha alterat significativament el volum (${stats.volumePreservation}%). Prova un nivell més alt per preservar la forma.`;
+            } else {
+                warnEl.style.display = 'none';
+            }
+        }
+
+        // Backend indicator
+        const beEl = this.modal.querySelector('#simplify-backend');
+        if (beEl) {
+            const usedServer = this.simplifier._serverAvailable === true;
+            if (usedServer) {
+                beEl.innerHTML = '<span style="color:var(--accent-green);">PyMeshLab (servidor)</span> — topologia i forats preservats';
+            } else {
+                beEl.innerHTML = '<span style="color:var(--accent-orange,#f59e0b);">JS fallback</span> — qualitat limitada. Inicia <code>mesh_server.py</code> per millors resultats.';
+            }
+        }
     }
     
     _updateMeshDisplay() {
@@ -619,10 +706,24 @@ export class SimplificationModal {
         console.log('Vista:', view);
     }
     
-    _applySimplification() {
-        if (this.simplifiedGeometry && this.onComplete) {
-            this.onComplete(this.simplifiedGeometry.clone());
+    async _applySimplification() {
+        if (!this.simplifiedGeometry || !this.onComplete) {
+            this.close();
+            return;
         }
+
+        const percentKeep = parseFloat(this.modal.querySelector('#simplify-slider')?.value || '100');
+        let simplifiedSTLData = null;
+        try {
+            simplifiedSTLData = this.simplifier?.toBinarySTL?.(this.simplifiedGeometry) || null;
+        } catch (err) {
+            console.warn('[SimplificationModal] Could not export simplified STL:', err?.message || err);
+        }
+
+        this.onComplete(this.simplifiedGeometry.clone(), simplifiedSTLData, {
+            percentKeep,
+            usedServer: this.simplifier?._serverAvailable === true
+        });
         this.close();
     }
 }

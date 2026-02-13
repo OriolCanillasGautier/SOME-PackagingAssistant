@@ -165,8 +165,169 @@ function mergeBufferGeometries(geometries) {
     return merged;
 }
 
+/** * Compute the signed volume of a triangulated mesh (in mm³).
+ * Uses the divergence theorem: for each triangle (v0, v1, v2),
+ * the signed tetrahedron volume with the origin is v0·(v1×v2)/6.
+ * The absolute value gives the enclosed volume for a watertight mesh.
+ * For non-watertight meshes, the result is an approximation.
+ *
+ * @param {THREE.BufferGeometry} geometry
+ * @returns {number} Volume in mm³ (always positive)
+ */
+export function computeMeshVolume(geometry) {
+    const pos = geometry.getAttribute('position');
+    if (!pos) return 0;
+    const index = geometry.getIndex();
+
+    let volume = 0;
+    const v0 = new THREE.Vector3();
+    const v1 = new THREE.Vector3();
+    const v2 = new THREE.Vector3();
+    const cross = new THREE.Vector3();
+
+    if (index) {
+        const idx = index.array;
+        for (let i = 0; i < idx.length; i += 3) {
+            v0.fromBufferAttribute(pos, idx[i]);
+            v1.fromBufferAttribute(pos, idx[i + 1]);
+            v2.fromBufferAttribute(pos, idx[i + 2]);
+            cross.crossVectors(v1, v2);
+            volume += v0.dot(cross);
+        }
+    } else {
+        for (let i = 0; i < pos.count; i += 3) {
+            v0.fromBufferAttribute(pos, i);
+            v1.fromBufferAttribute(pos, i + 1);
+            v2.fromBufferAttribute(pos, i + 2);
+            cross.crossVectors(v1, v2);
+            volume += v0.dot(cross);
+        }
+    }
+
+    return Math.abs(volume) / 6;
+}
+
 /**
- * Extract dimensions from a BufferGeometry (bounding box)
+ * Compute the total surface area of a mesh (sum of triangle areas, in mm²).
+ * Useful for estimating material weight of hollow / shell parts.
+ * @param {THREE.BufferGeometry} geometry
+ * @returns {number} Surface area in mm²
+ */
+export function computeSurfaceArea(geometry) {
+    const pos = geometry.getAttribute('position');
+    if (!pos) return 0;
+    const index = geometry.getIndex();
+
+    let area = 0;
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const ab = new THREE.Vector3();
+    const ac = new THREE.Vector3();
+    const cross = new THREE.Vector3();
+
+    const triCount = index ? index.count / 3 : pos.count / 3;
+    for (let i = 0; i < triCount; i++) {
+        const i0 = index ? index.getX(i * 3)     : i * 3;
+        const i1 = index ? index.getX(i * 3 + 1) : i * 3 + 1;
+        const i2 = index ? index.getX(i * 3 + 2) : i * 3 + 2;
+        a.fromBufferAttribute(pos, i0);
+        b.fromBufferAttribute(pos, i1);
+        c.fromBufferAttribute(pos, i2);
+        ab.subVectors(b, a);
+        ac.subVectors(c, a);
+        cross.crossVectors(ab, ac);
+        area += cross.length() * 0.5;
+    }
+    return area;
+}
+
+/**
+ * Analyze mesh integrity to estimate if volume-based mass is reliable.
+ * A watertight manifold mesh should have each undirected edge shared by exactly 2 triangles.
+ *
+ * @param {THREE.BufferGeometry} geometry
+ * @param {{ weldTolerance?: number }} opts
+ * @returns {{
+ *   triangleCount: number,
+ *   uniqueEdgeCount: number,
+ *   boundaryEdgeCount: number,
+ *   nonManifoldEdgeCount: number,
+ *   watertight: boolean
+ * }}
+ */
+export function analyzeMeshIntegrity(geometry, opts = {}) {
+    const pos = geometry.getAttribute('position');
+    if (!pos || pos.count < 3) {
+        return {
+            triangleCount: 0,
+            uniqueEdgeCount: 0,
+            boundaryEdgeCount: 0,
+            nonManifoldEdgeCount: 0,
+            watertight: false
+        };
+    }
+
+    const index = geometry.getIndex();
+    const triCount = index ? Math.floor(index.count / 3) : Math.floor(pos.count / 3);
+    const weldTolerance = Math.max(1e-9, opts.weldTolerance ?? 1e-4);
+    const invTol = 1 / weldTolerance;
+
+    const weldedVertexKeyToId = new Map();
+    let nextWeldId = 0;
+
+    function weldedIdFromPos(i) {
+        const x = Math.round(pos.getX(i) * invTol);
+        const y = Math.round(pos.getY(i) * invTol);
+        const z = Math.round(pos.getZ(i) * invTol);
+        const key = `${x}|${y}|${z}`;
+        let id = weldedVertexKeyToId.get(key);
+        if (id === undefined) {
+            id = nextWeldId++;
+            weldedVertexKeyToId.set(key, id);
+        }
+        return id;
+    }
+
+    const edgeCounts = new Map();
+    const pushEdge = (a, b) => {
+        const minV = a < b ? a : b;
+        const maxV = a < b ? b : a;
+        const edgeKey = `${minV}|${maxV}`;
+        edgeCounts.set(edgeKey, (edgeCounts.get(edgeKey) || 0) + 1);
+    };
+
+    for (let t = 0; t < triCount; t++) {
+        const i0 = index ? index.getX(t * 3) : (t * 3);
+        const i1 = index ? index.getX(t * 3 + 1) : (t * 3 + 1);
+        const i2 = index ? index.getX(t * 3 + 2) : (t * 3 + 2);
+
+        const v0 = weldedIdFromPos(i0);
+        const v1 = weldedIdFromPos(i1);
+        const v2 = weldedIdFromPos(i2);
+
+        pushEdge(v0, v1);
+        pushEdge(v1, v2);
+        pushEdge(v2, v0);
+    }
+
+    let boundaryEdgeCount = 0;
+    let nonManifoldEdgeCount = 0;
+    for (const count of edgeCounts.values()) {
+        if (count === 1) boundaryEdgeCount++;
+        else if (count > 2) nonManifoldEdgeCount++;
+    }
+
+    return {
+        triangleCount: triCount,
+        uniqueEdgeCount: edgeCounts.size,
+        boundaryEdgeCount,
+        nonManifoldEdgeCount,
+        watertight: triCount > 0 && boundaryEdgeCount === 0 && nonManifoldEdgeCount === 0
+    };
+}
+
+/** * Extract dimensions from a BufferGeometry (bounding box)
  * @param {THREE.BufferGeometry} geometry
  * @returns {{length: number, width: number, height: number}}
  */
@@ -488,6 +649,214 @@ export function getSupportStability(geometry, epsilon = 0.5) {
     return { stable, supportArea, basePointCount: basePoints.length };
 }
 
+// ---------------------------------------------------------------------------
+// Stable-base detection & alignment
+// ---------------------------------------------------------------------------
+
+/**
+ * Analyse mesh triangles and find the best "resting base" — the largest
+ * cluster of roughly co-planar, downward-facing triangles at the lowest
+ * part of the mesh.
+ *
+ * Returns a THREE.Quaternion that, when applied, aligns that face so its
+ * outward normal points downward (-Y), i.e. the piece stands "upright"
+ * with that face on the ground.
+ *
+ * Algorithm:
+ *  1. Iterate every triangle and compute its face normal + centroid.
+ *  2. Keep only faces whose normal has a strong vertical component
+ *     (|normal.y| > cosThreshold) — these are candidate "flat" faces.
+ *  3. Among those, separate into "down-facing" (normal.y < 0) and
+ *     "up-facing" (normal.y > 0) groups.
+ *  4. Within each group, cluster by centroid height (Y) using a small
+ *     tolerance, so faces that lie at the same level get aggregated.
+ *  5. Score each cluster by total triangle area.
+ *  6. Pick the cluster with the largest area that is at the lowest height
+ *     (prefer down-facing first; fall back to up-facing flipped).
+ *  7. Compute the weighted-average normal of that cluster and build a
+ *     quaternion that rotates it to -Y (ground).
+ *
+ * @param {THREE.BufferGeometry} geometry
+ * @param {Object} [opts]
+ * @param {number} [opts.cosThreshold=0.4]  min |normal.y| to consider "flat"
+ * @param {number} [opts.heightBinMM=2]     height tolerance for clustering (mm)
+ * @returns {{ quaternion: THREE.Quaternion, normal: THREE.Vector3, area: number,
+ *             clusterCount: number } | null}
+ */
+export function detectStableBase(geometry, opts = {}) {
+    const { cosThreshold = 0.4, heightBinMM = 2 } = opts;
+
+    const pos = geometry.getAttribute('position');
+    if (!pos || pos.count < 3) return null;
+
+    const indexed = geometry.index;
+    const triCount = indexed ? indexed.count / 3 : pos.count / 3;
+
+    // 1. Collect triangle info
+    const vA = new THREE.Vector3();
+    const vB = new THREE.Vector3();
+    const vC = new THREE.Vector3();
+    const edge1 = new THREE.Vector3();
+    const edge2 = new THREE.Vector3();
+    const faceNormal = new THREE.Vector3();
+
+    /** @type {{ normal: THREE.Vector3, centroidY: number, area: number }[]} */
+    const faces = [];
+
+    for (let t = 0; t < triCount; t++) {
+        let ia, ib, ic;
+        if (indexed) {
+            ia = indexed.getX(t * 3);
+            ib = indexed.getX(t * 3 + 1);
+            ic = indexed.getX(t * 3 + 2);
+        } else {
+            ia = t * 3;
+            ib = t * 3 + 1;
+            ic = t * 3 + 2;
+        }
+        vA.set(pos.getX(ia), pos.getY(ia), pos.getZ(ia));
+        vB.set(pos.getX(ib), pos.getY(ib), pos.getZ(ib));
+        vC.set(pos.getX(ic), pos.getY(ic), pos.getZ(ic));
+
+        edge1.subVectors(vB, vA);
+        edge2.subVectors(vC, vA);
+        faceNormal.crossVectors(edge1, edge2);
+
+        const area = faceNormal.length() * 0.5;
+        if (area < 1e-8) continue;              // degenerate triangle
+        faceNormal.normalize();
+
+        if (Math.abs(faceNormal.y) < cosThreshold) continue;   // not flat enough
+
+        const centroidY = (vA.y + vB.y + vC.y) / 3;
+        faces.push({
+            normal: faceNormal.clone(),
+            centroidY,
+            area
+        });
+    }
+
+    if (faces.length === 0) return null;
+
+    // 2. Split into down-facing (normal.y < 0) and up-facing (normal.y > 0)
+    const downFaces = faces.filter(f => f.normal.y < 0);
+    const upFaces   = faces.filter(f => f.normal.y > 0);
+
+    // 3. Cluster faces by height (centroidY), pick largest-area cluster
+    function clusterByHeight(faceList) {
+        if (faceList.length === 0) return [];
+        const sorted = faceList.slice().sort((a, b) => a.centroidY - b.centroidY);
+        const clusters = [];
+        let current = { faces: [sorted[0]], minY: sorted[0].centroidY };
+        for (let i = 1; i < sorted.length; i++) {
+            if (sorted[i].centroidY - current.faces[current.faces.length - 1].centroidY <= heightBinMM) {
+                current.faces.push(sorted[i]);
+            } else {
+                clusters.push(current);
+                current = { faces: [sorted[i]], minY: sorted[i].centroidY };
+            }
+        }
+        clusters.push(current);
+        return clusters;
+    }
+
+    function scoreCluster(cluster) {
+        let totalArea = 0;
+        for (const f of cluster.faces) totalArea += f.area;
+        return totalArea;
+    }
+
+    function bestCluster(faceList) {
+        const clusters = clusterByHeight(faceList);
+        if (clusters.length === 0) return null;
+        // Sort by total area descending, then by lowest centroid ascending (prefer bottom)
+        clusters.sort((a, b) => {
+            const aArea = scoreCluster(a);
+            const bArea = scoreCluster(b);
+            if (Math.abs(bArea - aArea) > 1e-6) return bArea - aArea;  // larger area first
+            return a.minY - b.minY;  // lower first
+        });
+        return clusters[0];
+    }
+
+    // Prefer down-facing (the face that would touch the ground already points down)
+    let chosen = bestCluster(downFaces);
+    let flipSign = 1; // if chosen is down-facing, its normal ≈ -Y already (we want to align it to -Y)
+    if (!chosen || scoreCluster(chosen) < 1) {
+        const upChoice = bestCluster(upFaces);
+        if (upChoice && scoreCluster(upChoice) > (chosen ? scoreCluster(chosen) : 0)) {
+            chosen = upChoice;
+            flipSign = -1; // normal points +Y, but we want the *face* on the ground → rotate 180°
+        }
+    }
+
+    if (!chosen) return null;
+
+    // 4. Weighted average normal of the chosen cluster
+    const avgNormal = new THREE.Vector3();
+    let totalArea = 0;
+    for (const f of chosen.faces) {
+        avgNormal.addScaledVector(f.normal, f.area);
+        totalArea += f.area;
+    }
+    avgNormal.divideScalar(totalArea || 1).normalize();
+
+    // The face's outward normal. We want this direction to point **down** (-Y)
+    // so the face rests on the ground.
+    // For down-facing faces, normal is already ≈ -Y → small rotation.
+    // For up-facing faces, normal is ≈ +Y → we need to flip 180°.
+    const targetDir = new THREE.Vector3(0, -1, 0);
+    const faceDir = avgNormal.clone();
+    if (flipSign < 0) {
+        // The face's ground-contact side is opposite the normal
+        faceDir.negate();
+    }
+
+    const quat = new THREE.Quaternion();
+    quat.setFromUnitVectors(faceDir, targetDir);
+
+    return {
+        quaternion: quat,
+        normal: avgNormal,
+        area: totalArea,
+        clusterCount: chosen.faces.length
+    };
+}
+
+/**
+ * Align geometry so its detected stable base rests on the ground (Y = 0).
+ * Mutates the geometry in-place and returns the detection result (or null
+ * if no clear base was found — in that case the geometry is untouched).
+ *
+ * @param {THREE.BufferGeometry} geometry
+ * @returns {{ quaternion: THREE.Quaternion, normal: THREE.Vector3, area: number,
+ *             clusterCount: number } | null}
+ */
+export function alignToStableBase(geometry) {
+    const result = detectStableBase(geometry);
+    if (!result) return null;
+
+    // Apply rotation
+    const mat = new THREE.Matrix4().makeRotationFromQuaternion(result.quaternion);
+    geometry.applyMatrix4(mat);
+
+    // Translate so min-Y = 0 (piece sits on ground)
+    geometry.computeBoundingBox();
+    const minY = geometry.boundingBox.min.y;
+    if (Math.abs(minY) > 1e-4) {
+        geometry.translate(0, -minY, 0);
+    }
+
+    // Recenter on XZ so origin is at the centre of the footprint
+    geometry.computeBoundingBox();
+    const cx = (geometry.boundingBox.min.x + geometry.boundingBox.max.x) / 2;
+    const cz = (geometry.boundingBox.min.z + geometry.boundingBox.max.z) / 2;
+    geometry.translate(-cx, 0, -cz);
+
+    geometry.computeBoundingBox();
+    return result;
+}
+
 /**
  * Simplify geometry for physics (reduce vertex count)
  * @param {THREE.BufferGeometry} geometry
@@ -529,6 +898,9 @@ export function cloneGeometry(geometry) {
 export default {
     loadSTL,
     extractDimensions,
+    computeMeshVolume,
+    computeSurfaceArea,
+    analyzeMeshIntegrity,
     centerToOrigin,
     computeOBB,
     permutationMatrix,
@@ -537,5 +909,7 @@ export default {
     createMesh,
     getConvexHullVertices,
     simplifyForPhysics,
-    cloneGeometry
+    cloneGeometry,
+    detectStableBase,
+    alignToStableBase
 };

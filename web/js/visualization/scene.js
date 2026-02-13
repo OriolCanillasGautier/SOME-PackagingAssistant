@@ -505,7 +505,7 @@ export class SceneManager {
      * @param {number} [params.boxW]
      * @param {number} [params.boxH]
      */
-    addPackedSTLHeightMap({ stlGeometry, maxDraw = 500, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null, dryRun = false }) {
+    addPackedSTLHeightMap({ stlGeometry, maxDraw = 500, maxTry = null, packingGap = 0, colorCount = null, boxL = null, boxW = null, boxH = null, dryRun = false }) {
         if (!dryRun) {
             this.clearPieces();
         }
@@ -551,7 +551,7 @@ export class SceneManager {
         // Align base to y=0 and center in X/Z
         geometry.translate(-center.x, -bbox.min.y, -center.z);
 
-        // Build BVH once for robust intersection testing
+        // Build BVH for lateral collision testing
         if (typeof geometry.computeBoundsTree === 'function') {
             geometry.computeBoundsTree();
         }
@@ -587,7 +587,7 @@ export class SceneManager {
             if (y <= minY + baseEps) pieceMask[idx] = 1;
         }
 
-        // Keep footprint mask exact; collisions are handled via BVH checks
+        // Keep footprint mask exact
         const expandedMask = pieceMask;
 
         // Container height map
@@ -607,55 +607,48 @@ export class SceneManager {
         const positionsOut = dryRun ? null : [];
         let placed = 0;
 
-        // Cache for fast broadphase + precise intersection
+        // Adaptive maxTry from volume ratio if not provided
+        const pieceBBoxVol = sizeX * sizeY * sizeZ;
+        const boxVolume = boxL * boxW * boxH;
+        const effectiveMaxTry = maxTry != null ? maxTry : Math.min(2000, Math.max(maxDraw, Math.ceil(boxVolume / pieceBBoxVol * 1.2)));
+
+        // BVH collision infrastructure — prevents lateral mesh penetration
         const placedAabbs = [];
         const placedMatrices = [];
         const localBbox = new THREE.Box3(
             new THREE.Vector3(-sizeX / 2, 0, -sizeZ / 2),
             new THREE.Vector3(sizeX / 2, sizeY, sizeZ / 2)
         );
-
         const tmpMatA = new THREE.Matrix4();
         const tmpMatB = new THREE.Matrix4();
         const tmpInv = new THREE.Matrix4();
         const tmpBox = new THREE.Box3();
 
-        const aabbInflatedOverlaps = (a, b, inflate = 0) => {
-            return !(
-                (a.max.x + inflate) < (b.min.x - inflate) ||
-                (a.min.x - inflate) > (b.max.x + inflate) ||
-                (a.max.y + inflate) < (b.min.y - inflate) ||
-                (a.min.y - inflate) > (b.max.y + inflate) ||
-                (a.max.z + inflate) < (b.min.z - inflate) ||
-                (a.min.z - inflate) > (b.max.z + inflate)
-            );
-        };
-
         const candidateIntersectsAny = (candidateMatrix, candidateAabb) => {
             if (!geometry.boundsTree) return false;
-
-            // Broadphase (inflated AABB for user gap)
             const inflate = Math.max(0, packingGap * 0.5);
             for (let i = 0; i < placedAabbs.length; i++) {
                 const otherAabb = placedAabbs[i];
-                if (!aabbInflatedOverlaps(candidateAabb, otherAabb, inflate)) continue;
-
-                // Precise: BVH intersectsGeometry with relative transform
-                const otherMatrix = placedMatrices[i];
-                tmpInv.copy(otherMatrix).invert();
+                // Broadphase AABB check
+                if ((candidateAabb.max.x + inflate) < (otherAabb.min.x - inflate) ||
+                    (candidateAabb.min.x - inflate) > (otherAabb.max.x + inflate) ||
+                    (candidateAabb.max.y + inflate) < (otherAabb.min.y - inflate) ||
+                    (candidateAabb.min.y - inflate) > (otherAabb.max.y + inflate) ||
+                    (candidateAabb.max.z + inflate) < (otherAabb.min.z - inflate) ||
+                    (candidateAabb.min.z - inflate) > (otherAabb.max.z + inflate)) continue;
+                // Precise BVH triangle-triangle
+                tmpInv.copy(placedMatrices[i]).invert();
                 tmpMatA.multiplyMatrices(tmpInv, candidateMatrix);
-                if (geometry.boundsTree.intersectsGeometry(geometry, tmpMatA)) {
-                    return true;
-                }
+                if (geometry.boundsTree.intersectsGeometry(geometry, tmpMatA)) return true;
             }
             return false;
         };
 
-        const maxTry = maxDraw;
-        let collisionSkips = 0;
-        const maxCollisionSkips = Math.max(50, maxTry * 3);
+        // Consecutive-failure counter: resets on each successful placement
+        let consecutiveSkips = 0;
+        const maxConsecutiveSkips = Math.max(200, Math.ceil(boxVolume / pieceBBoxVol) * 3);
 
-        while (placed < maxTry) {
+        while (placed < effectiveMaxTry) {
             let bestX = -1;
             let bestZ = -1;
             let bestH = Infinity;
@@ -701,6 +694,9 @@ export class SceneManager {
 
             if (bestX < 0 || bestZ < 0 || !Number.isFinite(bestH)) break;
 
+            // Full bounding box height guard — piece must fit entirely within box
+            if (bestH + sizeY > boxH + 0.01) break;
+
             // Build candidate transform + AABB
             const posX = bestX * cellSize + sizeX / 2;
             const posZ = bestZ * cellSize + sizeZ / 2;
@@ -708,44 +704,23 @@ export class SceneManager {
             tmpMatB.makeTranslation(posX, posY, posZ);
             tmpBox.copy(localBbox).applyMatrix4(tmpMatB);
 
-            // Box boundary clamp (defensive)
-            const tol = 0.0001;
-            if (
-                tmpBox.min.x < -tol || tmpBox.min.y < -tol || tmpBox.min.z < -tol ||
-                tmpBox.max.x > boxL + tol || tmpBox.max.y > boxH + tol || tmpBox.max.z > boxW + tol
-            ) {
-                // Mark this footprint as blocked and retry
-                const bump = Math.max(0.5, Math.min(sizeY, Math.max(cellSize, packingGap, sizeY * 0.05)));
-                const blockTop = Math.min(boxH, bestH + bump);
-                for (let pz = 0; pz < pieceNZ; pz++) {
-                    for (let px = 0; px < pieceNX; px++) {
-                        const pIdx = pz * pieceNX + px;
-                        if (!expandedMask[pIdx]) continue;
-                        const hIdx = (bestZ + pz) * gridNX + (bestX + px);
-                        if (blockTop > heightMap[hIdx]) heightMap[hIdx] = blockTop;
-                    }
-                }
-                if (++collisionSkips > maxCollisionSkips) break;
-                continue;
-            }
-
-            // Collision check against already placed pieces
+            // BVH collision check — prevent lateral penetration
             if (candidateIntersectsAny(tmpMatB, tmpBox)) {
-                // Block this footprint at this height and retry a different spot
-                const bump = Math.max(0.5, Math.min(sizeY, Math.max(cellSize, packingGap, sizeY * 0.08)));
-                const blockTop = Math.min(boxH, bestH + bump);
+                // Small bump: just cellSize to try the next height level
+                const bump = cellSize;
                 for (let pz = 0; pz < pieceNZ; pz++) {
                     for (let px = 0; px < pieceNX; px++) {
                         const pIdx = pz * pieceNX + px;
                         if (!expandedMask[pIdx]) continue;
                         const hIdx = (bestZ + pz) * gridNX + (bestX + px);
-                        if (blockTop > heightMap[hIdx]) heightMap[hIdx] = blockTop;
+                        const newH = bestH + bump;
+                        if (newH > heightMap[hIdx]) heightMap[hIdx] = newH;
                     }
                 }
-
-                if (++collisionSkips > maxCollisionSkips) break;
+                if (++consecutiveSkips > maxConsecutiveSkips) break;
                 continue;
             }
+            consecutiveSkips = 0; // Reset on successful placement
 
             if (!dryRun) {
                 const mesh = new THREE.Mesh(geometry.clone(), material.clone());
@@ -761,7 +736,7 @@ export class SceneManager {
                 positionsOut.push(new THREE.Vector3(posX, posY, posZ));
             }
 
-            // Cache placement for subsequent collision checks
+            // Cache placement for collision checks
             placedAabbs.push(tmpBox.clone());
             placedMatrices.push(tmpMatB.clone());
 
@@ -779,7 +754,343 @@ export class SceneManager {
             placed++;
         }
 
+        console.log(`[HeightMap] placed=${placed}, maxTry=${effectiveMaxTry}, consecutiveSkips=${consecutiveSkips}`);
+
         if (!dryRun) {
+            this.lastPlacement = {
+                type: 'stl',
+                dims: { l: sizeX, w: sizeZ, h: sizeY },
+                geometry,
+                vertices: positions ? new Float32Array(positions.array) : null,
+                positions: positionsOut,
+                boxDims: { l: boxL, w: boxW, h: boxH }
+            };
+        }
+
+        return { count: placed };
+    }
+
+    /**
+     * Async + abortable version of addPackedSTLHeightMap.
+     * Yields to the browser regularly to keep UI responsive and to allow cancellation.
+     *
+     * @param {Object} params
+     * @param {THREE.BufferGeometry} params.stlGeometry
+     * @param {number} [params.maxDraw=500]
+     * @param {number} [params.packingGap=0]
+     * @param {number} [params.colorCount]
+     * @param {number} params.boxL
+     * @param {number} params.boxW
+     * @param {number} params.boxH
+     * @param {boolean} [params.dryRun=false]
+     * @param {AbortSignal} [params.abortSignal]
+     * @param {(p:{placed:number,maxTry:number})=>void} [params.onProgress]
+     */
+    async addPackedSTLHeightMapAsync({
+        stlGeometry,
+        maxDraw = 500,
+        maxTry = null,
+        packingGap = 0,
+        colorCount = null,
+        boxL = null,
+        boxW = null,
+        boxH = null,
+        dryRun = false,
+        abortSignal = null,
+        onProgress = null
+    }) {
+        const abortError = () => new DOMException('Aborted', 'AbortError');
+        const yieldBudgetMs = 8;
+        let lastYieldAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+        const maybeYield = async (force = false) => {
+            if (abortSignal?.aborted) throw abortError();
+            const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            if (!force && (now - lastYieldAt) < yieldBudgetMs) return;
+            await new Promise(resolve => requestAnimationFrame(() => resolve()));
+            lastYieldAt = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+            if (abortSignal?.aborted) throw abortError();
+        };
+
+        if (!dryRun) {
+            this.clearPieces();
+        }
+
+        if (boxL === null || boxW === null || boxH === null) {
+            // Fallback to regular packing if box dims are missing
+            return this.addPackedSTLPieces({
+                stlGeometry,
+                pieceL: 0,
+                pieceW: 0,
+                pieceH: 0,
+                nx: 0,
+                ny: 0,
+                nz: 0,
+                maxDraw,
+                packingGap,
+                colorCount,
+                boxL,
+                boxW,
+                boxH,
+                strictGeometryCheck: true
+            });
+        }
+
+        const numColors = colorCount || this.colorCount;
+
+        // Clone and prepare geometry
+        const geometry = stlGeometry.clone();
+        geometry.computeVertexNormals();
+        geometry.computeBoundingBox();
+
+        const bbox = geometry.boundingBox;
+        const center = new THREE.Vector3();
+        bbox.getCenter(center);
+        const sizeX = bbox.max.x - bbox.min.x;
+        const sizeY = bbox.max.y - bbox.min.y;
+        const sizeZ = bbox.max.z - bbox.min.z;
+
+        if (sizeX > boxL || sizeZ > boxW || sizeY > boxH) {
+            return { count: 0 };
+        }
+
+        // Align base to y=0 and center in X/Z
+        geometry.translate(-center.x, -bbox.min.y, -center.z);
+
+        // Build BVH for lateral collision testing
+        if (typeof geometry.computeBoundsTree === 'function') {
+            geometry.computeBoundsTree();
+        }
+
+        const positions = geometry.getAttribute('position');
+        const vertexCount = positions ? positions.count : 0;
+        if (!positions || vertexCount === 0) return { count: 0 };
+
+        // Height-map resolution (finer grid => less artificial spacing)
+        const cellSize = Math.max(1, Math.min(4, Math.min(sizeX, sizeZ) / 20));
+        const pieceNX = Math.max(1, Math.ceil(sizeX / cellSize));
+        const pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize));
+        const pieceHeights = new Float32Array(pieceNX * pieceNZ);
+        const pieceMask = new Uint8Array(pieceNX * pieceNZ);
+        const heightEps = Math.max(0.5, packingGap * 0.25);
+
+        // Build piece height map + base footprint mask
+        let minY = Infinity;
+        for (let i = 0; i < vertexCount; i++) {
+            minY = Math.min(minY, positions.getY(i));
+            if ((i & 4095) === 0) await maybeYield();
+        }
+        const baseEps = Math.max(0.5, sizeY * 0.02);
+
+        for (let i = 0; i < vertexCount; i++) {
+            const x = positions.getX(i) + sizeX / 2;
+            const y = positions.getY(i);
+            const z = positions.getZ(i) + sizeZ / 2;
+            const ix = Math.min(pieceNX - 1, Math.max(0, Math.floor(x / cellSize)));
+            const iz = Math.min(pieceNZ - 1, Math.max(0, Math.floor(z / cellSize)));
+            const idx = iz * pieceNX + ix;
+            if (y > pieceHeights[idx]) pieceHeights[idx] = y;
+            if (y <= minY + baseEps) pieceMask[idx] = 1;
+            if ((i & 4095) === 0) await maybeYield();
+        }
+
+        const expandedMask = pieceMask;
+
+        // Container height map
+        const gridNX = Math.max(1, Math.ceil(boxL / cellSize));
+        const gridNZ = Math.max(1, Math.ceil(boxW / cellSize));
+        const heightMap = new Float32Array(gridNX * gridNZ);
+
+        const material = new THREE.MeshPhongMaterial({
+            color: 0xffffff,
+            opacity: 0.92,
+            transparent: true,
+            flatShading: false,
+            shininess: 60,
+            specular: 0x444444
+        });
+
+        const positionsOut = dryRun ? null : [];
+        let placed = 0;
+
+        // Adaptive maxTry from volume ratio if not provided
+        const pieceBBoxVol = sizeX * sizeY * sizeZ;
+        const boxVolume = boxL * boxW * boxH;
+        const effectiveMaxTry = maxTry != null ? maxTry : Math.min(2000, Math.max(maxDraw, Math.ceil(boxVolume / pieceBBoxVol * 1.2)));
+
+        // BVH collision infrastructure — prevents lateral mesh penetration
+        const placedAabbs = [];
+        const placedMatrices = [];
+        const localBbox = new THREE.Box3(
+            new THREE.Vector3(-sizeX / 2, 0, -sizeZ / 2),
+            new THREE.Vector3(sizeX / 2, sizeY, sizeZ / 2)
+        );
+        const tmpMatA = new THREE.Matrix4();
+        const tmpMatB = new THREE.Matrix4();
+        const tmpInv = new THREE.Matrix4();
+        const tmpBox = new THREE.Box3();
+
+        const candidateIntersectsAny = (candidateMatrix, candidateAabb) => {
+            if (!geometry.boundsTree) return false;
+            const inflate = Math.max(0, packingGap * 0.5);
+            for (let i = 0; i < placedAabbs.length; i++) {
+                const otherAabb = placedAabbs[i];
+                if ((candidateAabb.max.x + inflate) < (otherAabb.min.x - inflate) ||
+                    (candidateAabb.min.x - inflate) > (otherAabb.max.x + inflate) ||
+                    (candidateAabb.max.y + inflate) < (otherAabb.min.y - inflate) ||
+                    (candidateAabb.min.y - inflate) > (otherAabb.max.y + inflate) ||
+                    (candidateAabb.max.z + inflate) < (otherAabb.min.z - inflate) ||
+                    (candidateAabb.min.z - inflate) > (otherAabb.max.z + inflate)) continue;
+                tmpInv.copy(placedMatrices[i]).invert();
+                tmpMatA.multiplyMatrices(tmpInv, candidateMatrix);
+                if (geometry.boundsTree.intersectsGeometry(geometry, tmpMatA)) return true;
+            }
+            return false;
+        };
+
+        // Consecutive-failure counter: resets on each successful placement
+        let consecutiveSkips = 0;
+        const maxConsecutiveSkips = Math.max(200, Math.ceil(boxVolume / pieceBBoxVol) * 3);
+
+        // Render output via instancing (avoids N meshes)
+        let instancedMesh = null;
+        const tmpObj = new THREE.Object3D();
+        if (!dryRun) {
+            instancedMesh = new THREE.InstancedMesh(geometry, material, effectiveMaxTry);
+            instancedMesh.castShadow = true;
+            instancedMesh.receiveShadow = true;
+        }
+
+        while (placed < effectiveMaxTry) {
+            if (abortSignal?.aborted) throw abortError();
+            await maybeYield();
+
+            let bestX = -1;
+            let bestZ = -1;
+            let bestH = Infinity;
+
+            const scanTotal = Math.max(1, (gridNZ - pieceNZ + 1) * (gridNX - pieceNX + 1));
+            let scanIndex = 0;
+
+            for (let gz = 0; gz <= gridNZ - pieceNZ; gz++) {
+                for (let gx = 0; gx <= gridNX - pieceNX; gx++) {
+                    scanIndex++;
+                    if (((gx + gz) & 255) === 0) {
+                        await maybeYield();
+                        if (onProgress) {
+                            onProgress({ placed: placed + (scanIndex / scanTotal), maxTry: effectiveMaxTry });
+                        }
+                    }
+
+                    const x0 = gx * cellSize;
+                    const z0 = gz * cellSize;
+                    if (x0 + sizeX > boxL || z0 + sizeZ > boxW) continue;
+
+                    let baseH = 0;
+                    for (let pz = 0; pz < pieceNZ; pz++) {
+                        for (let px = 0; px < pieceNX; px++) {
+                            const pIdx = pz * pieceNX + px;
+                            if (!expandedMask[pIdx]) continue;
+                            const hIdx = (gz + pz) * gridNX + (gx + px);
+                            if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
+                        }
+                    }
+
+                    if (baseH >= bestH) continue;
+
+                    let fits = true;
+                    for (let pz = 0; pz < pieceNZ && fits; pz++) {
+                        for (let px = 0; px < pieceNX; px++) {
+                            const pIdx = pz * pieceNX + px;
+                            if (!expandedMask[pIdx]) continue;
+                            const top = baseH + pieceHeights[pIdx];
+                            if (top + heightEps > boxH) {
+                                fits = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (fits) {
+                        bestH = baseH;
+                        bestX = gx;
+                        bestZ = gz;
+                    }
+                }
+            }
+
+            if (bestX < 0 || bestZ < 0 || !Number.isFinite(bestH)) break;
+
+            // Full bounding box height guard — piece must fit entirely within box
+            if (bestH + sizeY > boxH + 0.01) break;
+
+            // Build candidate transform + AABB
+            const posX = bestX * cellSize + sizeX / 2;
+            const posZ = bestZ * cellSize + sizeZ / 2;
+            const posY = bestH;
+            tmpMatB.makeTranslation(posX, posY, posZ);
+            tmpBox.copy(localBbox).applyMatrix4(tmpMatB);
+
+            // BVH collision check — prevent lateral penetration
+            if (candidateIntersectsAny(tmpMatB, tmpBox)) {
+                const bump = cellSize;
+                for (let pz = 0; pz < pieceNZ; pz++) {
+                    for (let px = 0; px < pieceNX; px++) {
+                        const pIdx = pz * pieceNX + px;
+                        if (!expandedMask[pIdx]) continue;
+                        const hIdx = (bestZ + pz) * gridNX + (bestX + px);
+                        const newH = bestH + bump;
+                        if (newH > heightMap[hIdx]) heightMap[hIdx] = newH;
+                    }
+                }
+                if (++consecutiveSkips > maxConsecutiveSkips) break;
+                continue;
+            }
+            consecutiveSkips = 0; // Reset on successful placement
+
+            if (!dryRun) {
+                tmpObj.position.set(posX, posY, posZ);
+                tmpObj.rotation.set(0, 0, 0);
+                tmpObj.updateMatrix();
+                instancedMesh.setMatrixAt(placed, tmpObj.matrix);
+
+                const colorIndex = placed % numColors;
+                const color = new THREE.Color(this.pieceColors[colorIndex]);
+                instancedMesh.setColorAt(placed, color);
+                positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+            }
+
+            // Cache placement for collision checks
+            placedAabbs.push(tmpBox.clone());
+            placedMatrices.push(tmpMatB.clone());
+
+            // Update height map
+            for (let pz = 0; pz < pieceNZ; pz++) {
+                for (let px = 0; px < pieceNX; px++) {
+                    const pIdx = pz * pieceNX + px;
+                    if (!expandedMask[pIdx]) continue;
+                    const hIdx = (bestZ + pz) * gridNX + (bestX + px);
+                    const top = bestH + pieceHeights[pIdx] + packingGap;
+                    if (top > heightMap[hIdx]) heightMap[hIdx] = top;
+                }
+            }
+
+            placed++;
+            if (onProgress && (placed === 1 || (placed % 5) === 0 || placed === effectiveMaxTry)) {
+                onProgress({ placed, maxTry: effectiveMaxTry });
+            }
+        }
+
+        console.log(`[HeightMapAsync] placed=${placed}, maxTry=${effectiveMaxTry}, consecutiveSkips=${consecutiveSkips}`);
+
+        if (!dryRun) {
+            instancedMesh.count = placed;
+            instancedMesh.instanceMatrix.needsUpdate = true;
+            if (instancedMesh.instanceColor) {
+                instancedMesh.instanceColor.needsUpdate = true;
+            }
+            this.scene.add(instancedMesh);
+            this.pieces.push(instancedMesh);
+
             this.lastPlacement = {
                 type: 'stl',
                 dims: { l: sizeX, w: sizeZ, h: sizeY },

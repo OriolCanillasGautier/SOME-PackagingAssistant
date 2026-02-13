@@ -298,10 +298,6 @@ function showDetailModal(id) {
                     <span class="detail-label">Peces</span>
                     <span class="detail-value" style="color: var(--accent-green); font-size: 1.2rem;">${item.pieceCount || '-'}</span>
                 </div>
-                <div class="detail-row">
-                    <span class="detail-label">Factor seguretat</span>
-                    <span class="detail-value">${item.safetyFactor ? (item.safetyFactor * 100).toFixed(0) + '%' : '-'}</span>
-                </div>
             </div>
             
             <div class="detail-section">
@@ -386,7 +382,6 @@ function exportToCSV() {
         'Caixa Alçada (mm)',
         'Pes Màxim (kg)',
         'Peces',
-        'Factor Seguretat',
         'STL'
     ];
     
@@ -404,7 +399,6 @@ function exportToCSV() {
             item.boxDims?.height || '',
             item.maxWeight || '',
             item.pieceCount || '',
-            item.safetyFactor || '',
             item.stlFileName || ''
         ].map(v => `"${v}"`).join(',');
     });

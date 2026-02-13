@@ -1,0 +1,861 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PackAssist — Admin Tools</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; }
+
+        /* Nav tabs */
+        .tab-bar { display: flex; background: #0f0f23; border-bottom: 2px solid #333; }
+        .tab-bar button {
+            padding: 12px 28px; background: none; border: none; color: #888;
+            font-size: 14px; cursor: pointer; border-bottom: 3px solid transparent;
+            transition: all .2s;
+        }
+        .tab-bar button:hover { color: #ccc; background: #1a1a2e; }
+        .tab-bar button.active { color: #4fc3f7; border-bottom-color: #4fc3f7; }
+        .tab-content { display: none; padding: 24px; }
+        .tab-content.active { display: block; }
+
+        h1 { color: #4fc3f7; margin-bottom: 4px; font-size: 22px; }
+        h2 { color: #4fc3f7; margin: 16px 0 8px; font-size: 17px; }
+        .subtitle { color: #666; font-size: 13px; margin-bottom: 16px; }
+
+        /* Shared */
+        button.btn {
+            padding: 8px 20px; background: #4fc3f7; color: #1a1a2e; border: none;
+            border-radius: 5px; font-size: 14px; cursor: pointer; font-weight: 600;
+        }
+        button.btn:hover { background: #29b6f6; }
+        button.btn:disabled { background: #444; color: #888; cursor: not-allowed; }
+        .status-box {
+            padding: 10px 14px; background: #2a2a4e; border-radius: 6px;
+            margin: 10px 0; font-size: 13px; min-height: 36px;
+        }
+        input[type="file"] { display: none; }
+        label.file-label {
+            display: inline-block; padding: 8px 20px; background: #4fc3f7; color: #1a1a2e;
+            border-radius: 5px; font-size: 14px; cursor: pointer; font-weight: 600;
+        }
+        label.file-label:hover { background: #29b6f6; }
+
+        /* Tables */
+        table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+        th, td { padding: 7px 12px; text-align: left; border: 1px solid #333; font-size: 13px; }
+        th { background: #2a2a4e; color: #4fc3f7; }
+        tr:nth-child(even) { background: #1e1e3a; }
+        .pass { color: #4caf50; font-weight: bold; }
+        .fail { color: #f44336; font-weight: bold; }
+        .warn { color: #ff9800; font-weight: bold; }
+        .info { color: #888; font-size: 12px; }
+
+        /* Orientation tester */
+        .ori-layout { display: flex; gap: 20px; flex-wrap: wrap; }
+        .ori-viewport {
+            width: 420px; height: 360px; background: #111; border-radius: 8px;
+            border: 1px solid #333; position: relative;
+        }
+        .ori-viewport canvas { width: 100% !important; height: 100% !important; border-radius: 8px; }
+        .ori-info { flex: 1; min-width: 280px; }
+        .ori-metric { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #2a2a4e; }
+        .ori-metric .label { color: #888; }
+        .ori-metric .value { color: #e0e0e0; font-family: 'Consolas', monospace; }
+
+        /* Mesh Inspector */
+        .mesh-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
+        .stat-card {
+            background: #2a2a4e; border-radius: 8px; padding: 14px;
+            border-left: 3px solid #4fc3f7;
+        }
+        .stat-card .stat-label { color: #888; font-size: 12px; margin-bottom: 4px; }
+        .stat-card .stat-value { color: #e0e0e0; font-size: 18px; font-family: 'Consolas', monospace; }
+        .stat-card .stat-unit { color: #666; font-size: 12px; }
+
+        /* Console */
+        #console-log {
+            background: #0a0a1a; border: 1px solid #333; border-radius: 6px;
+            padding: 10px; height: 400px; overflow-y: auto; font-family: 'Consolas', monospace;
+            font-size: 12px; line-height: 1.6;
+        }
+        .log-info { color: #4fc3f7; }
+        .log-warn { color: #ff9800; }
+        .log-error { color: #f44336; }
+        .log-debug { color: #666; }
+    </style>
+</head>
+<body>
+
+<div class="tab-bar" id="tabBar">
+    <button class="active" data-tab="orientation">Orientation Tester</button>
+    <button data-tab="benchmark">Packing Benchmark</button>
+    <button data-tab="inspector">Mesh Inspector</button>
+    <button data-tab="console">Console</button>
+</div>
+
+<!-- ==================== TAB 1: ORIENTATION TESTER ==================== -->
+<div class="tab-content active" id="tab-orientation">
+    <h1>Gravity Orientation Tester</h1>
+    <p class="subtitle">Load an STL and see how gravity simulation settles the piece. Compare with geometric stable-base detection.</p>
+
+    <div style="margin: 12px 0; display: flex; gap: 12px; align-items: center;">
+        <label class="file-label" for="ori-file">Load STL/OBJ</label>
+        <input type="file" id="ori-file" accept=".stl,.obj">
+        <button class="btn" id="ori-run" disabled>Run Gravity Drop</button>
+        <button class="btn" id="ori-compare" disabled style="background:#6366f1;">Compare Methods</button>
+    </div>
+    <div class="status-box" id="ori-status">Load an STL file to begin.</div>
+
+    <div class="ori-layout">
+        <div>
+            <h2>Gravity Settled</h2>
+            <div class="ori-viewport" id="ori-gravity-vp"></div>
+        </div>
+        <div>
+            <h2>Geometric Stable Base</h2>
+            <div class="ori-viewport" id="ori-geometric-vp"></div>
+        </div>
+        <div class="ori-info" id="ori-metrics">
+            <h2>Metrics</h2>
+            <div id="ori-metrics-content">
+                <p class="info">Run a test to see results.</p>
+            </div>
+        </div>
+    </div>
+
+    <div id="ori-yaw-results" style="margin-top:16px;"></div>
+</div>
+
+<!-- ==================== TAB 2: PACKING BENCHMARK ==================== -->
+<div class="tab-content" id="tab-benchmark">
+    <h1>Heightmap Packing Benchmark</h1>
+    <p class="subtitle">Tests packing density, orientation handling, and consistency across mesh shapes.</p>
+    <button class="btn" id="bench-run">Run Benchmark</button>
+    <div class="status-box" id="bench-status">Ready. Click "Run Benchmark" to start.</div>
+    <div id="bench-results"></div>
+</div>
+
+<!-- ==================== TAB 3: MESH INSPECTOR ==================== -->
+<div class="tab-content" id="tab-inspector">
+    <h1>Mesh Inspector</h1>
+    <p class="subtitle">Load a mesh and inspect its geometric properties: volume, surface area, bounding box, face normals.</p>
+
+    <div style="margin: 12px 0; display: flex; gap: 12px; align-items: center;">
+        <label class="file-label" for="inspect-file">Load Mesh</label>
+        <input type="file" id="inspect-file" accept=".stl,.obj">
+    </div>
+    <div class="status-box" id="inspect-status">Load a mesh file.</div>
+
+    <div class="mesh-stats" id="inspect-stats"></div>
+
+    <div style="margin-top: 16px; background:#2a2a4e; border-radius:8px; padding:12px;">
+        <h2>Weight Check</h2>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:end; margin-top:8px;">
+            <div>
+                <label style="display:block; font-size:12px; color:#888; margin-bottom:4px;">Density (kg/m³)</label>
+                <input id="weight-density" type="number" min="0" step="1" value="2700" style="padding:6px 8px; border-radius:4px; border:1px solid #444; background:#111; color:#e0e0e0; width:130px;">
+            </div>
+            <div>
+                <label style="display:block; font-size:12px; color:#888; margin-bottom:4px;">Quantity</label>
+                <input id="weight-qty" type="number" min="1" step="1" value="100" style="padding:6px 8px; border-radius:4px; border:1px solid #444; background:#111; color:#e0e0e0; width:90px;">
+            </div>
+            <label style="display:flex; align-items:center; gap:8px; padding-bottom:6px;">
+                <input id="weight-solid" type="checkbox" checked>
+                Piece is solid
+            </label>
+            <div id="weight-wall-group" style="display:none;">
+                <label style="display:block; font-size:12px; color:#888; margin-bottom:4px;">Wall thickness (mm)</label>
+                <input id="weight-wall" type="number" min="0.1" step="0.1" value="2" style="padding:6px 8px; border-radius:4px; border:1px solid #444; background:#111; color:#e0e0e0; width:120px;">
+            </div>
+        </div>
+        <div id="weight-check-results" style="margin-top:10px; font-family:Consolas, monospace; font-size:13px; line-height:1.7; color:#ddd;">
+            Load a mesh to evaluate weight.
+        </div>
+    </div>
+
+    <div style="margin-top: 16px;">
+        <h2>Face Normal Distribution</h2>
+        <canvas id="inspect-normals-canvas" width="400" height="200" style="background:#111; border-radius:6px; border:1px solid #333;"></canvas>
+    </div>
+</div>
+
+<!-- ==================== TAB 4: CONSOLE ==================== -->
+<div class="tab-content" id="tab-console">
+    <h1>Live Console</h1>
+    <p class="subtitle">Captures console.log/warn/error output from all modules.</p>
+    <div style="margin: 8px 0;">
+        <button class="btn" id="console-clear">Clear</button>
+    </div>
+    <div id="console-log"></div>
+</div>
+
+<!-- ==================== SCRIPTS ==================== -->
+<script type="importmap">
+{
+    "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/",
+        "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.0/src/index.js",
+        "@dimforge/rapier3d-compat": "https://cdn.jsdelivr.net/npm/@dimforge/rapier3d-compat@0.14.0/rapier.es.js"
+    }
+}
+</script>
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh';
+import * as RAPIER_MODULE from '@dimforge/rapier3d-compat';
+
+if (!THREE.BufferGeometry.prototype.computeBoundsTree) {
+    THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+    THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+}
+
+import { loadMesh, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, alignToStableBase, detectStableBase, getSupportStability }
+    from './js/mesh/mesh-utils.js?v=admin';
+import { SceneManager } from './js/visualization/scene.js?v=admin';
+import { initRapier } from './js/physics/physics-world.js?v=admin';
+
+// ==================== CONSOLE LOGGER ====================
+const consoleEl = document.getElementById('console-log');
+const origLog = console.log, origWarn = console.warn, origError = console.error;
+function addLogLine(cls, args) {
+    const line = document.createElement('div');
+    line.className = cls;
+    line.textContent = args.map(a => typeof a === 'object' ? JSON.stringify(a, null, 1) : String(a)).join(' ');
+    consoleEl.appendChild(line);
+    consoleEl.scrollTop = consoleEl.scrollHeight;
+}
+console.log   = (...a) => { origLog(...a);   addLogLine('log-info',  a); };
+console.warn  = (...a) => { origWarn(...a);  addLogLine('log-warn',  a); };
+console.error = (...a) => { origError(...a); addLogLine('log-error', a); };
+document.getElementById('console-clear').onclick = () => { consoleEl.innerHTML = ''; };
+
+// ==================== TAB SWITCHING ====================
+document.querySelectorAll('.tab-bar button').forEach(btn => {
+    btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-bar button').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
+    });
+});
+
+// ==================== MINI 3D VIEWPORT ====================
+function createMiniScene(container) {
+    const w = container.clientWidth || 420, h = container.clientHeight || 360;
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    container.innerHTML = '';
+    container.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111111);
+    const camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100000);
+    camera.position.set(200, 200, 200);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+
+    // Lights
+    scene.add(new THREE.AmbientLight(0xffffff, 0.4));
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    dirLight.position.set(100, 200, 150);
+    scene.add(dirLight);
+
+    // Ground grid
+    const grid = new THREE.GridHelper(500, 20, 0x333333, 0x222222);
+    scene.add(grid);
+
+    let animId = null;
+    function animate() {
+        animId = requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    return {
+        scene, camera, renderer, controls,
+        setGeometry(geometry, color = 0x4fc3f7) {
+            // Remove old meshes
+            scene.children.filter(c => c.userData.isPiece).forEach(c => scene.remove(c));
+            if (!geometry) return;
+
+            const mat = new THREE.MeshPhongMaterial({ color, transparent: true, opacity: 0.85 });
+            const mesh = new THREE.Mesh(geometry, mat);
+            mesh.userData.isPiece = true;
+            scene.add(mesh);
+
+            // Wireframe
+            const wire = new THREE.LineSegments(
+                new THREE.WireframeGeometry(geometry),
+                new THREE.LineBasicMaterial({ color: 0xffffff, opacity: 0.15, transparent: true })
+            );
+            wire.userData.isPiece = true;
+            scene.add(wire);
+
+            // Fit camera
+            geometry.computeBoundingBox();
+            const size = new THREE.Vector3();
+            geometry.boundingBox.getSize(size);
+            const maxDim = Math.max(size.x, size.y, size.z);
+            camera.position.set(maxDim * 1.5, maxDim * 1.2, maxDim * 1.5);
+            controls.target.copy(geometry.boundingBox.getCenter(new THREE.Vector3()));
+            controls.update();
+        },
+        dispose() {
+            if (animId) cancelAnimationFrame(animId);
+            renderer.dispose();
+        }
+    };
+}
+
+// ==================== TAB 1: ORIENTATION TESTER ====================
+let oriGeometry = null;
+let gravityScene = null, geometricScene = null;
+
+const oriFile = document.getElementById('ori-file');
+const oriRun = document.getElementById('ori-run');
+const oriCompare = document.getElementById('ori-compare');
+const oriStatus = document.getElementById('ori-status');
+const oriMetrics = document.getElementById('ori-metrics-content');
+const oriYawResults = document.getElementById('ori-yaw-results');
+
+oriFile.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    oriStatus.textContent = `Loading ${file.name}...`;
+    try {
+        oriGeometry = await loadMesh(file);
+        oriGeometry.computeBoundingBox();
+        const size = new THREE.Vector3();
+        oriGeometry.boundingBox.getSize(size);
+        oriStatus.textContent = `Loaded: ${file.name} — ${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)} mm`;
+        oriRun.disabled = false;
+        oriCompare.disabled = false;
+    } catch (err) {
+        oriStatus.textContent = `Error: ${err.message}`;
+        console.error('Load error:', err);
+    }
+});
+
+/**
+ * Run Rapier gravity drop on a geometry. Returns { quat, steps, timeMs }.
+ */
+async function gravityDrop(geometry) {
+    await initRapier();
+    const RAPIER = RAPIER_MODULE;
+    if (RAPIER.init) await RAPIER.init();
+
+    const geo = geometry.clone();
+    geo.computeBoundingBox();
+    const size = new THREE.Vector3();
+    geo.boundingBox.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+
+    const world = new RAPIER.World({ x: 0.0, y: -9810.0, z: 0.0 });
+    world.numSolverIterations = 16;
+
+    // Floor
+    const floorBody = world.createRigidBody(RAPIER.RigidBodyDesc.fixed().setTranslation(0, -50, 0));
+    world.createCollider(
+        RAPIER.ColliderDesc.cuboid(maxDim * 5, 50, maxDim * 5).setFriction(0.8).setRestitution(0.0),
+        floorBody
+    );
+
+    // Center geometry
+    const centered = geo.clone();
+    centered.computeBoundingBox();
+    const center = new THREE.Vector3();
+    centered.boundingBox.getCenter(center);
+    centered.translate(-center.x, -center.y, -center.z);
+
+    const positions = centered.getAttribute('position');
+    const vertices = new Float32Array(positions.array);
+
+    const dropHeight = maxDim * 2;
+    const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+        .setTranslation(0, dropHeight, 0)
+        .setLinearDamping(0.5)
+        .setAngularDamping(0.8);
+    const body = world.createRigidBody(bodyDesc);
+
+    let colliderDesc = null;
+    try { colliderDesc = RAPIER.ColliderDesc.convexHull(vertices); } catch (e) { /* */ }
+    if (!colliderDesc) {
+        colliderDesc = RAPIER.ColliderDesc.cuboid(size.x / 2, size.y / 2, size.z / 2);
+        console.warn('Convex hull failed, using bounding box collider');
+    }
+    colliderDesc.setDensity(2.0).setFriction(0.8).setRestitution(0.05);
+    world.createCollider(colliderDesc, body);
+
+    const t0 = performance.now();
+    const dt = 1 / 240;
+    const maxSteps = 240 * 5;
+    let settledFrames = 0, totalSteps = 0;
+
+    for (let step = 0; step < maxSteps; step++) {
+        world.timestep = dt;
+        world.step();
+        totalSteps++;
+        const lv = body.linvel(), av = body.angvel();
+        const speed = Math.sqrt(lv.x ** 2 + lv.y ** 2 + lv.z ** 2);
+        const angSpeed = Math.sqrt(av.x ** 2 + av.y ** 2 + av.z ** 2);
+        if (speed < 3.0 && angSpeed < 0.3) {
+            if (++settledFrames >= 60) break;
+        } else {
+            settledFrames = 0;
+        }
+    }
+
+    const rot = body.rotation();
+    const settledQuat = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+    const pos = body.translation();
+    world.free();
+
+    return {
+        quat: settledQuat,
+        steps: totalSteps,
+        timeMs: performance.now() - t0,
+        simTimeSec: (totalSteps * dt).toFixed(2),
+        finalPos: { x: pos.x, y: pos.y, z: pos.z },
+        settled: settledFrames >= 60
+    };
+}
+
+/**
+ * Apply quaternion to geometry clone + recenter (minY=0, XZ centered)
+ */
+function applyOrientation(geometry, quat) {
+    const geo = geometry.clone();
+    geo.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(quat));
+    geo.computeBoundingBox();
+    const bb = geo.boundingBox;
+    const cx = (bb.min.x + bb.max.x) / 2;
+    const minY = bb.min.y;
+    const cz = (bb.min.z + bb.max.z) / 2;
+    geo.translate(-cx, -minY, -cz);
+    geo.computeBoundingBox();
+    return geo;
+}
+
+oriRun.addEventListener('click', async () => {
+    if (!oriGeometry) return;
+    oriRun.disabled = true;
+    oriStatus.textContent = 'Running gravity simulation...';
+
+    try {
+        const result = await gravityDrop(oriGeometry);
+        const gravGeo = applyOrientation(oriGeometry, result.quat);
+
+        // Show in viewport
+        if (!gravityScene) gravityScene = createMiniScene(document.getElementById('ori-gravity-vp'));
+        gravityScene.setGeometry(gravGeo, 0x4fc3f7);
+
+        // Metrics
+        gravGeo.computeBoundingBox();
+        const gSize = new THREE.Vector3();
+        gravGeo.boundingBox.getSize(gSize);
+        const q = result.quat;
+        const euler = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+
+        oriMetrics.innerHTML = `
+            <h2>Gravity Drop Results</h2>
+            <div class="ori-metric"><span class="label">Status</span><span class="value">${result.settled ? 'Settled' : 'Timeout'}</span></div>
+            <div class="ori-metric"><span class="label">Sim time</span><span class="value">${result.simTimeSec}s (${result.steps} steps)</span></div>
+            <div class="ori-metric"><span class="label">Wall time</span><span class="value">${result.timeMs.toFixed(0)}ms</span></div>
+            <div class="ori-metric"><span class="label">Settled size</span><span class="value">${gSize.x.toFixed(1)} × ${gSize.y.toFixed(1)} × ${gSize.z.toFixed(1)} mm</span></div>
+            <div class="ori-metric"><span class="label">Euler (YXZ)</span><span class="value">${(euler.x * 180/Math.PI).toFixed(1)}° / ${(euler.y * 180/Math.PI).toFixed(1)}° / ${(euler.z * 180/Math.PI).toFixed(1)}°</span></div>
+            <div class="ori-metric"><span class="label">Quaternion</span><span class="value">(${q.x.toFixed(4)}, ${q.y.toFixed(4)}, ${q.z.toFixed(4)}, ${q.w.toFixed(4)})</span></div>
+            <div class="ori-metric"><span class="label">Height (Y)</span><span class="value">${gSize.y.toFixed(2)} mm</span></div>
+            <div class="ori-metric"><span class="label">Footprint</span><span class="value">${(gSize.x * gSize.z).toFixed(0)} mm²</span></div>
+        `;
+
+        oriStatus.textContent = `Gravity drop complete — piece ${result.settled ? 'settled' : 'timed out'} in ${result.timeMs.toFixed(0)}ms`;
+
+        // Yaw summary
+        oriYawResults.innerHTML = '<h2>Yaw Variants (every 30°)</h2>';
+        let yawHtml = '<table><tr><th>Yaw</th><th>Size X</th><th>Size Y</th><th>Size Z</th><th>Footprint</th></tr>';
+        for (let yaw = 0; yaw < 360; yaw += 30) {
+            const yGeo = gravGeo.clone();
+            const rad = yaw * Math.PI / 180;
+            yGeo.applyMatrix4(new THREE.Matrix4().makeRotationY(rad));
+            yGeo.computeBoundingBox();
+            const s = new THREE.Vector3();
+            yGeo.boundingBox.getSize(s);
+            yawHtml += `<tr><td>${yaw}°</td><td>${s.x.toFixed(1)}</td><td>${s.y.toFixed(1)}</td><td>${s.z.toFixed(1)}</td><td>${(s.x * s.z).toFixed(0)} mm²</td></tr>`;
+        }
+        yawHtml += '</table>';
+        oriYawResults.innerHTML += yawHtml;
+
+    } catch (err) {
+        oriStatus.textContent = `Error: ${err.message}`;
+        console.error('Gravity drop error:', err);
+    }
+    oriRun.disabled = false;
+});
+
+oriCompare.addEventListener('click', async () => {
+    if (!oriGeometry) return;
+    oriCompare.disabled = true;
+    oriStatus.textContent = 'Running comparison: gravity vs geometric...';
+
+    try {
+        // Gravity
+        const gravResult = await gravityDrop(oriGeometry);
+        const gravGeo = applyOrientation(oriGeometry, gravResult.quat);
+        if (!gravityScene) gravityScene = createMiniScene(document.getElementById('ori-gravity-vp'));
+        gravityScene.setGeometry(gravGeo, 0x4fc3f7);
+
+        // Geometric stable base
+        const geoGeo = oriGeometry.clone();
+        const t0 = performance.now();
+        const stableResult = alignToStableBase(geoGeo);
+        const geoTimeMs = performance.now() - t0;
+        if (!geometricScene) geometricScene = createMiniScene(document.getElementById('ori-geometric-vp'));
+        geometricScene.setGeometry(geoGeo, 0x6366f1);
+
+        // Compare bounding boxes
+        gravGeo.computeBoundingBox();
+        geoGeo.computeBoundingBox();
+        const gS = new THREE.Vector3(); gravGeo.boundingBox.getSize(gS);
+        const aS = new THREE.Vector3(); geoGeo.boundingBox.getSize(aS);
+
+        const gravStability = getSupportStability(gravGeo);
+        const geoStability = getSupportStability(geoGeo);
+
+        const q = gravResult.quat;
+        const euler = new THREE.Euler().setFromQuaternion(q, 'YXZ');
+
+        oriMetrics.innerHTML = `
+            <h2>Comparison Results</h2>
+            <table>
+                <tr><th></th><th>Gravity</th><th>Geometric</th></tr>
+                <tr><td>Time</td><td>${gravResult.timeMs.toFixed(0)}ms</td><td>${geoTimeMs.toFixed(0)}ms</td></tr>
+                <tr><td>Size X</td><td>${gS.x.toFixed(1)}</td><td>${aS.x.toFixed(1)}</td></tr>
+                <tr><td>Size Y (height)</td><td>${gS.y.toFixed(1)}</td><td>${aS.y.toFixed(1)}</td></tr>
+                <tr><td>Size Z</td><td>${gS.z.toFixed(1)}</td><td>${aS.z.toFixed(1)}</td></tr>
+                <tr><td>Footprint</td><td>${(gS.x * gS.z).toFixed(0)} mm²</td><td>${(aS.x * aS.z).toFixed(0)} mm²</td></tr>
+                <tr><td>Height</td><td>${gS.y.toFixed(2)} mm</td><td>${aS.y.toFixed(2)} mm</td></tr>
+                <tr><td>Stable base</td><td>${gravStability?.stable ? 'Yes' : 'No'}</td><td>${geoStability?.stable ? 'Yes' : 'No'}</td></tr>
+                <tr><td>Base area</td><td>${gravStability?.area?.toFixed(0) || '?'}</td><td>${geoStability?.area?.toFixed(0) || '?'}</td></tr>
+                <tr><td>Settled</td><td>${gravResult.settled ? 'Yes' : 'Timeout'}</td><td>N/A</td></tr>
+                <tr><td>Cluster faces</td><td>N/A</td><td>${stableResult?.clusterCount || '?'}</td></tr>
+            </table>
+            <div class="ori-metric" style="margin-top:8px"><span class="label">Gravity quat</span><span class="value">(${q.x.toFixed(3)}, ${q.y.toFixed(3)}, ${q.z.toFixed(3)}, ${q.w.toFixed(3)})</span></div>
+            <div class="ori-metric"><span class="label">Gravity euler</span><span class="value">${(euler.x*180/Math.PI).toFixed(1)}° / ${(euler.y*180/Math.PI).toFixed(1)}° / ${(euler.z*180/Math.PI).toFixed(1)}°</span></div>
+        `;
+
+        oriStatus.textContent = `Comparison done — Gravity ${gravResult.timeMs.toFixed(0)}ms vs Geometric ${geoTimeMs.toFixed(0)}ms`;
+    } catch (err) {
+        oriStatus.textContent = `Error: ${err.message}`;
+        console.error('Compare error:', err);
+    }
+    oriCompare.disabled = false;
+});
+
+
+// ==================== TAB 2: PACKING BENCHMARK ====================
+// (Ported from benchmark.html)
+
+// Create offscreen SceneManager for benchmark
+const benchCanvas = document.createElement('canvas');
+benchCanvas.width = 100; benchCanvas.height = 100;
+const benchScene = new SceneManager(benchCanvas);
+
+function makeBoxGeom(lx, ly, lz) {
+    const g = new THREE.BoxGeometry(lx, ly, lz);
+    g.translate(0, ly / 2, 0);
+    g.computeBoundingBox();
+    return g;
+}
+
+function makeWedgeGeom(width, height, depth) {
+    const shape = new THREE.Shape();
+    shape.moveTo(0, 0);
+    shape.lineTo(width, 0);
+    shape.lineTo(0, height);
+    shape.closePath();
+    const g = new THREE.ExtrudeGeometry(shape, { depth, bevelEnabled: false });
+    g.computeBoundingBox();
+    const bb = g.boundingBox;
+    g.translate(-(bb.min.x + bb.max.x) / 2, -bb.min.y, -(bb.min.z + bb.max.z) / 2);
+    g.computeBoundingBox();
+    return g;
+}
+
+async function packDryRun(stlGeometry, boxL, boxW, boxH, maxTry = 2000) {
+    const result = await benchScene.addPackedSTLHeightMapAsync({
+        stlGeometry, maxDraw: 500, maxTry, packingGap: 0,
+        boxL, boxW, boxH, dryRun: true
+    });
+    return typeof result === 'number' ? result : result.count;
+}
+
+const benchTests = [
+    { name: 'Box 10×20×15 in 100³', piece: () => makeBoxGeom(10, 20, 15), box: [100, 100, 100], expectedMin: 150, notes: 'Grid: 10×5×6=300' },
+    { name: 'Box 10×20×15 in 150×150×100', piece: () => makeBoxGeom(10, 20, 15), box: [150, 150, 100], expectedMin: 300, notes: '15×5×10=750 theoretical' },
+    { name: 'Box 20×30×25 monotonicity', piece: () => makeBoxGeom(20, 30, 25), box: [100, 100, 100], box2: [150, 150, 150], isMonotonicity: true, notes: 'Bigger box ≥ pieces' },
+    { name: 'Wedge 30×40×20 in 150³', piece: () => makeWedgeGeom(30, 40, 20), box: [150, 150, 150], expectedMin: 20, notes: 'Non-trivial shape' },
+    { name: 'Consistency: Box 25×35×20 vs jittered', piece: () => makeBoxGeom(25, 35, 20),
+        piece2: () => { const g = makeBoxGeom(25, 35, 20); const pos = g.getAttribute('position');
+            for (let i = 0; i < pos.count; i++) { pos.setX(i, pos.getX(i) + (Math.random()-0.5)*0.02); pos.setY(i, pos.getY(i) + (Math.random()-0.5)*0.02); pos.setZ(i, pos.getZ(i) + (Math.random()-0.5)*0.02); }
+            pos.needsUpdate = true; g.computeBoundingBox(); return g; },
+        box: [150, 150, 200], isConsistency: true, maxDeltaPct: 10, notes: 'Within 10%' },
+    { name: 'Piece too tall (0 expected)', piece: () => makeBoxGeom(50, 120, 50), box: [100, 100, 100], expectedExact: 0, notes: 'Height 120 > box 100' },
+    { name: 'Box 28×98×37 monotonicity', piece: () => makeBoxGeom(28, 98, 37), box: [100, 200, 150], box2: [150, 200, 150], isMonotonicity: true, notes: 'User scenario' },
+    { name: 'Small piece, high count', piece: () => makeBoxGeom(5, 5, 5), box: [100, 100, 100], expectedMin: 2000, notes: 'Capped at maxTry=2000' },
+];
+
+document.getElementById('bench-run').addEventListener('click', async () => {
+    const btn = document.getElementById('bench-run');
+    const statusEl = document.getElementById('bench-status');
+    const resultsEl = document.getElementById('bench-results');
+    btn.disabled = true;
+    resultsEl.innerHTML = '';
+
+    let html = '<table><tr><th>#</th><th>Test</th><th>Count</th><th>Expected</th><th>Result</th><th>Time</th><th>Notes</th></tr>';
+    let passed = 0, failed = 0, warned = 0;
+
+    for (let i = 0; i < benchTests.length; i++) {
+        const t = benchTests[i];
+        statusEl.textContent = `Running test ${i + 1}/${benchTests.length}: ${t.name}...`;
+        try {
+            if (t.isMonotonicity) {
+                const geom = t.piece();
+                const t0 = performance.now();
+                const c1 = await packDryRun(geom.clone(), t.box[0], t.box[1], t.box[2]);
+                const c2 = await packDryRun(geom.clone(), t.box2[0], t.box2[1], t.box2[2]);
+                const ms = (performance.now() - t0).toFixed(0);
+                const ok = c2 >= c1;
+                if (ok) passed++; else failed++;
+                html += `<tr><td>${i+1}</td><td>${t.name}</td><td>${c1} → ${c2}</td><td>c2 ≥ c1</td><td class="${ok?'pass':'fail'}">${ok?'PASS':'FAIL'}</td><td>${ms}ms</td><td class="info">${t.notes}</td></tr>`;
+            } else if (t.isConsistency) {
+                const g1 = t.piece(), g2 = t.piece2();
+                const t0 = performance.now();
+                const c1 = await packDryRun(g1, t.box[0], t.box[1], t.box[2]);
+                const c2 = await packDryRun(g2, t.box[0], t.box[1], t.box[2]);
+                const ms = (performance.now() - t0).toFixed(0);
+                const pct = c1 > 0 ? (Math.abs(c1 - c2) / c1 * 100).toFixed(1) : 0;
+                const ok = pct <= t.maxDeltaPct;
+                if (ok) passed++; else warned++;
+                html += `<tr><td>${i+1}</td><td>${t.name}</td><td>${c1} vs ${c2} (Δ${pct}%)</td><td>≤${t.maxDeltaPct}%</td><td class="${ok?'pass':'warn'}">${ok?'PASS':'WARN'}</td><td>${ms}ms</td><td class="info">${t.notes}</td></tr>`;
+            } else {
+                const geom = t.piece();
+                const t0 = performance.now();
+                const count = await packDryRun(geom, t.box[0], t.box[1], t.box[2]);
+                const ms = (performance.now() - t0).toFixed(0);
+                let ok, expectedStr, cls;
+                if (t.expectedExact !== undefined) {
+                    ok = count === t.expectedExact; expectedStr = `exactly ${t.expectedExact}`;
+                    cls = ok ? 'pass' : 'fail'; if (ok) passed++; else failed++;
+                } else {
+                    ok = count >= t.expectedMin; expectedStr = `≥ ${t.expectedMin}`;
+                    cls = ok ? 'pass' : (count >= t.expectedMin * 0.8 ? 'warn' : 'fail');
+                    if (ok) passed++; else if (count >= t.expectedMin * 0.8) warned++; else failed++;
+                }
+                html += `<tr><td>${i+1}</td><td>${t.name}</td><td>${count}</td><td>${expectedStr}</td><td class="${cls}">${cls==='pass'?'PASS':cls==='warn'?'WARN':'FAIL'}</td><td>${ms}ms</td><td class="info">${t.notes}</td></tr>`;
+            }
+        } catch (err) {
+            failed++;
+            html += `<tr><td>${i+1}</td><td>${t.name}</td><td colspan="3" class="fail">ERROR: ${err.message}</td><td>-</td><td class="info">${t.notes}</td></tr>`;
+            console.error(`Bench test ${i+1} error:`, err);
+        }
+    }
+
+    html += '</table>';
+    html += `<p style="margin-top:8px"><span class="pass">${passed} passed</span> / <span class="warn">${warned} warnings</span> / <span class="fail">${failed} failed</span> out of ${benchTests.length} tests</p>`;
+    resultsEl.innerHTML = html;
+    statusEl.textContent = `Done. ${passed}/${benchTests.length} passed.`;
+    btn.disabled = false;
+});
+
+
+// ==================== TAB 3: MESH INSPECTOR ====================
+const inspectFile = document.getElementById('inspect-file');
+const inspectStatus = document.getElementById('inspect-status');
+const inspectStats = document.getElementById('inspect-stats');
+const weightDensityInput = document.getElementById('weight-density');
+const weightQtyInput = document.getElementById('weight-qty');
+const weightSolidInput = document.getElementById('weight-solid');
+const weightWallGroup = document.getElementById('weight-wall-group');
+const weightWallInput = document.getElementById('weight-wall');
+const weightCheckResults = document.getElementById('weight-check-results');
+let inspectGeometry = null;
+let inspectIntegrity = null;
+
+function updateWeightCheckPanel() {
+    if (!inspectGeometry) {
+        weightCheckResults.textContent = 'Load a mesh to evaluate weight.';
+        return;
+    }
+
+    const density = Math.max(0, parseFloat(weightDensityInput.value) || 0);
+    const qty = Math.max(1, parseInt(weightQtyInput.value || '1', 10));
+    const isSolid = !!weightSolidInput.checked;
+    const wall = Math.max(0.1, parseFloat(weightWallInput.value) || 2);
+
+    const volumeMm3 = Math.abs(computeMeshVolume(inspectGeometry));
+    const surfaceMm2 = computeSurfaceArea(inspectGeometry);
+
+    let pieceKg = 0;
+    if (density > 0) {
+        if (isSolid) {
+            pieceKg = (volumeMm3 / 1e9) * density;
+        } else {
+            pieceKg = (surfaceMm2 * wall / 1e9) * density;
+        }
+    }
+
+    const totalKg = pieceKg * qty;
+    const eq = isSolid
+        ? 'piece = volume × density'
+        : 'piece = surface × wall × density';
+
+    const integrityNote = inspectIntegrity?.watertight
+        ? 'Mesh integrity: watertight (closed). Solid volume is reliable.'
+        : `Mesh integrity: leaked/open (${inspectIntegrity?.boundaryEdgeCount ?? '?'} boundary edges, ${inspectIntegrity?.nonManifoldEdgeCount ?? '?'} non-manifold). Solid volume may be unreliable.`;
+
+    weightCheckResults.innerHTML = `
+        Formula: ${eq}<br>
+        Volume: ${(volumeMm3 / 1e3).toFixed(3)} cm³ | Surface: ${(surfaceMm2 / 1e2).toFixed(3)} cm²<br>
+        Piece weight: ${pieceKg.toFixed(6)} kg<br>
+        Total (${qty} pcs): ${totalKg.toFixed(3)} kg<br>
+        ${integrityNote}
+    `;
+}
+
+weightSolidInput.addEventListener('change', () => {
+    weightWallGroup.style.display = weightSolidInput.checked ? 'none' : '';
+    updateWeightCheckPanel();
+});
+weightDensityInput.addEventListener('input', updateWeightCheckPanel);
+weightQtyInput.addEventListener('input', updateWeightCheckPanel);
+weightWallInput.addEventListener('input', updateWeightCheckPanel);
+
+inspectFile.addEventListener('change', async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    inspectStatus.textContent = `Loading ${file.name}...`;
+
+    try {
+        const geometry = await loadMesh(file);
+        inspectGeometry = geometry;
+        inspectIntegrity = analyzeMeshIntegrity(geometry);
+        geometry.computeBoundingBox();
+        const size = new THREE.Vector3();
+        geometry.boundingBox.getSize(size);
+
+        const volume = computeMeshVolume(geometry);
+        const surfaceArea = computeSurfaceArea(geometry);
+        const posAttr = geometry.getAttribute('position');
+        const indexed = geometry.index;
+        const vertexCount = posAttr.count;
+        const faceCount = indexed ? indexed.count / 3 : vertexCount / 3;
+
+        // Bounding box efficiency
+        const bbVol = size.x * size.y * size.z;
+        const bbEff = bbVol > 0 ? (Math.abs(volume) / bbVol * 100) : 0;
+
+        // Stable base detection
+        const geoClone = geometry.clone();
+        const stableBase = detectStableBase(geoClone);
+
+        const cards = [
+            { label: 'Bounding Box', value: `${size.x.toFixed(1)} × ${size.y.toFixed(1)} × ${size.z.toFixed(1)}`, unit: 'mm' },
+            { label: 'Volume', value: (Math.abs(volume) / 1e3).toFixed(2), unit: 'cm³' },
+            { label: 'Surface Area', value: (surfaceArea / 1e2).toFixed(2), unit: 'cm²' },
+            { label: 'Vertices', value: vertexCount.toLocaleString(), unit: '' },
+            { label: 'Faces', value: faceCount.toLocaleString(), unit: 'triangles' },
+            { label: 'BB Fill Ratio', value: bbEff.toFixed(1), unit: '%' },
+            { label: 'Watertight', value: inspectIntegrity.watertight ? 'Yes' : 'No', unit: '' },
+            { label: 'Boundary Edges', value: inspectIntegrity.boundaryEdgeCount.toLocaleString(), unit: '' },
+            { label: 'Non-Manifold', value: inspectIntegrity.nonManifoldEdgeCount.toLocaleString(), unit: 'edges' },
+            { label: 'Stable Base', value: stableBase ? `${stableBase.clusterCount} faces, ${stableBase.area.toFixed(0)} mm²` : 'None detected', unit: '' },
+            { label: 'File Size', value: (file.size / 1024).toFixed(1), unit: 'KB' },
+        ];
+
+        inspectStats.innerHTML = cards.map(c => `
+            <div class="stat-card">
+                <div class="stat-label">${c.label}</div>
+                <div class="stat-value">${c.value} <span class="stat-unit">${c.unit}</span></div>
+            </div>
+        `).join('');
+
+        // Face normal distribution (draw on canvas)
+        drawNormalDistribution(geometry);
+        updateWeightCheckPanel();
+
+        inspectStatus.textContent = `Inspected: ${file.name}`;
+    } catch (err) {
+        inspectStatus.textContent = `Error: ${err.message}`;
+        console.error('Inspect error:', err);
+    }
+});
+
+function drawNormalDistribution(geometry) {
+    const canvas = document.getElementById('inspect-normals-canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const posAttr = geometry.getAttribute('position');
+    const indexed = geometry.index;
+    const triCount = indexed ? indexed.count / 3 : posAttr.count / 3;
+
+    // Bucket normals by Y component: -1..+1 in 20 bins
+    const bins = 20;
+    const counts = new Float32Array(bins);
+    const vA = new THREE.Vector3(), vB = new THREE.Vector3(), vC = new THREE.Vector3();
+    const e1 = new THREE.Vector3(), e2 = new THREE.Vector3(), n = new THREE.Vector3();
+
+    for (let t = 0; t < triCount; t++) {
+        let ia, ib, ic;
+        if (indexed) { ia = indexed.getX(t*3); ib = indexed.getX(t*3+1); ic = indexed.getX(t*3+2); }
+        else { ia = t*3; ib = t*3+1; ic = t*3+2; }
+        vA.fromBufferAttribute(posAttr, ia);
+        vB.fromBufferAttribute(posAttr, ib);
+        vC.fromBufferAttribute(posAttr, ic);
+        e1.subVectors(vB, vA); e2.subVectors(vC, vA);
+        n.crossVectors(e1, e2);
+        const area = n.length() * 0.5;
+        if (area < 1e-8) continue;
+        n.normalize();
+        const bin = Math.min(bins - 1, Math.max(0, Math.floor((n.y + 1) / 2 * bins)));
+        counts[bin] += area;
+    }
+
+    const maxCount = Math.max(...counts, 1);
+    const barW = canvas.width / bins;
+    const barMaxH = canvas.height - 30;
+
+    // Draw bars
+    for (let i = 0; i < bins; i++) {
+        const h = (counts[i] / maxCount) * barMaxH;
+        const ny = (i / bins) * 2 - 1;
+        const r = ny < -0.3 ? 100 : (ny > 0.3 ? 50 : 150);
+        const g = ny < -0.3 ? 200 : (ny > 0.3 ? 150 : 150);
+        const b = ny < -0.3 ? 100 : (ny > 0.3 ? 255 : 50);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fillRect(i * barW + 1, barMaxH - h, barW - 2, h);
+    }
+
+    // Labels
+    ctx.fillStyle = '#888';
+    ctx.font = '10px Consolas';
+    ctx.textAlign = 'center';
+    ctx.fillText('↓ Down (-Y)', canvas.width * 0.15, canvas.height - 4);
+    ctx.fillText('→ Horizontal', canvas.width * 0.5, canvas.height - 4);
+    ctx.fillText('↑ Up (+Y)', canvas.width * 0.85, canvas.height - 4);
+}
+
+
+// ==================== INIT ====================
+console.log('PackAssist Admin Tools loaded');
+console.log('Tabs: Orientation Tester | Packing Benchmark | Mesh Inspector | Console');
+
+</script>
+</body>
+</html>

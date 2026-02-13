@@ -187,7 +187,7 @@ export class PhysicsWorld {
         
         const colliderDesc = RAPIER.ColliderDesc.cuboid(hx, hy, hz)
             .setFriction(0.8) // Increased friction
-            .setRestitution(0.05)
+            .setRestitution(0.0)
             .setContactForceEventThreshold(0.1);
         this.world.createCollider(colliderDesc, body);
         
@@ -336,7 +336,7 @@ export class PhysicsWorld {
         const colliderDesc = RAPIER.ColliderDesc.cuboid(l / 2 * 0.95, h / 2 * 0.95, w / 2 * 0.95)
             .setDensity(2.0)
             .setFriction(0.5)
-            .setRestitution(0.01)
+            .setRestitution(0.0)
             .setContactForceEventThreshold(0.01);
 
         this.world.createCollider(colliderDesc, body);
@@ -348,7 +348,11 @@ export class PhysicsWorld {
     /**
      * Add a convex hull piece for STL
      */
-    addConvexHull(vertices, position, rotation = null, mesh = null, meshOffset = null) {
+    addConvexHull(vertices, position, rotation = null, mesh = null, meshOffset = null, options = {}) {
+        const hullScale = (typeof options?.hullScale === 'number' && Number.isFinite(options.hullScale))
+            ? options.hullScale
+            : 1.0;
+
         const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
             .setTranslation(position.x, position.y, position.z)
             .setLinearDamping(0.2)
@@ -373,10 +377,21 @@ export class PhysicsWorld {
             this.meshBodies.push({ body, mesh, offset: meshOffset });
         }
         
+        // Optionally shrink hull slightly to prevent initial micro-interpenetration
+        let hullVertices = vertices;
+        if (hullScale !== 1.0) {
+            hullVertices = new Float32Array(vertices.length);
+            for (let i = 0; i < vertices.length; i += 3) {
+                hullVertices[i] = vertices[i] * hullScale;
+                hullVertices[i + 1] = vertices[i + 1] * hullScale;
+                hullVertices[i + 2] = vertices[i + 2] * hullScale;
+            }
+        }
+
         // Try convex hull, fallback to bounding box
         let colliderDesc = null;
         try {
-            colliderDesc = RAPIER.ColliderDesc.convexHull(vertices);
+            colliderDesc = RAPIER.ColliderDesc.convexHull(hullVertices);
         } catch (e) {
             console.warn('Convex hull failed, using bounding box');
         }
@@ -387,13 +402,13 @@ export class PhysicsWorld {
             let minY = Infinity, maxY = -Infinity;
             let minZ = Infinity, maxZ = -Infinity;
             
-            for (let i = 0; i < vertices.length; i += 3) {
-                minX = Math.min(minX, vertices[i]);
-                maxX = Math.max(maxX, vertices[i]);
-                minY = Math.min(minY, vertices[i + 1]);
-                maxY = Math.max(maxY, vertices[i + 1]);
-                minZ = Math.min(minZ, vertices[i + 2]);
-                maxZ = Math.max(maxZ, vertices[i + 2]);
+            for (let i = 0; i < hullVertices.length; i += 3) {
+                minX = Math.min(minX, hullVertices[i]);
+                maxX = Math.max(maxX, hullVertices[i]);
+                minY = Math.min(minY, hullVertices[i + 1]);
+                maxY = Math.max(maxY, hullVertices[i + 1]);
+                minZ = Math.min(minZ, hullVertices[i + 2]);
+                maxZ = Math.max(maxZ, hullVertices[i + 2]);
             }
             
             colliderDesc = RAPIER.ColliderDesc.cuboid(
@@ -886,8 +901,8 @@ export class BulkSimulation {
         // Saturation detection - stop if no new pieces enter box after X drops
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
-        this.maxStagnantDrops = 50; // Stop after 50 consecutive checks without increase
-        this.checkInterval = 20; // Check every 20 drops
+        this.maxStagnantDrops = 80; // Stop after 80 consecutive checks without increase
+        this.checkInterval = 30; // Check every 30 drops
         
         // Track pieces above box to detect overflow faster
         this.piecesAboveBox = 0;
@@ -930,10 +945,10 @@ export class BulkSimulation {
         
         // Refill cycles tracking
         this.currentCycle = 1;
-        this.maxRefillCycles = 1; // Up to 1 refill attempt (Total 2 cycles)
+        this.maxRefillCycles = 3; // Up to 3 refill attempts (Total 4 cycles)
 
-        // Disable lid by default to avoid creating a floating platform during drop
-        this.enableLidPress = false;
+        // Enable lid press for compaction between cycles
+        this.enableLidPress = true;
     }
 
     /**
@@ -1311,9 +1326,10 @@ export class BulkSimulation {
         // 1. PRE-CLEANUP (Level 0: only completely outside)
         const removed = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 0);
         
-        // 2. START VIBRATION
+        // 2. START VIBRATION (more aggressive for better compaction)
         this.vibrationPhase = true;
-        this.physics.startVibration(6000); // 6 seconds of vibration
+        this.physics.vibrationAmplitude = 1.0; // Stronger vibration between cycles
+        this.physics.startVibration(8000); // 8 seconds of vibration
         
         if (this.onStatusUpdate) {
             this.onStatusUpdate({

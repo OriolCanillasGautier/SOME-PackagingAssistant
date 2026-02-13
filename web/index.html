@@ -21,6 +21,13 @@
         <!-- Header -->
         <header class="header">
             <div class="header-content">
+                <div class="lang-toggle-wrapper">
+                    <button id="lang-toggle" class="lang-toggle" title="Canviar idioma / Switch language">
+                        <span class="lang-active">CA</span>
+                        <span class="lang-sep">/</span>
+                        <span class="lang-inactive">EN</span>
+                    </button>
+                </div>
                 <h1>Calculadora de Capacitat de Peces</h1>
                 <p>Càlcul optimitzat + Mode a Granel amb Física Real</p>
                 <nav class="header-nav">
@@ -79,9 +86,32 @@
                             <label for="obj-weight">Pes (kg)</label>
                             <input type="number" id="obj-weight" value="0.100" min="0.001" step="0.001">
                         </div>
+                        <div class="input-group">
+                            <label for="material-density">Material (densitat)</label>
+                            <select id="material-density">
+                                <option value="0">— No estimar pes —</option>
+                                <option value="2700">Alumini (2 700 kg/m³)</option>
+                                <option value="7850">Acer (7 850 kg/m³)</option>
+                                <option value="1200">Plàstic (1 200 kg/m³)</option>
+                                <option value="8940">Coure (8 940 kg/m³)</option>
+                                <option value="custom">Personalitzat...</option>
+                            </select>
+                        </div>
+                        <div class="input-group" id="custom-density-group" style="display:none;">
+                            <label for="custom-density">Densitat personalitzada (kg/m³)</label>
+                            <input type="number" id="custom-density" value="1000" min="1" step="1">
+                        </div>
+                        <div class="input-group checkbox-group">
+                            <input type="checkbox" id="solid-piece" checked>
+                            <label for="solid-piece">Peça sòlida (pes = volum × densitat)</label>
+                        </div>
+                        <div class="input-group" id="wall-thickness-group" style="display:none;">
+                            <label for="wall-thickness">Gruix de paret (mm)</label>
+                            <input type="number" id="wall-thickness" value="2" min="0.1" step="0.1">
+                        </div>
                         <div class="input-group checkbox-group">
                             <input type="checkbox" id="allow-rotation" checked>
-                            <label for="allow-rotation">Permet girar l'objecte (6 orientacions)</label>
+                            <label for="allow-rotation">Permet girar l'objecte (explorar orientacions)</label>
                         </div>
                         <div class="input-group checkbox-group">
                             <input type="checkbox" id="heightmap-nesting" checked>
@@ -98,7 +128,7 @@
                         <h2>Dimensions de la Caixa</h2>
                         <div class="input-group">
                             <label for="box-length">Llargada (mm)</label>
-                            <input type="number" id="box-length" value="100" min="0.1" step="1">
+                            <input type="number" id="box-length" value="150" min="0.1" step="1">
                         </div>
                         <div class="input-group">
                             <label for="box-width">Amplada (mm)</label>
@@ -202,16 +232,31 @@
                         <div id="simulation-status" class="simulation-status"></div>
                     </div>
 
+                    <!-- Calculation progress (shown on Calculate) -->
+                    <div id="calc-progress" class="calc-progress" style="display: none;">
+                        <div class="calc-progress-info">
+                            <span id="calc-progress-label" class="calc-progress-label"></span>
+                        </div>
+                        <div class="calc-progress-track">
+                            <div id="calc-progress-bar" class="calc-progress-bar" style="width: 0%;"></div>
+                        </div>
+                        <button id="calc-cancel-btn" class="btn-secondary calc-cancel-btn" type="button" disabled>
+                            Cancel·lar
+                        </button>
+                    </div>
+
                     <!-- Results -->
                     <div class="results-container">
                         <div id="results" class="results-content">
                             <p class="placeholder-text">Introdueix les dades i fes clic a Calcular</p>
                         </div>
-                        <div class="report-buttons" id="report-buttons" style="display: none;">
-                            <button id="report-preview-btn" class="report-btn" title="Previsualitzar i configurar informe">
-                                Previsualitzar Informe
-                            </button>
-                        </div>
+                    </div>
+                    
+                    <!-- Floating Report Button -->
+                    <div class="floating-report" id="report-buttons" style="display: none;">
+                        <button id="report-preview-btn" class="report-float-btn" title="Previsualitzar i configurar informe">
+                            📄 Previsualitzar Informe
+                        </button>
                     </div>
                 </div>
             </div>
@@ -255,11 +300,11 @@
 
         <!-- Footer -->
         <footer class="footer">
-            <p>PackAssist — Oriol Canillas & SOME © 2025</p>
+            <p>PackAssist — Oriol Canillas & SOME © 2026</p>
         </footer>
     </div>
 
     <!-- Main Script -->
-    <script type="module" src="js/main.js?v=force_update_38"></script>
+    <script type="module" src="js/main.js?v=force_update_42"></script>
 </body>
 </html>

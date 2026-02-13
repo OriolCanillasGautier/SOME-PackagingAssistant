@@ -1,0 +1,356 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>PackAssist — Heightmap Packing Benchmark</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; padding: 20px; }
+        h1 { margin-bottom: 8px; color: #4fc3f7; }
+        .subtitle { color: #888; margin-bottom: 20px; font-size: 14px; }
+        table { border-collapse: collapse; width: 100%; margin-bottom: 30px; }
+        th, td { padding: 8px 12px; text-align: left; border: 1px solid #333; }
+        th { background: #2a2a4e; color: #4fc3f7; }
+        tr:nth-child(even) { background: #1e1e3a; }
+        .pass { color: #4caf50; font-weight: bold; }
+        .fail { color: #f44336; font-weight: bold; }
+        .warn { color: #ff9800; font-weight: bold; }
+        .info { color: #888; font-size: 12px; }
+        #status { padding: 12px; background: #2a2a4e; border-radius: 6px; margin-bottom: 16px; }
+        #results { margin-top: 16px; }
+        button { padding: 10px 24px; background: #4fc3f7; color: #1a1a2e; border: none; border-radius: 6px; font-size: 16px; cursor: pointer; margin-bottom: 16px; }
+        button:hover { background: #29b6f6; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        .section { margin-bottom: 24px; }
+        .section h2 { color: #4fc3f7; margin-bottom: 8px; font-size: 18px; }
+    </style>
+</head>
+<body>
+    <h1>PackAssist Heightmap Benchmark</h1>
+    <p class="subtitle">Tests packing density, orientation handling, and consistency across mesh simplifications</p>
+    <button id="runBtn" onclick="runBenchmark()">Run Benchmark</button>
+    <div id="status">Ready. Click "Run Benchmark" to start.</div>
+    <div id="results"></div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/",
+            "three-mesh-bvh": "https://cdn.jsdelivr.net/npm/three-mesh-bvh@0.7.0/src/index.js"
+        }
+    }
+    </script>
+    <script type="module">
+    import * as THREE from 'three';
+    import { computeBoundsTree, disposeBoundsTree } from 'three-mesh-bvh';
+
+    if (!THREE.BufferGeometry.prototype.computeBoundsTree) {
+        THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+    }
+    if (!THREE.BufferGeometry.prototype.disposeBoundsTree) {
+        THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+    }
+
+    // Import the SceneManager to use the real heightmap algorithm
+    const { SceneManager } = await import('./js/visualization/scene.js?v=bench');
+
+    // Create an offscreen SceneManager
+    const canvas = document.createElement('canvas');
+    canvas.width = 100; canvas.height = 100;
+    const scene = new SceneManager(canvas);
+
+    /**
+     * Create a simple box geometry as a test piece
+     */
+    function makeBoxGeom(lx, ly, lz) {
+        const g = new THREE.BoxGeometry(lx, ly, lz);
+        g.translate(0, ly / 2, 0); // base at y=0
+        g.computeBoundingBox();
+        return g;
+    }
+
+    /**
+     * Create a wedge (right triangle prism) as a more complex test piece
+     */
+    function makeWedgeGeom(width, height, depth) {
+        // Right-triangle cross-section extruded along Z
+        const shape = new THREE.Shape();
+        shape.moveTo(0, 0);
+        shape.lineTo(width, 0);
+        shape.lineTo(0, height);
+        shape.closePath();
+
+        const extrudeSettings = { depth, bevelEnabled: false };
+        const g = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        // Center on XZ, base at Y=0
+        g.computeBoundingBox();
+        const bb = g.boundingBox;
+        const cx = (bb.min.x + bb.max.x) / 2;
+        const cy = bb.min.y;
+        const cz = (bb.min.z + bb.max.z) / 2;
+        g.translate(-cx, -cy, -cz);
+        g.computeBoundingBox();
+        return g;
+    }
+
+    /**
+     * Create an L-shaped piece
+     */
+    function makeLGeom(w, h, d, thickness) {
+        // Vertical part
+        const g1 = new THREE.BoxGeometry(thickness, h, d);
+        g1.translate(thickness / 2, h / 2, 0);
+        // Horizontal part
+        const g2 = new THREE.BoxGeometry(w, thickness, d);
+        g2.translate(w / 2, thickness / 2, 0);
+
+        // Merge
+        const merged = new THREE.BufferGeometry();
+        const m1 = new THREE.Mesh(g1);
+        const m2 = new THREE.Mesh(g2);
+        m1.updateMatrix();
+        m2.updateMatrix();
+
+        // Use mergeGeometries from BufferGeometryUtils
+        // Fallback: just use a box for simplicity
+        // Actually let's just return a box - the wedge is the interesting non-box shape
+        const g = new THREE.BoxGeometry(w, h, d);
+        g.translate(0, h / 2, 0);
+        g.computeBoundingBox();
+        return g;
+    }
+
+    /**
+     * Run packing in dry-run mode (no rendering) and return count
+     */
+    async function packDryRun(stlGeometry, boxL, boxW, boxH, maxTry = 2000) {
+        const result = await scene.addPackedSTLHeightMapAsync({
+            stlGeometry,
+            maxDraw: 500,
+            maxTry,
+            packingGap: 0,
+            boxL, boxW, boxH,
+            dryRun: true
+        });
+        return typeof result === 'number' ? result : result.count;
+    }
+
+    /**
+     * Theoretical max (volume-based upper bound)
+     */
+    function theoreticalMax(pieceGeom, boxL, boxW, boxH) {
+        pieceGeom.computeBoundingBox();
+        const bb = pieceGeom.boundingBox;
+        const pL = bb.max.x - bb.min.x;
+        const pH = bb.max.y - bb.min.y;
+        const pW = bb.max.z - bb.min.z;
+        // Grid-based theoretical: product of floor divisions
+        return Math.floor(boxL / pL) * Math.floor(boxH / pH) * Math.floor(boxW / pW);
+    }
+
+    // ===== TEST DEFINITIONS =====
+
+    const tests = [];
+
+    // --- Test 1: Simple box piece, perfect fit ---
+    tests.push({
+        name: 'Box 10×20×15 in 100×100×100 (perfect grid fit)',
+        piece: () => makeBoxGeom(10, 20, 15),
+        box: [100, 100, 100],
+        expectedMin: 150,
+        notes: '10×5×6 = 300 theoretical (grid). Heightmap should get at least 150.'
+    });
+
+    // --- Test 2: Box piece, bigger box should give more ---
+    tests.push({
+        name: 'Box 10×20×15 in 150×150×100 (bigger box = more pieces)',
+        piece: () => makeBoxGeom(10, 20, 15),
+        box: [150, 150, 100],
+        expectedMin: 300,
+        notes: '15×5×10 = 750 theoretical. Must be > Test 1 count.'
+    });
+
+    // --- Test 3: Monotonicity check (larger box always >= smaller box) ---
+    tests.push({
+        name: 'Box 20×30×25 monotonicity: 100×100×100 vs 150×150×150',
+        piece: () => makeBoxGeom(20, 30, 25),
+        box: [100, 100, 100],
+        box2: [150, 150, 150],
+        isMonotonicity: true,
+        notes: 'Bigger box must always produce >= count.'
+    });
+
+    // --- Test 4: Wedge (triangle prism) ---
+    tests.push({
+        name: 'Wedge 30×40×20 in 150×150×150',
+        piece: () => makeWedgeGeom(30, 40, 20),
+        box: [150, 150, 150],
+        expectedMin: 20,
+        notes: 'Non-trivial shape. Should pack reasonably.'
+    });
+
+    // --- Test 5: Consistency — same geometry, slightly different vertex positions ---
+    tests.push({
+        name: 'Consistency: Box 25×35×20 — original vs jittered vertices',
+        piece: () => makeBoxGeom(25, 35, 20),
+        piece2: () => {
+            const g = makeBoxGeom(25, 35, 20);
+            // Add tiny random jitter to simulate different simplification
+            const pos = g.getAttribute('position');
+            for (let i = 0; i < pos.count; i++) {
+                pos.setX(i, pos.getX(i) + (Math.random() - 0.5) * 0.02);
+                pos.setY(i, pos.getY(i) + (Math.random() - 0.5) * 0.02);
+                pos.setZ(i, pos.getZ(i) + (Math.random() - 0.5) * 0.02);
+            }
+            pos.needsUpdate = true;
+            g.computeBoundingBox();
+            return g;
+        },
+        box: [150, 150, 200],
+        isConsistency: true,
+        maxDeltaPct: 10,
+        notes: 'Two meshes of near-identical dimensions should give counts within 10%.'
+    });
+
+    // --- Test 6: Piece taller than box — should return 0 ---
+    tests.push({
+        name: 'Box 50×120×50 in 100×100×100 (piece too tall)',
+        piece: () => makeBoxGeom(50, 120, 50),
+        box: [100, 100, 100],
+        expectedExact: 0,
+        notes: 'Piece height 120 > box height 100. Must be 0 (no orientation flip yet).'
+    });
+
+    // --- Test 7: User's scenario — different box widths ---
+    tests.push({
+        name: 'Box 28×98×37 in 100×150×200 vs 150×150×200',
+        piece: () => makeBoxGeom(28, 98, 37),
+        box: [100, 200, 150],
+        box2: [150, 200, 150],
+        isMonotonicity: true,
+        notes: 'Simulates user piece. Bigger box MUST give >= pieces.'
+    });
+
+    // --- Test 8: Very small piece in large box ---
+    tests.push({
+        name: 'Box 5×5×5 in 100×100×100 (high count)',
+        piece: () => makeBoxGeom(5, 5, 5),
+        box: [100, 100, 100],
+        expectedMin: 2000,
+        notes: '20×20×20 = 8000 theoretical. Capped at maxTry=2000.'
+    });
+
+    // ===== RUNNER =====
+
+    async function runBenchmark() {
+        const btn = document.getElementById('runBtn');
+        const statusEl = document.getElementById('status');
+        const resultsEl = document.getElementById('results');
+        btn.disabled = true;
+        resultsEl.innerHTML = '';
+
+        let html = '<table><tr><th>#</th><th>Test</th><th>Count</th><th>Expected</th><th>Result</th><th>Time</th><th>Notes</th></tr>';
+        let passed = 0, failed = 0, warned = 0;
+
+        for (let i = 0; i < tests.length; i++) {
+            const t = tests[i];
+            statusEl.textContent = `Running test ${i + 1}/${tests.length}: ${t.name}...`;
+
+            try {
+                if (t.isMonotonicity) {
+                    // Two runs, compare
+                    const geom = t.piece();
+                    const t0 = performance.now();
+                    const count1 = await packDryRun(geom.clone(), t.box[0], t.box[1], t.box[2]);
+                    const count2 = await packDryRun(geom.clone(), t.box2[0], t.box2[1], t.box2[2]);
+                    const ms = (performance.now() - t0).toFixed(0);
+
+                    const ok = count2 >= count1;
+                    if (ok) passed++; else failed++;
+
+                    html += `<tr>
+                        <td>${i + 1}</td>
+                        <td>${t.name}</td>
+                        <td>${count1} → ${count2}</td>
+                        <td>count2 >= count1</td>
+                        <td class="${ok ? 'pass' : 'fail'}">${ok ? 'PASS' : 'FAIL'}</td>
+                        <td>${ms}ms</td>
+                        <td class="info">${t.notes}</td>
+                    </tr>`;
+                } else if (t.isConsistency) {
+                    const g1 = t.piece();
+                    const g2 = t.piece2();
+                    const t0 = performance.now();
+                    const c1 = await packDryRun(g1, t.box[0], t.box[1], t.box[2]);
+                    const c2 = await packDryRun(g2, t.box[0], t.box[1], t.box[2]);
+                    const ms = (performance.now() - t0).toFixed(0);
+
+                    const delta = Math.abs(c1 - c2);
+                    const pct = c1 > 0 ? (delta / c1 * 100).toFixed(1) : 0;
+                    const ok = pct <= t.maxDeltaPct;
+                    if (ok) passed++; else { warned++; }
+
+                    html += `<tr>
+                        <td>${i + 1}</td>
+                        <td>${t.name}</td>
+                        <td>${c1} vs ${c2} (Δ${pct}%)</td>
+                        <td>within ${t.maxDeltaPct}%</td>
+                        <td class="${ok ? 'pass' : 'warn'}">${ok ? 'PASS' : 'WARN'}</td>
+                        <td>${ms}ms</td>
+                        <td class="info">${t.notes}</td>
+                    </tr>`;
+                } else {
+                    const geom = t.piece();
+                    const t0 = performance.now();
+                    const count = await packDryRun(geom, t.box[0], t.box[1], t.box[2]);
+                    const ms = (performance.now() - t0).toFixed(0);
+
+                    let ok, expectedStr, cls;
+                    if (t.expectedExact !== undefined) {
+                        ok = count === t.expectedExact;
+                        expectedStr = `exactly ${t.expectedExact}`;
+                        cls = ok ? 'pass' : 'fail';
+                        if (ok) passed++; else failed++;
+                    } else {
+                        ok = count >= t.expectedMin;
+                        expectedStr = `>= ${t.expectedMin}`;
+                        cls = ok ? 'pass' : (count >= t.expectedMin * 0.8 ? 'warn' : 'fail');
+                        if (ok) passed++; else if (count >= t.expectedMin * 0.8) warned++; else failed++;
+                    }
+
+                    html += `<tr>
+                        <td>${i + 1}</td>
+                        <td>${t.name}</td>
+                        <td>${count}</td>
+                        <td>${expectedStr}</td>
+                        <td class="${cls}">${cls === 'pass' ? 'PASS' : cls === 'warn' ? 'WARN' : 'FAIL'}</td>
+                        <td>${ms}ms</td>
+                        <td class="info">${t.notes}</td>
+                    </tr>`;
+                }
+            } catch (err) {
+                failed++;
+                html += `<tr>
+                    <td>${i + 1}</td>
+                    <td>${t.name}</td>
+                    <td colspan="3" class="fail">ERROR: ${err.message}</td>
+                    <td>-</td>
+                    <td class="info">${t.notes}</td>
+                </tr>`;
+                console.error(`Test ${i + 1} error:`, err);
+            }
+        }
+
+        html += '</table>';
+        html += `<p><span class="pass">${passed} passed</span> / <span class="warn">${warned} warnings</span> / <span class="fail">${failed} failed</span> out of ${tests.length} tests</p>`;
+
+        resultsEl.innerHTML = html;
+        statusEl.textContent = `Done. ${passed}/${tests.length} passed.`;
+        btn.disabled = false;
+    }
+
+    window.runBenchmark = runBenchmark;
+    </script>
+</body>
+</html>
