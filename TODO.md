@@ -1,7 +1,7 @@
 # TODO (PackAssist)
 
 Llista de coses a polir. Prioritzat per impacte a UX/correctesa.  
-Última actualització: 2026-02-12
+Última actualització: 2026-02-13
 
 ---
 
@@ -43,6 +43,8 @@ Llista de coses a polir. Prioritzat per impacte a UX/correctesa.
   - Pes estimat → `volReal × densitat_material`.
 - [x] Afegir selector de material (alumini 2700, acer 7850, plàstic 1200 kg/m³) a la UI.
 - [x] Propagar dades al `report-generator.js` (PDF).
+- [x] **Limitador de pes usa pes per material**: quan es selecciona un material, el pes per peça es calcula de `densitat × volum` i s'usa al limitador (`calcularEmpaquetatge`), no només per display.
+- [x] **Actualització en viu del pes**: canviar material/densitat/sòlid-buit/gruix recalcula el camp de pes automàticament.
 
 ### Coherència del recompte
 - [x] Una sola font de veritat (`displayCount`) per:

@@ -748,7 +748,11 @@ function setupEventListeners() {
         if (elements.customDensityGroup) {
             elements.customDensityGroup.style.display = isCustom ? '' : 'none';
         }
+        updateWeightFromMaterial();
     });
+
+    // Custom density input
+    elements.customDensity?.addEventListener('input', () => updateWeightFromMaterial());
 
     // Solid/hollow toggle — show wall thickness when hollow
     elements.solidPiece?.addEventListener('change', () => {
@@ -756,7 +760,11 @@ function setupEventListeners() {
         if (elements.wallThicknessGroup) {
             elements.wallThicknessGroup.style.display = isSolid ? 'none' : '';
         }
+        updateWeightFromMaterial();
     });
+
+    // Wall thickness change
+    elements.wallThickness?.addEventListener('input', () => updateWeightFromMaterial());
 
     elements.calcCancelBtn?.addEventListener('click', () => {
         if (state.calcAbortController) {
@@ -987,6 +995,9 @@ async function handleSTLUpload(event) {
         elements.objLength.value = state.stlDimensions.length.toFixed(2);
         elements.objWidth.value = state.stlDimensions.width.toFixed(2);
         elements.objHeight.value = state.stlDimensions.height.toFixed(2);
+
+        // Recalculate weight from material if a material is selected
+        updateWeightFromMaterial();
         
         if (vertexCount <= VERTEX_THRESHOLD) {
             elements.stlStatus.className = 'stl-status success';
@@ -1280,10 +1291,11 @@ async function loadSTLFromHistory(id) {
         elements.objWidth.value = state.stlDimensions.width.toFixed(2);
         elements.objHeight.value = state.stlDimensions.height.toFixed(2);
         
-        // Always update weight from stored value
+        // Restore stored weight, then override with material if selected
         if (file.weight !== undefined && file.weight !== null) {
             elements.objWeight.value = file.weight;
         }
+        updateWeightFromMaterial();
         
         elements.stlStatus.className = 'stl-status success';
         elements.stlStatus.innerHTML = `${file.name}: ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm<br>${buildOrientationAndIntegrityLine()}`;
@@ -1308,6 +1320,42 @@ async function deleteSTLFromHistory(id) {
         await loadSTLHistory();
     } catch (error) {
         console.error('Error deleting STL from history:', error);
+    }
+}
+
+/**
+ * Recompute piece weight from material density and update the weight input field.
+ * Called live when material/density/solid-hollow/wall settings change.
+ */
+function updateWeightFromMaterial() {
+    const val = elements.materialDensity?.value;
+    if (!val || val === '0') return; // "No estimar pes" — keep manual weight
+    const density = val === 'custom'
+        ? (parseFloat(elements.customDensity?.value) || 0)
+        : (parseFloat(val) || 0);
+    if (density <= 0) return;
+
+    const isSolid = elements.solidPiece?.checked ?? true;
+    const wallT = parseFloat(elements.wallThickness?.value) || 2;
+
+    // Volume / surface area — prefer real mesh data, fall back to dimension inputs
+    const meshVol = state.stlGeometry ? computeMeshVolume(state.stlGeometry) : 0;
+    const meshSA = state.stlGeometry ? computeSurfaceArea(state.stlGeometry) : 0;
+    const objL = parseFloat(elements.objLength.value) || 0;
+    const objW = parseFloat(elements.objWidth.value) || 0;
+    const objH = parseFloat(elements.objHeight.value) || 0;
+
+    let weight;
+    if (isSolid) {
+        const vol = meshVol > 0 ? meshVol : (objL * objW * objH);
+        weight = (vol / 1e9) * density; // mm³ → m³ × kg/m³
+    } else {
+        const sa = meshSA > 0 ? meshSA : 2 * (objL * objW + objL * objH + objW * objH);
+        weight = (sa * wallT / 1e9) * density;
+    }
+
+    if (weight > 0) {
+        elements.objWeight.value = weight.toFixed(3);
     }
 }
 
@@ -1446,6 +1494,26 @@ async function handleCalculate() {
         // Compute real mesh volume and surface area if STL is loaded
         const meshVolume = state.stlGeometry ? computeMeshVolume(state.stlGeometry) : 0;
         const meshSurfaceArea = state.stlGeometry ? computeSurfaceArea(state.stlGeometry) : 0;
+
+        // --- Compute material weight and override objWeight for the limiter ---
+        const matDensity = values.materialDensity || 0;
+        let estPieceWeight = 0;
+        if (matDensity > 0) {
+            if (values.solidPiece) {
+                // Solid: weight = volume × density
+                const volForWeight = meshVolume > 0 ? meshVolume : (values.objL * values.objW * values.objH);
+                estPieceWeight = (volForWeight / 1e9) * matDensity; // mm³ → m³ × kg/m³
+            } else {
+                // Hollow: weight = surfaceArea × wallThickness × density
+                const wallT = values.wallThickness || 2; // mm
+                const saForWeight = meshSurfaceArea > 0 ? meshSurfaceArea : 2 * (values.objL * values.objW + values.objL * values.objH + values.objW * values.objH);
+                estPieceWeight = (saForWeight * wallT / 1e9) * matDensity; // mm² × mm = mm³ → m³ × kg/m³
+            }
+            // Use material-derived weight for the weight limiter
+            values.objWeight = estPieceWeight;
+            elements.objWeight.value = estPieceWeight.toFixed(3);
+            console.log(`[PackAssist] Pes per material (${matDensity} kg/m³): ${(estPieceWeight * 1000).toFixed(1)} g/peça`);
+        }
 
         // Run packing calculation
         setCalcProgress(true, 3, 'Calculant empaquetatge...', calcStartTime);
@@ -1655,21 +1723,7 @@ async function handleCalculate() {
 
             console.log(`Rendered ${drawnCount} items (${displayCount} pieces)`);
 
-            // Calculate estimated weight from material density if available
-            const matDensity = values.materialDensity || 0;
-            let estPieceWeight = 0;
-            if (matDensity > 0) {
-                if (values.solidPiece) {
-                    // Solid: weight = volume × density
-                    const volForWeight = meshVolume > 0 ? meshVolume : (values.objL * values.objW * values.objH);
-                    estPieceWeight = (volForWeight / 1e9) * matDensity; // mm³ → m³ × kg/m³
-                } else {
-                    // Hollow: weight = surfaceArea × wallThickness × density
-                    const wallT = values.wallThickness || 2; // mm
-                    const saForWeight = meshSurfaceArea > 0 ? meshSurfaceArea : 2 * (values.objL * values.objW + values.objL * values.objH + values.objW * values.objH);
-                    estPieceWeight = (saForWeight * wallT / 1e9) * matDensity; // mm² × mm = mm³ → m³ × kg/m³
-                }
-            }
+            // Estimated total weight (estPieceWeight computed above, before calcularEmpaquetatge)
             const estTotalWeight = estPieceWeight * displayCount;
 
             // Material name for display
@@ -2129,6 +2183,9 @@ async function updateSimulationStatus(status) {
                 const saForWeight = bulkSurfaceArea > 0 ? bulkSurfaceArea : 2 * (values.objL * values.objW + values.objL * values.objH + values.objW * values.objH);
                 estPieceWeight = (saForWeight * wallT / 1e9) * matDensity;
             }
+            // Use material-derived weight for consistency
+            values.objWeight = estPieceWeight;
+            elements.objWeight.value = estPieceWeight.toFixed(3);
         }
         const estTotalWeight = estPieceWeight * status.inside;
 

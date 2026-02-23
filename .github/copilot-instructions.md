@@ -70,7 +70,7 @@ web/
 - All dimensions in mm, weights in kg.
 - Use ES Modules with CDN imports (Three.js, Rapier.js).
 - CSS uses custom properties with automatic dark mode via `prefers-color-scheme`.
-- Version: 0.0.3, App name: SOME-PackAssist
+- Version: 0.0.4, App name: SOME-PackAssist
 
 ## Development Workflow
 - Maintain `TODO.md` with pending tasks, linked to file locations.

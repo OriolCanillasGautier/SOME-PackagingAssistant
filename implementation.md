@@ -2,7 +2,7 @@
 
 Pla d'implementació derivat del TODO.md. Organitzat en 7 fases seqüencials.  
 Cada fase és autocontinguda i desplegable independentment.  
-Última actualització: 2026-02-12
+Última actualització: 2026-02-13
 
 ---
 
@@ -33,6 +33,13 @@ Cada fase és autocontinguda i desplegable independentment.
 - [x] `<select id="material-selector">` a `index.html` (Alumini, Acer, Plàstic, Personalitzat)
 - [x] Càlcul de pes per peça i total basat en densitat × volum real
 - [x] Dades propagades a `state.lastResults` i PDF
+
+### 2.4 Pes material al limitador de pes
+- [x] Quan un material està seleccionat, el pes per peça es calcula **abans** de `calcularEmpaquetatge()` i sobreescriu `values.objWeight`.
+- [x] El camp de pes a la UI s'actualitza automàticament (tant al calcular com en canviar material/densitat/sòlid-buit/gruix).
+- [x] `updateWeightFromMaterial()` centralitza el càlcul: es crida en canviar material, densitat, sòlid/buit, gruix, i en carregar STL (upload o historial).
+- [x] Mode bulk (`updateSimulationStatus`) també sobreescriu `values.objWeight` amb pes per material.
+- [x] Si material = "No estimar pes", es manté el pes manual introduït per l'usuari.
 
 ### 2.3 Unitats teòriques màximes
 - [x] `Math.floor(volBox / volReal)` mostrat a UI i report
