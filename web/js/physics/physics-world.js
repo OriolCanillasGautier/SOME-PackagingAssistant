@@ -438,7 +438,9 @@ export class PhysicsWorld {
         
         for (let i = 0; i < subSteps; i++) {
             // Update vibration PER SUBSTEP for perfect smoothness
-            this.updateVibration(dt * 1000);
+            if (this.isVibrating) {
+                this.updateVibration(dt * 1000);
+            }
             
             // Update Lid animation PER SUBSTEP if active
             if (this.lidState !== 'idle' && this.lidState !== 'finished') {
@@ -858,9 +860,18 @@ export class PhysicsWorld {
 
     dispose() {
         this.isRunning = false;
+        this.isVibrating = false;
+        this.onSettled = null;
+        this.settledCount = 0;
         this.meshBodies = [];
         this.bodies = [];
-        this.world = null;
+        this.wallBodies = [];
+        this.wallOriginalPositions = [];
+        // Free the Rapier world to release WASM memory
+        if (this.world) {
+            try { this.world.free(); } catch (_) { /* already freed */ }
+            this.world = null;
+        }
     }
 }
 

@@ -461,9 +461,27 @@ function buildOrientedGeometry(originalGeometry, tilt, yawDeg) {
  */
 function generateYawCandidates(stableBases, boxL, boxW, boxH, allowRotation) {
     const candidates = [];
-    const yaws = allowRotation
-        ? [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
-        : [0];
+
+    // Box-aware angular search space reduction:
+    // Square base (R ≥ 0.98) has 90° rotational symmetry — search [0°, 90°).
+    // Rectangular base has only 180° symmetry — search [0°, 180°).
+    // 15° step gives 6 candidates for square, 12 for rectangle — practical upper bound.
+    let yaws;
+    if (!allowRotation) {
+        yaws = [0];
+    } else {
+        const ratio = Math.min(boxL, boxW) / Math.max(boxL, boxW);
+        const isSquare = ratio >= 0.98;
+        const maxAngle = isSquare ? 90 : 180; // exclusive upper bound
+        const step = 15;
+        yaws = [];
+        for (let a = 0; a < maxAngle - 0.01; a += step) {
+            yaws.push(Math.round(a));
+        }
+        console.log(`[Orientation] Box ${boxL.toFixed(0)}×${boxW.toFixed(0)} ` +
+            `(${isSquare ? 'square' : 'rect'}, R=${ratio.toFixed(2)}): ` +
+            `yaw range [0°, ${maxAngle}°), ${yaws.length} candidates per base`);
+    }
 
     for (let baseIndex = 0; baseIndex < stableBases.length; baseIndex++) {
         const base = stableBases[baseIndex];
@@ -485,11 +503,15 @@ function generateYawCandidates(stableBases, boxL, boxW, boxH, allowRotation) {
                 yawDeg,
                 name: `B${baseIndex + 1} · Y ${yawDeg}°`,
                 oriented,
+                // Pre-sort key: bounding-box footprint area (smaller = more pieces per layer).
+                // Ties broken by total bbox volume (smaller = more pieces total).
+                bboxFootprint: sX * sZ,
+                bboxVol: sX * sY * sZ,
             });
         }
     }
 
-    console.log(`[Orientation] Multi-base yaw search: ${candidates.length} candidates (${stableBases.length} bases × ${yaws.length} yaw)`);
+    console.log(`[Orientation] ${candidates.length} candidates total (${stableBases.length} bases × ${yaws.length} yaws)`);
     return candidates;
 }
 
@@ -577,6 +599,7 @@ const elements = {
     objWeight: document.getElementById('obj-weight'),
     allowRotation: document.getElementById('allow-rotation'),
     heightMapNesting: document.getElementById('heightmap-nesting'),
+    replicateLayers: document.getElementById('replicate-layers'),
     stlUpload: document.getElementById('stl-upload'),
     stlStatus: document.getElementById('stl-status'),
     optPieceColors: document.getElementById('opt-piece-colors'),
@@ -1557,7 +1580,11 @@ async function handleCalculate() {
                 await nextFrame();
                 if (state.stlGeometry) {
                     if (values.heightMapNesting) {
-                        const maxDraw = 500;
+                        // Weight-capped piece limit
+                        const maxByWeight = (values.maxWeight > 0 && values.objWeight > 0)
+                            ? Math.floor(values.maxWeight / values.objWeight)
+                            : Infinity;
+                        const maxDraw = Math.min(2000, maxByWeight);
                     const stableBases = state.stlStableOrientations?.length
                         ? state.stlStableOrientations
                         : [{ quat: null, geometry: (state.stlAlignedGeometry || state.stlGeometry), stability: null }];
@@ -1574,6 +1601,20 @@ async function handleCalculate() {
                         : maxDraw;
                     console.log(`[Packing] boxVol=${boxVol.toFixed(0)}, pieceBBoxVol=${pieceBBoxVol.toFixed(1)}, maxTry=${maxTry}, maxDraw=${maxDraw}`);
 
+                    // Compute shared cellSize ONCE for all dry-runs and final placement
+                    // to ensure consistent grid resolution across all orientation evaluations.
+                    const sharedCellSize = Math.max(
+                        1,
+                        Math.min(
+                            4,
+                            Math.min(
+                                stlSize.x,
+                                stlSize.z
+                            ) / 20
+                        )
+                    );
+                    console.log(`[Packing] sharedCellSize=${sharedCellSize.toFixed(2)}mm`);
+
                     // --- Step 1: Use precomputed stable orientation (from load/simplify) + generate yaw candidates ---
                     setCalcProgress(true, 8, `Cercant millor orientació Y (${stableBases.length} bases)...`, calcStartTime);
                     await nextFrame();
@@ -1589,14 +1630,27 @@ async function handleCalculate() {
                         drawn = { count: 0 };
                     } else {
 
-                    // --- Step 2: Evaluate each yaw candidate via dry-run ---
+                    // --- Step 2: Pre-filter by bbox footprint, then dry-run top candidates ---
+                    // Sorting by bboxFootprint (ascending) gives a free analytical estimate:
+                    // the orientation whose bounding box covers the least floor area will
+                    // fit the most pieces per layer. Only the top MAX_DRY_RUNS are actually
+                    // dry-run; the rest are discarded without touching the GPU.
+                    const MAX_DRY_RUNS = 6;
+                    candidates.sort((a, b) =>
+                        a.bboxFootprint !== b.bboxFootprint
+                            ? a.bboxFootprint - b.bboxFootprint   // smaller footprint first
+                            : a.bboxVol - b.bboxVol               // tie-break: smaller total volume
+                    );
+                    const dryRunCandidates = candidates.slice(0, MAX_DRY_RUNS);
+                    console.log(`[Orientation] ${candidates.length} candidates pre-filtered to ${dryRunCandidates.length} for dry-run`);
+
                     const evalResults = [];
                     const evalStart = 15;
                     const evalEnd = 70;
-                    const perCandidate = (evalEnd - evalStart) / Math.max(1, candidates.length);
+                    const perCandidate = (evalEnd - evalStart) / Math.max(1, dryRunCandidates.length);
 
-                    for (let ci = 0; ci < candidates.length; ci++) {
-                        const c = candidates[ci];
+                    for (let ci = 0; ci < dryRunCandidates.length; ci++) {
+                        const c = dryRunCandidates[ci];
                         if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
 
                         const footprintArea = computeFootprintArea(c.oriented);
@@ -1605,17 +1659,19 @@ async function handleCalculate() {
                             stlGeometry: c.oriented,
                             maxDraw,
                             maxTry,
+                            cellSizeOverride: sharedCellSize,
                             packingGap: values.packingGap,
                             colorCount: values.colorCount,
                             boxL: values.boxL,
                             boxW: values.boxW,
                             boxH: values.boxH,
+                            replicateFirstLayer: !!(elements.replicateLayers && elements.replicateLayers.checked),
                             dryRun: true,
                             abortSignal,
                             onProgress: ({ placed, maxTry: mt }) => {
                                 const t = mt > 0 ? (placed / mt) : 0;
                                 const base = evalStart + perCandidate * ci;
-                                setCalcProgress(true, base + perCandidate * Math.max(0, Math.min(1, t)), `Avaluant orientació ${ci + 1}/${candidates.length}...`, calcStartTime);
+                                setCalcProgress(true, base + perCandidate * Math.max(0, Math.min(1, t)), `Avaluant orientació ${ci + 1}/${dryRunCandidates.length}...`, calcStartTime);
                             }
                         });
                         const count = typeof trial === 'number' ? trial : trial.count;
@@ -1650,15 +1706,60 @@ async function handleCalculate() {
 
                     const bestGeom = buildOrientedGeometry(state.stlGeometry, best.tilt, best.yawDeg);
 
+                    // Generate alternate orientations for gap-filling
+                    const alternateOrientations = [];
+
+                    // 1. 180° yaw alternate (fills gaps where mirrored piece fits better)
+                    const geom180 = bestGeom.clone();
+                    applyYawToGeometry(geom180, 180);
+                    recenterGeometry(geom180);
+                    alternateOrientations.push({ geometry: geom180, yaw: 180, flip: false });
+
+                    // 2. 90° yaw alternate (useful for non-square footprints)
+                    const geom90 = bestGeom.clone();
+                    applyYawToGeometry(geom90, 90);
+                    recenterGeometry(geom90);
+                    // Only add if it fits in the box
+                    geom90.computeBoundingBox();
+                    const bb90 = geom90.boundingBox;
+                    const sx90 = bb90.max.x - bb90.min.x;
+                    const sy90 = bb90.max.y - bb90.min.y;
+                    const sz90 = bb90.max.z - bb90.min.z;
+                    if (sx90 <= values.boxL + 0.01 && sz90 <= values.boxW + 0.01 && sy90 <= values.boxH + 0.01) {
+                        alternateOrientations.push({ geometry: geom90, yaw: 90, flip: false });
+                    }
+
+                    // 3. Alternate stable bases (different face down)
+                    if (stableBases.length > 1) {
+                        const altBaseIdx = best.tilt?.baseIndex ?? 0;
+                        for (let bi = 0; bi < Math.min(2, stableBases.length); bi++) {
+                            if (bi === altBaseIdx) continue;
+                            const altGeom = buildOrientedGeometry(state.stlGeometry, { quat: stableBases[bi].quat, baseIndex: bi }, best.yawDeg);
+                            altGeom.computeBoundingBox();
+                            const abb = altGeom.boundingBox;
+                            const asx = abb.max.x - abb.min.x;
+                            const asy = abb.max.y - abb.min.y;
+                            const asz = abb.max.z - abb.min.z;
+                            if (asx <= values.boxL + 0.01 && asz <= values.boxW + 0.01 && asy <= values.boxH + 0.01) {
+                                alternateOrientations.push({ geometry: altGeom, yaw: best.yawDeg, flip: true, baseIndex: bi });
+                            }
+                        }
+                    }
+
+                    console.log(`[Packing] ${alternateOrientations.length} alternate orientation(s) for gap-filling`);
+
                     drawn = await state.sceneManager.addPackedSTLHeightMapAsync({
                         stlGeometry: bestGeom,
+                        alternateOrientations,
                         maxDraw,
                         maxTry,
+                        cellSizeOverride: sharedCellSize,
                         packingGap: values.packingGap,
                         colorCount: values.colorCount,
                         boxL: values.boxL,
                         boxW: values.boxW,
                         boxH: values.boxH,
+                        replicateFirstLayer: !!(elements.replicateLayers && elements.replicateLayers.checked),
                         dryRun: false,
                         abortSignal,
                         onProgress: ({ placed, maxTry }) => {
@@ -1808,9 +1909,11 @@ function stopGravitySimulation() {
     sim.running = false;
     if (sim.animationId) {
         cancelAnimationFrame(sim.animationId);
+        sim.animationId = null;
     }
     if (sim.physics) {
         sim.physics.pause();
+        sim.physics.dispose();
     }
     state.gravitySimulation = null;
 }
@@ -1841,15 +1944,23 @@ async function initGravitySimulation() {
         ? parseInt(elements.optPieceColors?.value) || 10
         : parseInt(elements.pieceColors?.value) || 10));
 
-    // Slight convex-hull shrink to reduce explosive separation
-    const hullScale = 0.995;
-
     placement.positions.forEach((pos, idx) => {
         const color = pieceColors.length > 0 ? pieceColors[idx % colorCount] : 0x3b82f6;
         let mesh;
 
-        if (placement.type === 'stl' && placement.geometry) {
-            const geometry = placement.geometry.clone();
+        if (placement.type === 'stl' && (placement.orientations || placement.geometry)) {
+            // Determine per-piece orientation (from heightmap multi-orient data)
+            const meta = placement.pieceData?.[idx];
+            const orientIdx = meta?.orientIdx ?? 0;
+            const orientInfo = placement.orientations?.[orientIdx];
+
+            // Use correct per-orientation geometry, or fall back to primary
+            const srcGeometry = orientInfo?.geometry ?? placement.geometry;
+            const pieceDims = orientInfo
+                ? { l: orientInfo.sizeX, w: orientInfo.sizeZ, h: orientInfo.sizeY }
+                : placement.dims;
+
+            const geometry = srcGeometry.clone();
             geometry.computeBoundingBox();
             const bbox = geometry.boundingBox;
             const center = new THREE.Vector3();
@@ -1867,27 +1978,17 @@ async function initGravitySimulation() {
             state.sceneManager.scene.add(mesh);
             state.sceneManager.pieces.push(mesh);
 
-            if (placement.vertices) {
-                const verts = placement.vertices;
-                const centered = new Float32Array(verts.length);
-                for (let i = 0; i < verts.length; i += 3) {
-                    centered[i] = verts[i] - center.x;
-                    centered[i + 1] = verts[i + 1] - center.y;
-                    centered[i + 2] = verts[i + 2] - center.z;
-                }
-
-                // Place at exact grid position — no lifting
-                const bodyPos = new THREE.Vector3(pos.x + center.x, pos.y + center.y, pos.z + center.z);
-                physics.addConvexHull(centered, bodyPos, null, mesh, center, { hullScale });
-            } else {
-                const bodyPos = new THREE.Vector3(pos.x + center.x, pos.y + center.y, pos.z + center.z);
-                physics.addCuboid({
-                    l: placement.dims.l,
-                    w: placement.dims.w,
-                    h: placement.dims.h
-                }, bodyPos, null, mesh, center);
-            }
+            // Use CUBOID collider — exactly matches the packing AABB which is
+            // guaranteed non-overlapping.  Convex hulls fill concavities and
+            // cause explosive separation; cuboids don't have that problem.
+            const bodyPos = new THREE.Vector3(
+                pos.x + center.x,
+                pos.y + center.y,
+                pos.z + center.z
+            );
+            physics.addCuboid(pieceDims, bodyPos, null, mesh, center);
         } else {
+            // Box-mode pieces (non-STL)
             const geometry = new THREE.BoxGeometry(placement.dims.l, placement.dims.h, placement.dims.w);
             const material = new THREE.MeshPhongMaterial({
                 color,
@@ -1902,7 +2003,6 @@ async function initGravitySimulation() {
             state.sceneManager.scene.add(mesh);
             state.sceneManager.pieces.push(mesh);
 
-            // Place at exact grid position — no lifting
             const bodyPos = new THREE.Vector3(pos.x, pos.y, pos.z);
             physics.addCuboid({
                 l: placement.dims.l,
@@ -1915,11 +2015,11 @@ async function initGravitySimulation() {
     // Lock rotations initially — keeps pieces aligned during settling
     physics.lockAllRotations(true);
 
-    // Set high damping to prevent bouncing / explosions
+    // High damping to prevent bouncing / explosions during initial settling
     for (const { body } of physics.meshBodies) {
         if (!body || !body.isValid?.()) continue;
-        body.setLinearDamping(2.0);
-        body.setAngularDamping(5.0);
+        body.setLinearDamping(3.0);
+        body.setAngularDamping(6.0);
     }
 
     physics.start();
@@ -1936,11 +2036,18 @@ async function initGravitySimulation() {
 
 async function applyGravityTest() {
     if (!state.sceneManager?.lastPlacement) return;
+    // Guard against double-click race: if we're already initialising, bail out
+    if (state._gravityStarting) return;
 
     if (!state.gravitySimulation) {
-        const sim = await initGravitySimulation();
-        if (!sim) return;
-        state.gravitySimulation = sim;
+        state._gravityStarting = true;
+        try {
+            const sim = await initGravitySimulation();
+            if (!sim) return;
+            state.gravitySimulation = sim;
+        } finally {
+            state._gravityStarting = false;
+        }
     }
 
     const sim = state.gravitySimulation;
@@ -1967,10 +2074,11 @@ async function applyGravityTest() {
                 elements.simulationStatus.textContent = 'Vibrant per compactar...';
             }
         } else if (sim.phase === 'vibrating') {
-            // Vibration settle — reduce damping slightly and unlock rotations
+            // Vibration settle — unlock rotations and reduce damping for final settling
             sim.phase = 'settling';
             sim.physics.settledCount = 0;
-            // Slightly relax damping for final settling
+            sim.physics.lockAllRotations(false);
+            // Slightly relax damping for natural settling
             for (const { body } of sim.physics.meshBodies) {
                 if (!body || !body.isValid?.()) continue;
                 body.setLinearDamping(1.0);
@@ -2013,6 +2121,8 @@ async function applyGravityTest() {
             if (elements.simulationStatus) {
                 elements.simulationStatus.textContent = `⚠️ Temps de simulació esgotat — ${insideCount} peces a la caixa`;
             }
+            // Full cleanup via stopGravitySimulation to release physics resources
+            stopGravitySimulation();
             return;
         }
 
@@ -2020,6 +2130,14 @@ async function applyGravityTest() {
         if (sim.phase === 'vibrating' && !sim.physics.isVibrating) {
             sim.phase = 'settling';
             sim.physics.settledCount = 0;
+            // Unlock rotations so pieces can find their final stable orientation
+            sim.physics.lockAllRotations(false);
+            // Slightly relax damping for natural settling
+            for (const { body } of sim.physics.meshBodies) {
+                if (!body || !body.isValid?.()) continue;
+                body.setLinearDamping(1.0);
+                body.setAngularDamping(3.0);
+            }
             if (elements.simulationStatus) {
                 elements.simulationStatus.textContent = 'Assentament final...';
             }

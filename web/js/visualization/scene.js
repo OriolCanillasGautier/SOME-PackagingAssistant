@@ -22,6 +22,153 @@ if (THREE.Mesh.prototype.raycast !== acceleratedRaycast) {
     THREE.Mesh.prototype.raycast = acceleratedRaycast;
 }
 
+/**
+ * Compute placement score for heightmap packing.
+ * Lower score = better placement.
+ * Strategy:
+ *   - Fill lowest positions first (baseH * 1000)
+ *   - Gentle adjacency bonus (density without excessive clustering)
+ *   - Wall-proximity bonus (fill edges first for stability)
+ *   - Stability bonus on ground layer (prefer larger footprint orientations)
+ *   - Small layer-balance penalty (discourage going too high too fast)
+ */
+function _packingScore(baseH, gx, gz, od, heightMap, gridNX, gridNZ, placed, boxH) {
+    const { pieceNX, pieceNZ } = od;
+
+    // Primary: strongly prefer lower base height (fill floor, then stack)
+    let score = baseH * 1000;
+
+    // Layer-balance: small penalty that grows with height.
+    // Prevents the algorithm from being too greedy about filling
+    // a single column all the way up before moving to the next.
+    if (boxH > 0) {
+        score += (baseH / boxH) * 5;
+    }
+
+    // Stability bonus: on the ground layer (baseH ≈ 0), prefer orientations
+    // with a larger base footprint (more stable under gravity).
+    if (baseH < 0.5 && od.footprintArea) {
+        // Normalise: larger footprint → lower score → preferred.
+        // Max footprint ≈ sizeX * sizeZ, so normalise against that.
+        const maxFP = od.sizeX * od.sizeZ;
+        const fpRatio = maxFP > 0 ? od.footprintArea / maxFP : 0;
+        score -= fpRatio * 2;  // up to -2 bonus for full-footprint orientations
+    }
+
+    // Gentle adjacency bonus: prefer positions next to already-placed pieces
+    // (density), but not so strong it causes excessive clustering.
+    let adjacentOccupied = 0;
+    if (gx > 0) {
+        for (let pz = 0; pz < pieceNZ; pz++) {
+            if (heightMap[(gz + pz) * gridNX + (gx - 1)] > 0) adjacentOccupied++;
+        }
+    }
+    if (gx + pieceNX < gridNX) {
+        for (let pz = 0; pz < pieceNZ; pz++) {
+            if (heightMap[(gz + pz) * gridNX + (gx + pieceNX)] > 0) adjacentOccupied++;
+        }
+    }
+    if (gz > 0) {
+        for (let px = 0; px < pieceNX; px++) {
+            if (heightMap[(gz - 1) * gridNX + (gx + px)] > 0) adjacentOccupied++;
+        }
+    }
+    if (gz + pieceNZ < gridNZ) {
+        for (let px = 0; px < pieceNX; px++) {
+            if (heightMap[(gz + pieceNZ) * gridNX + (gx + px)] > 0) adjacentOccupied++;
+        }
+    }
+    score -= adjacentOccupied * 0.15;
+
+    // Wall-proximity bonus: prefer positions touching container walls
+    // for more stable, efficient packing (fill from edges inward).
+    let wallBonus = 0;
+    if (gx === 0) wallBonus++;
+    if (gz === 0) wallBonus++;
+    if (gx + pieceNX >= gridNX - 1) wallBonus++;
+    if (gz + pieceNZ >= gridNZ - 1) wallBonus++;
+    score -= wallBonus * 0.3;
+
+    // Tie-break: prefer positions closer to origin (consistent, predictable fill)
+    score += (gx + gz) * 0.01;
+
+    return score;
+}
+
+/**
+ * Build orientation data (heightmap, mask, BVH) for a single piece geometry.
+ * Returns null if piece does not fit in box.
+ */
+async function _buildOrientData(srcGeometry, cellSize, boxL, boxW, boxH, maybeYield) {
+    const geometry = srcGeometry.clone();
+    geometry.computeVertexNormals();
+    geometry.computeBoundingBox();
+
+    const bbox = geometry.boundingBox;
+    const center = new THREE.Vector3();
+    bbox.getCenter(center);
+    const sizeX = bbox.max.x - bbox.min.x;
+    const sizeY = bbox.max.y - bbox.min.y;
+    const sizeZ = bbox.max.z - bbox.min.z;
+
+    if (sizeX > boxL || sizeZ > boxW || sizeY > boxH) return null;
+
+    // Align base to y=0 and center in X/Z
+    geometry.translate(-center.x, -bbox.min.y, -center.z);
+
+    // Build BVH for lateral collision testing
+    if (typeof geometry.computeBoundsTree === 'function') {
+        geometry.computeBoundsTree();
+    }
+
+    const positions = geometry.getAttribute('position');
+    const vertexCount = positions ? positions.count : 0;
+    if (!positions || vertexCount === 0) return null;
+
+    const pieceNX = Math.max(1, Math.ceil(sizeX / cellSize));
+    const pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize));
+    const pieceHeights = new Float32Array(pieceNX * pieceNZ);
+    const pieceMask = new Uint8Array(pieceNX * pieceNZ);
+
+    let minY = Infinity;
+    for (let i = 0; i < vertexCount; i++) {
+        minY = Math.min(minY, positions.getY(i));
+        if ((i & 4095) === 0) await maybeYield();
+    }
+    const baseEps = Math.max(0.5, sizeY * 0.02);
+
+    for (let i = 0; i < vertexCount; i++) {
+        const x = positions.getX(i) + sizeX / 2;
+        const y = positions.getY(i);
+        const z = positions.getZ(i) + sizeZ / 2;
+        const ix = Math.min(pieceNX - 1, Math.max(0, Math.floor(x / cellSize)));
+        const iz = Math.min(pieceNZ - 1, Math.max(0, Math.floor(z / cellSize)));
+        const idx = iz * pieceNX + ix;
+        if (y > pieceHeights[idx]) pieceHeights[idx] = y;
+        if (y <= minY + baseEps) pieceMask[idx] = 1;
+        if ((i & 4095) === 0) await maybeYield();
+    }
+
+    const localBbox = new THREE.Box3(
+        new THREE.Vector3(-sizeX / 2, 0, -sizeZ / 2),
+        new THREE.Vector3(sizeX / 2, sizeY, sizeZ / 2)
+    );
+
+    // Compute base footprint area: count how many cells have base-contact
+    // vertices. Larger footprint = more stable placement on ground.
+    let baseCellCount = 0;
+    for (let i = 0; i < pieceMask.length; i++) {
+        if (pieceMask[i]) baseCellCount++;
+    }
+    const footprintArea = baseCellCount * cellSize * cellSize;
+
+    return {
+        geometry, positions, sizeX, sizeY, sizeZ,
+        pieceNX, pieceNZ, pieceHeights, pieceMask, localBbox,
+        footprintArea
+    };
+}
+
 export class SceneManager {
     constructor(container) {
         this.container = container;
@@ -567,7 +714,7 @@ export class SceneManager {
         const pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize));
         const pieceHeights = new Float32Array(pieceNX * pieceNZ);
         const pieceMask = new Uint8Array(pieceNX * pieceNZ);
-        const heightEps = Math.max(0.5, packingGap * 0.25);
+        const heightEps = Math.max(0.1, packingGap * 0.1);
 
         // Build piece height map + base footprint mask
         let minY = Infinity;
@@ -626,17 +773,16 @@ export class SceneManager {
 
         const candidateIntersectsAny = (candidateMatrix, candidateAabb) => {
             if (!geometry.boundsTree) return false;
-            const inflate = Math.max(0, packingGap * 0.5);
+            // Contact tolerance: ignore face-touching (coplanar triangle false positives)
+            const ct = 0.15;
             for (let i = 0; i < placedAabbs.length; i++) {
-                const otherAabb = placedAabbs[i];
-                // Broadphase AABB check
-                if ((candidateAabb.max.x + inflate) < (otherAabb.min.x - inflate) ||
-                    (candidateAabb.min.x - inflate) > (otherAabb.max.x + inflate) ||
-                    (candidateAabb.max.y + inflate) < (otherAabb.min.y - inflate) ||
-                    (candidateAabb.min.y - inflate) > (otherAabb.max.y + inflate) ||
-                    (candidateAabb.max.z + inflate) < (otherAabb.min.z - inflate) ||
-                    (candidateAabb.min.z - inflate) > (otherAabb.max.z + inflate)) continue;
-                // Precise BVH triangle-triangle
+                const o = placedAabbs[i];
+                if ((candidateAabb.max.x - ct) <= (o.min.x + ct) ||
+                    (candidateAabb.min.x + ct) >= (o.max.x - ct) ||
+                    (candidateAabb.max.y - ct) <= (o.min.y + ct) ||
+                    (candidateAabb.min.y + ct) >= (o.max.y - ct) ||
+                    (candidateAabb.max.z - ct) <= (o.min.z + ct) ||
+                    (candidateAabb.min.z + ct) >= (o.max.z - ct)) continue;
                 tmpInv.copy(placedMatrices[i]).invert();
                 tmpMatA.multiplyMatrices(tmpInv, candidateMatrix);
                 if (geometry.boundsTree.intersectsGeometry(geometry, tmpMatA)) return true;
@@ -771,23 +917,33 @@ export class SceneManager {
     }
 
     /**
-     * Async + abortable version of addPackedSTLHeightMap.
+     * Async + abortable heightmap packing with multi-orientation gap filling.
      * Yields to the browser regularly to keep UI responsive and to allow cancellation.
      *
+     * Supports multiple piece orientations: the primary geometry plus any number
+     * of alternate orientations. At each placement step the algorithm evaluates
+     * ALL orientations at ALL grid positions, picking the one with the best
+     * packing score (lowest height, gap-filling bonus, wall alignment).
+     *
      * @param {Object} params
-     * @param {THREE.BufferGeometry} params.stlGeometry
+     * @param {THREE.BufferGeometry} params.stlGeometry - primary orientation
+     * @param {Array<{geometry:THREE.BufferGeometry}>} [params.alternateOrientations] - extra orientations to try
      * @param {number} [params.maxDraw=500]
      * @param {number} [params.packingGap=0]
      * @param {number} [params.colorCount]
      * @param {number} params.boxL
      * @param {number} params.boxW
      * @param {number} params.boxH
+     * @param {boolean} [params.singleLayer=false] - When true, only pack the first layer (floor)
+     * @param {boolean} [params.replicateFirstLayer=false] - Pack first layer greedily, then replicate pattern upward
      * @param {boolean} [params.dryRun=false]
      * @param {AbortSignal} [params.abortSignal]
      * @param {(p:{placed:number,maxTry:number})=>void} [params.onProgress]
+     * @param {number} [params.cellSizeOverride] - If provided, use this cell size instead of computing from geometry
      */
     async addPackedSTLHeightMapAsync({
         stlGeometry,
+        alternateOrientations = [],
         maxDraw = 500,
         maxTry = null,
         packingGap = 0,
@@ -795,9 +951,12 @@ export class SceneManager {
         boxL = null,
         boxW = null,
         boxH = null,
+        singleLayer = false,
+        replicateFirstLayer = false,
         dryRun = false,
         abortSignal = null,
-        onProgress = null
+        onProgress = null,
+        cellSizeOverride = null
     }) {
         const abortError = () => new DOMException('Aborted', 'AbortError');
         const yieldBudgetMs = 8;
@@ -816,84 +975,43 @@ export class SceneManager {
         }
 
         if (boxL === null || boxW === null || boxH === null) {
-            // Fallback to regular packing if box dims are missing
             return this.addPackedSTLPieces({
                 stlGeometry,
-                pieceL: 0,
-                pieceW: 0,
-                pieceH: 0,
-                nx: 0,
-                ny: 0,
-                nz: 0,
-                maxDraw,
-                packingGap,
-                colorCount,
-                boxL,
-                boxW,
-                boxH,
+                pieceL: 0, pieceW: 0, pieceH: 0,
+                nx: 0, ny: 0, nz: 0,
+                maxDraw, packingGap, colorCount,
+                boxL, boxW, boxH,
                 strictGeometryCheck: true
             });
         }
 
         const numColors = colorCount || this.colorCount;
 
-        // Clone and prepare geometry
-        const geometry = stlGeometry.clone();
-        geometry.computeVertexNormals();
-        geometry.computeBoundingBox();
+        // --- Build orientation data for primary + alternates ---
+        // Use cellSizeOverride if provided (ensures dry-run and final pack use
+        // the same grid resolution). Otherwise compute from primary geometry.
+        stlGeometry.computeBoundingBox();
+        const primBbox = stlGeometry.boundingBox;
+        const primSX = primBbox.max.x - primBbox.min.x;
+        const primSZ = primBbox.max.z - primBbox.min.z;
+        const cellSize = (typeof cellSizeOverride === 'number' && Number.isFinite(cellSizeOverride))
+            ? cellSizeOverride
+            : Math.max(1, Math.min(4, Math.min(primSX, primSZ) / 20));
 
-        const bbox = geometry.boundingBox;
-        const center = new THREE.Vector3();
-        bbox.getCenter(center);
-        const sizeX = bbox.max.x - bbox.min.x;
-        const sizeY = bbox.max.y - bbox.min.y;
-        const sizeZ = bbox.max.z - bbox.min.z;
-
-        if (sizeX > boxL || sizeZ > boxW || sizeY > boxH) {
-            return { count: 0 };
+        // Build orientation data array
+        const allSrcGeometries = [stlGeometry, ...alternateOrientations.map(a => a.geometry).filter(Boolean)];
+        const orientData = [];
+        for (const src of allSrcGeometries) {
+            const od = await _buildOrientData(src, cellSize, boxL, boxW, boxH, maybeYield);
+            if (od) orientData.push(od);
         }
 
-        // Align base to y=0 and center in X/Z
-        geometry.translate(-center.x, -bbox.min.y, -center.z);
+        if (orientData.length === 0) return { count: 0 };
+        console.log(`[HeightMapAsync] ${orientData.length} orientation(s) prepared (cell=${cellSize.toFixed(1)}mm)`);
 
-        // Build BVH for lateral collision testing
-        if (typeof geometry.computeBoundsTree === 'function') {
-            geometry.computeBoundsTree();
-        }
-
-        const positions = geometry.getAttribute('position');
-        const vertexCount = positions ? positions.count : 0;
-        if (!positions || vertexCount === 0) return { count: 0 };
-
-        // Height-map resolution (finer grid => less artificial spacing)
-        const cellSize = Math.max(1, Math.min(4, Math.min(sizeX, sizeZ) / 20));
-        const pieceNX = Math.max(1, Math.ceil(sizeX / cellSize));
-        const pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize));
-        const pieceHeights = new Float32Array(pieceNX * pieceNZ);
-        const pieceMask = new Uint8Array(pieceNX * pieceNZ);
-        const heightEps = Math.max(0.5, packingGap * 0.25);
-
-        // Build piece height map + base footprint mask
-        let minY = Infinity;
-        for (let i = 0; i < vertexCount; i++) {
-            minY = Math.min(minY, positions.getY(i));
-            if ((i & 4095) === 0) await maybeYield();
-        }
-        const baseEps = Math.max(0.5, sizeY * 0.02);
-
-        for (let i = 0; i < vertexCount; i++) {
-            const x = positions.getX(i) + sizeX / 2;
-            const y = positions.getY(i);
-            const z = positions.getZ(i) + sizeZ / 2;
-            const ix = Math.min(pieceNX - 1, Math.max(0, Math.floor(x / cellSize)));
-            const iz = Math.min(pieceNZ - 1, Math.max(0, Math.floor(z / cellSize)));
-            const idx = iz * pieceNX + ix;
-            if (y > pieceHeights[idx]) pieceHeights[idx] = y;
-            if (y <= minY + baseEps) pieceMask[idx] = 1;
-            if ((i & 4095) === 0) await maybeYield();
-        }
-
-        const expandedMask = pieceMask;
+        // Use primary orientation for volume estimate
+        const primary = orientData[0];
+        const heightEps = Math.max(0.1, packingGap * 0.1);
 
         // Container height map
         const gridNX = Math.max(1, Math.ceil(boxL / cellSize));
@@ -910,193 +1028,332 @@ export class SceneManager {
         });
 
         const positionsOut = dryRun ? null : [];
+        const pieceDataOut = dryRun ? null : []; // per-piece orientation metadata
         let placed = 0;
 
-        // Adaptive maxTry from volume ratio if not provided
-        const pieceBBoxVol = sizeX * sizeY * sizeZ;
-        const boxVolume = boxL * boxW * boxH;
-        const effectiveMaxTry = maxTry != null ? maxTry : Math.min(2000, Math.max(maxDraw, Math.ceil(boxVolume / pieceBBoxVol * 1.2)));
+        // AABB collision array: stores every placed piece's world bounding box
+        // so the scan loop can reject candidates that physically overlap.
+        const placedAABBs = [];  // { minX, minY, minZ, maxX, maxY, maxZ }
+        const aabbCT = 0.05;     // contact tolerance — allow face-touching
 
-        // BVH collision infrastructure — prevents lateral mesh penetration
-        const placedAabbs = [];
-        const placedMatrices = [];
-        const localBbox = new THREE.Box3(
-            new THREE.Vector3(-sizeX / 2, 0, -sizeZ / 2),
-            new THREE.Vector3(sizeX / 2, sizeY, sizeZ / 2)
-        );
-        const tmpMatA = new THREE.Matrix4();
-        const tmpMatB = new THREE.Matrix4();
-        const tmpInv = new THREE.Matrix4();
-        const tmpBox = new THREE.Box3();
-
-        const candidateIntersectsAny = (candidateMatrix, candidateAabb) => {
-            if (!geometry.boundsTree) return false;
-            const inflate = Math.max(0, packingGap * 0.5);
-            for (let i = 0; i < placedAabbs.length; i++) {
-                const otherAabb = placedAabbs[i];
-                if ((candidateAabb.max.x + inflate) < (otherAabb.min.x - inflate) ||
-                    (candidateAabb.min.x - inflate) > (otherAabb.max.x + inflate) ||
-                    (candidateAabb.max.y + inflate) < (otherAabb.min.y - inflate) ||
-                    (candidateAabb.min.y - inflate) > (otherAabb.max.y + inflate) ||
-                    (candidateAabb.max.z + inflate) < (otherAabb.min.z - inflate) ||
-                    (candidateAabb.min.z - inflate) > (otherAabb.max.z + inflate)) continue;
-                tmpInv.copy(placedMatrices[i]).invert();
-                tmpMatA.multiplyMatrices(tmpInv, candidateMatrix);
-                if (geometry.boundsTree.intersectsGeometry(geometry, tmpMatA)) return true;
-            }
-            return false;
-        };
-
-        // Consecutive-failure counter: resets on each successful placement
         let consecutiveSkips = 0;
-        const maxConsecutiveSkips = Math.max(200, Math.ceil(boxVolume / pieceBBoxVol) * 3);
+        const maxConsecutiveSkips = Math.max(500, gridNX * gridNZ * 2);
 
-        // Render output via instancing (avoids N meshes)
-        let instancedMesh = null;
+        // --- Replicate-first-layer state ---
+        // When replicateFirstLayer is active, we run the normal greedy scan for
+        // the ground layer only, then stamp the same pattern at each subsequent
+        // layer height until the box is full or maxDraw is reached.
+        const firstLayerPlacements = [];  // { gx, gz, orientIdx }
+        let replicatePhase = false;       // true once we start replicating
+
+        // --- Rendering: one InstancedMesh per orientation ---
+        const instancedMeshes = [];
+        const orientCounts = new Array(orientData.length).fill(0);
         const tmpObj = new THREE.Object3D();
         if (!dryRun) {
-            instancedMesh = new THREE.InstancedMesh(geometry, material, effectiveMaxTry);
-            instancedMesh.castShadow = true;
-            instancedMesh.receiveShadow = true;
+            for (const od of orientData) {
+                const im = new THREE.InstancedMesh(od.geometry, material.clone(), maxDraw);
+                im.castShadow = true;
+                im.receiveShadow = true;
+                instancedMeshes.push(im);
+            }
         }
 
-        while (placed < effectiveMaxTry) {
+        // ===== MAIN PLACEMENT LOOP (capped by maxDraw = weight limit) =====
+        while (placed < maxDraw) {
             if (abortSignal?.aborted) throw abortError();
             await maybeYield();
 
-            let bestX = -1;
-            let bestZ = -1;
-            let bestH = Infinity;
+            // ---------------------------------------------------------------
+            // REPLICATE-FIRST-LAYER PHASE
+            // Once the first layer is complete, stamp the same pattern at
+            // successive heights until the box is full or maxDraw is reached.
+            // ---------------------------------------------------------------
+            if (replicatePhase) {
+                let layerPlaced = 0;
+                for (const fp of firstLayerPlacements) {
+                    if (placed >= maxDraw) break;
+                    if (abortSignal?.aborted) throw abortError();
+                    await maybeYield();
 
-            const scanTotal = Math.max(1, (gridNZ - pieceNZ + 1) * (gridNX - pieceNX + 1));
-            let scanIndex = 0;
+                    const od = orientData[fp.orientIdx];
+                    const { sizeX, sizeY, sizeZ, pieceNX, pieceNZ, pieceHeights } = od;
 
-            for (let gz = 0; gz <= gridNZ - pieceNZ; gz++) {
-                for (let gx = 0; gx <= gridNX - pieceNX; gx++) {
-                    scanIndex++;
-                    if (((gx + gz) & 255) === 0) {
-                        await maybeYield();
-                        if (onProgress) {
-                            onProgress({ placed: placed + (scanIndex / scanTotal), maxTry: effectiveMaxTry });
-                        }
-                    }
-
-                    const x0 = gx * cellSize;
-                    const z0 = gz * cellSize;
-                    if (x0 + sizeX > boxL || z0 + sizeZ > boxW) continue;
-
+                    // Find base height at this XZ position
                     let baseH = 0;
                     for (let pz = 0; pz < pieceNZ; pz++) {
                         for (let px = 0; px < pieceNX; px++) {
-                            const pIdx = pz * pieceNX + px;
-                            if (!expandedMask[pIdx]) continue;
-                            const hIdx = (gz + pz) * gridNX + (gx + px);
+                            const hIdx = (fp.gz + pz) * gridNX + (fp.gx + px);
                             if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
                         }
                     }
 
-                    if (baseH >= bestH) continue;
+                    // Height fit check
+                    if (baseH + sizeY > boxH + heightEps) continue;
 
-                    let fits = true;
-                    for (let pz = 0; pz < pieceNZ && fits; pz++) {
+                    // AABB collision check
+                    let collides = false;
+                    const cMinX = fp.gx * cellSize + aabbCT;
+                    const cMaxX = fp.gx * cellSize + sizeX - aabbCT;
+                    const cMinY = baseH + aabbCT;
+                    const cMaxY = baseH + sizeY - aabbCT;
+                    const cMinZ = fp.gz * cellSize + aabbCT;
+                    const cMaxZ = fp.gz * cellSize + sizeZ - aabbCT;
+                    for (let pi = 0; pi < placedAABBs.length; pi++) {
+                        const p = placedAABBs[pi];
+                        if (cMaxX <= p.minX || cMinX >= p.maxX ||
+                            cMaxY <= p.minY || cMinY >= p.maxY ||
+                            cMaxZ <= p.minZ || cMinZ >= p.maxZ) continue;
+                        collides = true;
+                        break;
+                    }
+                    if (collides) continue;
+
+                    // Place the piece
+                    const posX = fp.gx * cellSize + sizeX / 2;
+                    const posZ = fp.gz * cellSize + sizeZ / 2;
+                    const posY = baseH;
+
+                    if (!dryRun) {
+                        const im = instancedMeshes[fp.orientIdx];
+                        const idx = orientCounts[fp.orientIdx];
+                        tmpObj.position.set(posX, posY, posZ);
+                        tmpObj.rotation.set(0, 0, 0);
+                        tmpObj.updateMatrix();
+                        im.setMatrixAt(idx, tmpObj.matrix);
+                        const colorIndex = placed % numColors;
+                        const color = new THREE.Color(this.pieceColors[colorIndex]);
+                        im.setColorAt(idx, color);
+                        positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+                        pieceDataOut.push({ orientIdx: fp.orientIdx });
+                    }
+                    orientCounts[fp.orientIdx]++;
+
+                    placedAABBs.push({
+                        minX: fp.gx * cellSize,
+                        maxX: fp.gx * cellSize + sizeX,
+                        minY: baseH,
+                        maxY: baseH + sizeY,
+                        minZ: fp.gz * cellSize,
+                        maxZ: fp.gz * cellSize + sizeZ
+                    });
+
+                    const top = baseH + sizeY + packingGap;
+                    for (let pz = 0; pz < pieceNZ; pz++) {
                         for (let px = 0; px < pieceNX; px++) {
-                            const pIdx = pz * pieceNX + px;
-                            if (!expandedMask[pIdx]) continue;
-                            const top = baseH + pieceHeights[pIdx];
-                            if (top + heightEps > boxH) {
-                                fits = false;
-                                break;
-                            }
+                            const hIdx = (fp.gz + pz) * gridNX + (fp.gx + px);
+                            if (top > heightMap[hIdx]) heightMap[hIdx] = top;
                         }
                     }
 
-                    if (fits) {
-                        bestH = baseH;
-                        bestX = gx;
-                        bestZ = gz;
+                    placed++;
+                    layerPlaced++;
+                    if (onProgress && (placed % 5 === 0 || placed === maxDraw)) {
+                        onProgress({ placed, maxTry: maxDraw });
                     }
                 }
-            }
 
-            if (bestX < 0 || bestZ < 0 || !Number.isFinite(bestH)) break;
-
-            // Full bounding box height guard — piece must fit entirely within box
-            if (bestH + sizeY > boxH + 0.01) break;
-
-            // Build candidate transform + AABB
-            const posX = bestX * cellSize + sizeX / 2;
-            const posZ = bestZ * cellSize + sizeZ / 2;
-            const posY = bestH;
-            tmpMatB.makeTranslation(posX, posY, posZ);
-            tmpBox.copy(localBbox).applyMatrix4(tmpMatB);
-
-            // BVH collision check — prevent lateral penetration
-            if (candidateIntersectsAny(tmpMatB, tmpBox)) {
-                const bump = cellSize;
-                for (let pz = 0; pz < pieceNZ; pz++) {
-                    for (let px = 0; px < pieceNX; px++) {
-                        const pIdx = pz * pieceNX + px;
-                        if (!expandedMask[pIdx]) continue;
-                        const hIdx = (bestZ + pz) * gridNX + (bestX + px);
-                        const newH = bestH + bump;
-                        if (newH > heightMap[hIdx]) heightMap[hIdx] = newH;
-                    }
+                // If no pieces could be placed this layer, we're done
+                if (layerPlaced === 0) {
+                    console.log(`[HeightMapAsync] Replicate phase complete: no more layers fit after ${placed} piece(s)`);
+                    break;
                 }
-                if (++consecutiveSkips > maxConsecutiveSkips) break;
+                // Otherwise continue the while loop to try the next layer
                 continue;
             }
-            consecutiveSkips = 0; // Reset on successful placement
 
+            // ---------------------------------------------------------------
+            // GREEDY SCAN PHASE (first layer, or all layers if not replicating)
+            // ---------------------------------------------------------------
+            let bestScore = Infinity;
+            let bestGX = -1;
+            let bestGZ = -1;
+            let bestBaseH = Infinity;
+            let bestOrientIdx = -1;
+
+            // Scan all orientations × all grid positions
+            for (let oi = 0; oi < orientData.length; oi++) {
+                const od = orientData[oi];
+                const { pieceNX, pieceNZ, pieceMask, pieceHeights, sizeX, sizeY, sizeZ } = od;
+
+                for (let gz = 0; gz <= gridNZ - pieceNZ; gz++) {
+                    for (let gx = 0; gx <= gridNX - pieceNX; gx++) {
+                        if (((gx + gz) & 511) === 0) {
+                            await maybeYield();
+                            if (onProgress) {
+                                onProgress({ placed, maxTry: maxDraw });
+                            }
+                        }
+
+                        // Bounds check
+                        const x0 = gx * cellSize;
+                        const z0 = gz * cellSize;
+                        if (x0 + sizeX > boxL + 0.01 || z0 + sizeZ > boxW + 0.01) continue;
+
+                        // Compute base height under the piece's exact footprint.
+                        // The AABB collision check is the real safety net;
+                        // heightmap just needs to be accurate for good density.
+                        let baseH = 0;
+                        for (let pz = 0; pz < pieceNZ; pz++) {
+                            for (let px = 0; px < pieceNX; px++) {
+                                const hIdx = (gz + pz) * gridNX + (gx + px);
+                                if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
+                            }
+                        }
+
+                        // Quick height fit check: piece (full sizeY) must fit in box
+                        if (baseH + sizeY > boxH + heightEps) continue;
+
+                        // In replicate mode, only allow ground-layer placements
+                        // during the greedy phase (first layer only).
+                        if (replicateFirstLayer && baseH > 0.5) continue;
+
+                        // Compute placement score (lower = better)
+                        const score = _packingScore(
+                            baseH, gx, gz, od, heightMap, gridNX, gridNZ, placed, boxH
+                        );
+                        if (score >= bestScore) continue;
+
+                        // AABB collision check: verify candidate doesn't overlap
+                        // any already-placed piece's bounding box.  This catches
+                        // any residual overlap the heightmap might miss (e.g.
+                        // multi-orientation footprint mismatch or float rounding).
+                        let collides = false;
+                        const cMinX = gx * cellSize + aabbCT;
+                        const cMaxX = gx * cellSize + sizeX - aabbCT;
+                        const cMinY = baseH + aabbCT;
+                        const cMaxY = baseH + sizeY - aabbCT;
+                        const cMinZ = gz * cellSize + aabbCT;
+                        const cMaxZ = gz * cellSize + sizeZ - aabbCT;
+                        for (let pi = 0; pi < placedAABBs.length; pi++) {
+                            const p = placedAABBs[pi];
+                            if (cMaxX <= p.minX || cMinX >= p.maxX ||
+                                cMaxY <= p.minY || cMinY >= p.maxY ||
+                                cMaxZ <= p.minZ || cMinZ >= p.maxZ) continue;
+                            collides = true;
+                            break;
+                        }
+                        if (collides) continue;
+
+                        bestScore = score;
+                        bestGX = gx;
+                        bestGZ = gz;
+                        bestBaseH = baseH;
+                        bestOrientIdx = oi;
+                    }
+                }
+            }
+
+            // No valid position found for any orientation → layer/box is full
+            if (bestOrientIdx < 0 || bestGX < 0 || bestGZ < 0) {
+                // If replicate mode: first layer is done → switch to replication phase
+                if (replicateFirstLayer && firstLayerPlacements.length > 0) {
+                    console.log(`[HeightMapAsync] First layer complete: ${firstLayerPlacements.length} piece(s). Starting replication...`);
+                    replicatePhase = true;
+                    continue;  // re-enter while loop in replicate phase
+                }
+                break;
+            }
+
+            // Single-layer mode: stop when floor is completely filled
+            if (singleLayer && bestBaseH > 0.5) {
+                console.log(`[HeightMapAsync] Single-layer complete: floor full after ${placed} piece(s)`);
+                break;
+            }
+
+            const od = orientData[bestOrientIdx];
+            const { sizeX, sizeY, sizeZ, pieceNX, pieceNZ, pieceMask, pieceHeights } = od;
+
+            // Compute world position
+            const posX = bestGX * cellSize + sizeX / 2;
+            const posZ = bestGZ * cellSize + sizeZ / 2;
+            const posY = bestBaseH;
+
+            // --- Place piece ---
             if (!dryRun) {
+                const im = instancedMeshes[bestOrientIdx];
+                const idx = orientCounts[bestOrientIdx]; // Note: orientCounts incremented below with cache
                 tmpObj.position.set(posX, posY, posZ);
                 tmpObj.rotation.set(0, 0, 0);
                 tmpObj.updateMatrix();
-                instancedMesh.setMatrixAt(placed, tmpObj.matrix);
+                im.setMatrixAt(idx, tmpObj.matrix);
 
                 const colorIndex = placed % numColors;
                 const color = new THREE.Color(this.pieceColors[colorIndex]);
-                instancedMesh.setColorAt(placed, color);
+                im.setColorAt(idx, color);
                 positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+                pieceDataOut.push({ orientIdx: bestOrientIdx });
             }
 
-            // Cache placement for collision checks
-            placedAabbs.push(tmpBox.clone());
-            placedMatrices.push(tmpMatB.clone());
+            // Track orient counts (used for rendering instance index)
+            orientCounts[bestOrientIdx]++;
 
-            // Update height map
+            // Store AABB for collision checks by subsequent placements
+            placedAABBs.push({
+                minX: bestGX * cellSize,
+                maxX: bestGX * cellSize + sizeX,
+                minY: bestBaseH,
+                maxY: bestBaseH + sizeY,
+                minZ: bestGZ * cellSize,
+                maxZ: bestGZ * cellSize + sizeZ
+            });
+
+            // Update height map for the piece's exact footprint.
+            // No buffer — tight packing requires precise heightmap data.
+            // The AABB collision check prevents any actual overlap.
+            const top = bestBaseH + sizeY + packingGap;
             for (let pz = 0; pz < pieceNZ; pz++) {
                 for (let px = 0; px < pieceNX; px++) {
-                    const pIdx = pz * pieceNX + px;
-                    if (!expandedMask[pIdx]) continue;
-                    const hIdx = (bestZ + pz) * gridNX + (bestX + px);
-                    const top = bestH + pieceHeights[pIdx] + packingGap;
+                    const hIdx = (bestGZ + pz) * gridNX + (bestGX + px);
                     if (top > heightMap[hIdx]) heightMap[hIdx] = top;
                 }
             }
 
+            // Record first-layer placement for replication
+            if (replicateFirstLayer && bestBaseH < 0.5) {
+                firstLayerPlacements.push({ gx: bestGX, gz: bestGZ, orientIdx: bestOrientIdx });
+            }
+
             placed++;
-            if (onProgress && (placed === 1 || (placed % 5) === 0 || placed === effectiveMaxTry)) {
-                onProgress({ placed, maxTry: effectiveMaxTry });
+            consecutiveSkips = 0;
+            if (onProgress && (placed === 1 || (placed % 5) === 0 || placed === maxDraw)) {
+                onProgress({ placed, maxTry: maxDraw });
             }
         }
 
-        console.log(`[HeightMapAsync] placed=${placed}, maxTry=${effectiveMaxTry}, consecutiveSkips=${consecutiveSkips}`);
+        // Log per-orientation breakdown
+        const orientBreakdown = orientCounts.map((c, i) => `orient${i}=${c}`).join(', ');
+        console.log(`[HeightMapAsync] placed=${placed} (${orientBreakdown}), maxDraw=${maxDraw}, skips=${consecutiveSkips}`);
+        const hMapMin = Math.min(...heightMap);
+        const hMapMax = Math.max(...heightMap);
+        console.log(`[HeightMapAsync] heightMap range: [${hMapMin.toFixed(1)}, ${hMapMax.toFixed(1)}], boxH=${boxH}`);
 
+        // --- Finalize rendering ---
         if (!dryRun) {
-            instancedMesh.count = placed;
-            instancedMesh.instanceMatrix.needsUpdate = true;
-            if (instancedMesh.instanceColor) {
-                instancedMesh.instanceColor.needsUpdate = true;
+            for (let oi = 0; oi < instancedMeshes.length; oi++) {
+                const im = instancedMeshes[oi];
+                const cnt = orientCounts[oi];
+                im.count = cnt;
+                im.instanceMatrix.needsUpdate = true;
+                if (im.instanceColor) im.instanceColor.needsUpdate = true;
+                if (cnt > 0) {
+                    this.scene.add(im);
+                    this.pieces.push(im);
+                }
             }
-            this.scene.add(instancedMesh);
-            this.pieces.push(instancedMesh);
 
             this.lastPlacement = {
                 type: 'stl',
-                dims: { l: sizeX, w: sizeZ, h: sizeY },
-                geometry,
-                vertices: positions ? new Float32Array(positions.array) : null,
+                dims: { l: primary.sizeX, w: primary.sizeZ, h: primary.sizeY },
+                geometry: primary.geometry,
+                vertices: primary.positions ? new Float32Array(primary.positions.array) : null,
                 positions: positionsOut,
+                pieceData: pieceDataOut,
+                orientations: orientData.map(od => ({
+                    geometry: od.geometry,
+                    vertices: od.positions ? new Float32Array(od.positions.array) : null,
+                    sizeX: od.sizeX, sizeY: od.sizeY, sizeZ: od.sizeZ
+                })),
                 boxDims: { l: boxL, w: boxW, h: boxH }
             };
         }

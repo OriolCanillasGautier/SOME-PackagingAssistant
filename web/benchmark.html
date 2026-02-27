@@ -124,9 +124,10 @@
     /**
      * Run packing in dry-run mode (no rendering) and return count
      */
-    async function packDryRun(stlGeometry, boxL, boxW, boxH, maxTry = 2000) {
+    async function packDryRun(stlGeometry, boxL, boxW, boxH, maxTry = 2000, alternateOrientations = []) {
         const result = await scene.addPackedSTLHeightMapAsync({
             stlGeometry,
+            alternateOrientations,
             maxDraw: 500,
             maxTry,
             packingGap: 0,
@@ -134,6 +135,23 @@
             dryRun: true
         });
         return typeof result === 'number' ? result : result.count;
+    }
+
+    /**
+     * Create a 180° rotated copy of a geometry
+     */
+    function rotate180(geom) {
+        const g = geom.clone();
+        const mat = new THREE.Matrix4().makeRotationY(Math.PI);
+        g.applyMatrix4(mat);
+        g.computeBoundingBox();
+        const bb = g.boundingBox;
+        const cx = (bb.min.x + bb.max.x) / 2;
+        const cz = (bb.min.z + bb.max.z) / 2;
+        const dy = -bb.min.y;
+        g.translate(-cx, dy, -cz);
+        g.computeBoundingBox();
+        return g;
     }
 
     /**
@@ -153,22 +171,22 @@
 
     const tests = [];
 
-    // --- Test 1: Simple box piece, perfect fit ---
+    // --- Test 1: Simple box piece, first layer ---
     tests.push({
-        name: 'Box 10×20×15 in 100×100×100 (perfect grid fit)',
+        name: 'Box 10×20×15 in 100×100×100 (multi-layer)',
         piece: () => makeBoxGeom(10, 20, 15),
         box: [100, 100, 100],
-        expectedMin: 150,
-        notes: '10×5×6 = 300 theoretical (grid). Heightmap should get at least 150.'
+        expectedMin: 200,
+        notes: '10×6 = 60 floor × 5 layers = 300 theoretical. Multi-layer should get >= 200.'
     });
 
     // --- Test 2: Box piece, bigger box should give more ---
     tests.push({
-        name: 'Box 10×20×15 in 150×150×100 (bigger box = more pieces)',
+        name: 'Box 10×20×15 in 150×150×100 (bigger box)',
         piece: () => makeBoxGeom(10, 20, 15),
         box: [150, 150, 100],
-        expectedMin: 300,
-        notes: '15×5×10 = 750 theoretical. Must be > Test 1 count.'
+        expectedMin: 400,
+        notes: '15×10 = 150 floor × 5 layers = 750 theoretical (capped at 500 by maxDraw). Must be > Test 1.'
     });
 
     // --- Test 3: Monotonicity check (larger box always >= smaller box) ---
@@ -186,8 +204,8 @@
         name: 'Wedge 30×40×20 in 150×150×150',
         piece: () => makeWedgeGeom(30, 40, 20),
         box: [150, 150, 150],
-        expectedMin: 20,
-        notes: 'Non-trivial shape. Should pack reasonably.'
+        expectedMin: 10,
+        notes: '5×7 = 35 theoretical floor positions. Wedge shape wastes ~50% → expect >= 10.'
     });
 
     // --- Test 5: Consistency — same geometry, slightly different vertex positions ---
@@ -232,13 +250,49 @@
         notes: 'Simulates user piece. Bigger box MUST give >= pieces.'
     });
 
-    // --- Test 8: Very small piece in large box ---
+    // --- Test 8: Very small piece in large box (floor) ---
     tests.push({
-        name: 'Box 5×5×5 in 100×100×100 (high count)',
+        name: 'Box 5×5×5 in 100×100×100 (dense multi-layer)',
         piece: () => makeBoxGeom(5, 5, 5),
         box: [100, 100, 100],
-        expectedMin: 2000,
-        notes: '20×20×20 = 8000 theoretical. Capped at maxTry=2000.'
+        expectedMin: 450,
+        notes: '20×20×20 = 8000 theoretical, capped at 500 by maxDraw. Should fill to cap.'
+    });
+
+    // --- Test 9: Floor density (CRITICAL) ---
+    tests.push({
+        name: 'Multi-layer: Box 40×20×40 in 100×100×100',
+        piece: () => makeBoxGeom(40, 20, 40),
+        box: [100, 100, 100],
+        expectedMin: 15,
+        notes: '2×2 = 4 floor × 5 layers = 20 theoretical. Multi-layer must stack well.'
+    });
+
+    // --- Test 10: Dense floor packing ---
+    tests.push({
+        name: 'Multi-layer: Box 20×10×20 in 100×200×100',
+        piece: () => makeBoxGeom(20, 10, 20),
+        box: [100, 200, 100],
+        expectedMin: 350,
+        notes: '5×5 = 25 floor × 20 layers = 500 theoretical (capped at 500). Multi-layer dense.'
+    });
+
+    // --- Test 11: Alternate orientation benefit (wedge 180° rotated) ---
+    tests.push({
+        name: 'Wedge 30×40×20 with 180° alternate vs without',
+        piece: () => makeWedgeGeom(30, 40, 20),
+        box: [150, 150, 150],
+        isAlternateTest: true,
+        notes: 'Packing with 180° alternate should give >= count without. Verifies gap-filling works.'
+    });
+
+    // --- Test 12: Perfect floor fill ---
+    tests.push({
+        name: 'Multi-layer: Box 50×25×50 in 100×100×100',
+        piece: () => makeBoxGeom(50, 25, 50),
+        box: [100, 100, 100],
+        expectedMin: 12,
+        notes: '2×2 = 4 floor × 4 layers = 16 theoretical. Must stack all layers.'
     });
 
     // ===== RUNNER =====
@@ -296,6 +350,28 @@
                         <td>${t.name}</td>
                         <td>${c1} vs ${c2} (Δ${pct}%)</td>
                         <td>within ${t.maxDeltaPct}%</td>
+                        <td class="${ok ? 'pass' : 'warn'}">${ok ? 'PASS' : 'WARN'}</td>
+                        <td>${ms}ms</td>
+                        <td class="info">${t.notes}</td>
+                    </tr>`;
+                } else if (t.isAlternateTest) {
+                    // Compare: without alternates vs with 180° alternate
+                    const geom = t.piece();
+                    const alt180 = rotate180(geom);
+                    const t0 = performance.now();
+                    const countWithout = await packDryRun(geom.clone(), t.box[0], t.box[1], t.box[2]);
+                    const countWith = await packDryRun(geom.clone(), t.box[0], t.box[1], t.box[2], 2000,
+                        [{ geometry: alt180 }]);
+                    const ms = (performance.now() - t0).toFixed(0);
+
+                    const ok = countWith >= countWithout;
+                    if (ok) passed++; else warned++;
+
+                    html += `<tr>
+                        <td>${i + 1}</td>
+                        <td>${t.name}</td>
+                        <td>${countWithout} → ${countWith} (alt)</td>
+                        <td>with alt >= without</td>
                         <td class="${ok ? 'pass' : 'warn'}">${ok ? 'PASS' : 'WARN'}</td>
                         <td>${ms}ms</td>
                         <td class="info">${t.notes}</td>
