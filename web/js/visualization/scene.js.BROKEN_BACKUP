@@ -788,8 +788,7 @@ export class SceneManager {
      */
     async addPackedSTLHeightMapAsync({
         stlGeometry,
-        orientationPool = null,
-        useMixedOrientations = false,
+        alternateOrientations = [],
         maxDraw = 500,
         maxTry = null,
         packingGap = 0,
@@ -797,9 +796,12 @@ export class SceneManager {
         boxL = null,
         boxW = null,
         boxH = null,
+        singleLayer = false,
+        replicateFirstLayer = false,
         dryRun = false,
         abortSignal = null,
-        onProgress = null
+        onProgress = null,
+        cellSizeOverride = null
     }) {
         const abortError = () => new DOMException('Aborted', 'AbortError');
         const yieldBudgetMs = 8;
@@ -839,60 +841,63 @@ export class SceneManager {
 
         const numColors = colorCount || this.colorCount;
 
-        // ─── Helper: prepare one orientation's geometry + heightmap data ───
+        // --- Helper: prepare one orientation's data ---
         const prepareOrient = async (srcGeometry) => {
-            const geom = srcGeometry.clone();
-            geom.computeVertexNormals();
-            geom.computeBoundingBox();
-            const bb = geom.boundingBox;
-            const c = new THREE.Vector3();
-            bb.getCenter(c);
-            const sx = bb.max.x - bb.min.x;
-            const sy = bb.max.y - bb.min.y;
-            const sz = bb.max.z - bb.min.z;
-            if (sx > boxL || sz > boxW || sy > boxH) return null;
-            geom.translate(-c.x, -bb.min.y, -c.z);
-            if (typeof geom.computeBoundsTree === 'function') geom.computeBoundsTree();
-            const pos = geom.getAttribute('position');
-            if (!pos || pos.count === 0) return null;
-            return { geometry: geom, positions: pos, vertexCount: pos.count, sizeX: sx, sizeY: sy, sizeZ: sz };
+            const geometry = srcGeometry.clone();
+            geometry.computeVertexNormals();
+            geometry.computeBoundingBox();
+            const bbox = geometry.boundingBox;
+            const center = new THREE.Vector3();
+            bbox.getCenter(center);
+            const sizeX = bbox.max.x - bbox.min.x;
+            const sizeY = bbox.max.y - bbox.min.y;
+            const sizeZ = bbox.max.z - bbox.min.z;
+            if (sizeX > boxL || sizeZ > boxW || sizeY > boxH) return null;
+            geometry.translate(-center.x, -bbox.min.y, -center.z);
+            if (typeof geometry.computeBoundsTree === 'function') {
+                geometry.computeBoundsTree();
+            }
+            const positions = geometry.getAttribute('position');
+            const vertexCount = positions ? positions.count : 0;
+            if (!positions || vertexCount === 0) return null;
+            return { geometry, positions, vertexCount, sizeX, sizeY, sizeZ };
         };
 
-        // Build orientation list
+        // Prepare primary + alternates
         const primary = await prepareOrient(stlGeometry);
         if (!primary) return { count: 0 };
 
-        const allOrients = [primary];
-        if (useMixedOrientations && orientationPool && orientationPool.length > 0) {
-            for (const poolEntry of orientationPool) {
-                if (poolEntry.geometry) {
-                    const od = await prepareOrient(poolEntry.geometry);
-                    if (od) allOrients.push(od);
-                }
+        const allOrients = [primary];  // index 0 = primary
+        for (const alt of alternateOrientations) {
+            if (alt.geometry) {
+                const od = await prepareOrient(alt.geometry);
+                if (od) allOrients.push(od);
             }
         }
-        const multiOrient = allOrients.length > 1;
 
-        // Cell size from primary piece
-        const cellSize = Math.max(1, Math.min(4, Math.min(primary.sizeX, primary.sizeZ) / 20));
+        // Use primary for grid resolution
+        const cellSize = (typeof cellSizeOverride === 'number' && Number.isFinite(cellSizeOverride))
+            ? cellSizeOverride
+            : Math.max(1, Math.min(4, Math.min(primary.sizeX, primary.sizeZ) / 20));
         const heightEps = Math.max(0.5, packingGap * 0.25);
 
-        // Build per-orientation heightmap data
+        // Build per-orientation heightmaps, masks, localBboxes
         for (const od of allOrients) {
-            od.pieceNX = Math.max(1, Math.ceil(od.sizeX / cellSize));
-            od.pieceNZ = Math.max(1, Math.ceil(od.sizeZ / cellSize));
+            const { positions, vertexCount, sizeX, sizeY, sizeZ } = od;
+            od.pieceNX = Math.max(1, Math.ceil(sizeX / cellSize));
+            od.pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize));
             od.pieceHeights = new Float32Array(od.pieceNX * od.pieceNZ);
             od.pieceMask = new Uint8Array(od.pieceNX * od.pieceNZ);
             let minY = Infinity;
-            for (let i = 0; i < od.vertexCount; i++) {
-                minY = Math.min(minY, od.positions.getY(i));
+            for (let i = 0; i < vertexCount; i++) {
+                minY = Math.min(minY, positions.getY(i));
                 if ((i & 4095) === 0) await maybeYield();
             }
-            const baseEps = Math.max(0.5, od.sizeY * 0.02);
-            for (let i = 0; i < od.vertexCount; i++) {
-                const x = od.positions.getX(i) + od.sizeX / 2;
-                const y = od.positions.getY(i);
-                const z = od.positions.getZ(i) + od.sizeZ / 2;
+            const baseEps = Math.max(0.5, sizeY * 0.02);
+            for (let i = 0; i < vertexCount; i++) {
+                const x = positions.getX(i) + sizeX / 2;
+                const y = positions.getY(i);
+                const z = positions.getZ(i) + sizeZ / 2;
                 const ix = Math.min(od.pieceNX - 1, Math.max(0, Math.floor(x / cellSize)));
                 const iz = Math.min(od.pieceNZ - 1, Math.max(0, Math.floor(z / cellSize)));
                 const idx = iz * od.pieceNX + ix;
@@ -901,8 +906,8 @@ export class SceneManager {
                 if ((i & 4095) === 0) await maybeYield();
             }
             od.localBbox = new THREE.Box3(
-                new THREE.Vector3(-od.sizeX / 2, 0, -od.sizeZ / 2),
-                new THREE.Vector3(od.sizeX / 2, od.sizeY, od.sizeZ / 2)
+                new THREE.Vector3(-sizeX / 2, 0, -sizeZ / 2),
+                new THREE.Vector3(sizeX / 2, sizeY, sizeZ / 2)
             );
         }
 
@@ -923,14 +928,15 @@ export class SceneManager {
         });
 
         const positionsOut = dryRun ? null : [];
+        const pieceDataOut = dryRun ? null : [];
         let placed = 0;
 
-        // Adaptive maxTry from volume ratio
+        // Adaptive maxTry from volume ratio if not provided
         const pieceBBoxVol = primary.sizeX * primary.sizeY * primary.sizeZ;
         const boxVolume = boxL * boxW * boxH;
         const effectiveMaxTry = maxTry != null ? maxTry : Math.min(2000, Math.max(maxDraw, Math.ceil(boxVolume / pieceBBoxVol * 1.2)));
 
-        // BVH collision infrastructure
+        // BVH collision infrastructure — prevents lateral mesh penetration
         const placedAabbs = [];
         const placedMatrices = [];
         const placedOrientIdxs = [];
@@ -939,8 +945,8 @@ export class SceneManager {
         const tmpInv = new THREE.Matrix4();
         const tmpBox = new THREE.Box3();
 
-        const candidateIntersectsAny = (candidateMatrix, candidateAabb, candOrientIdx) => {
-            const candGeom = allOrients[candOrientIdx].geometry;
+        const candidateIntersectsAny = (candidateMatrix, candidateAabb, candidateOrientIdx) => {
+            const candGeom = allOrients[candidateOrientIdx].geometry;
             if (!candGeom.boundsTree) return false;
             const inflate = Math.max(0, packingGap * 0.5);
             for (let i = 0; i < placedAabbs.length; i++) {
@@ -960,10 +966,15 @@ export class SceneManager {
             return false;
         };
 
+        // Consecutive-failure counter: resets on each successful placement
         let consecutiveSkips = 0;
         const maxConsecutiveSkips = Math.max(200, Math.ceil(boxVolume / pieceBBoxVol) * 3);
 
-        // Instanced rendering — one InstancedMesh per orientation
+        // --- Replicate-first-layer state ---
+        const firstLayerPlacements = [];
+        let replicatePhase = false;
+
+        // Render output via instancing — one InstancedMesh per orientation
         const instancedMeshes = [];
         const orientCounts = new Array(allOrients.length).fill(0);
         const tmpObj = new THREE.Object3D();
@@ -976,41 +987,122 @@ export class SceneManager {
             }
         }
 
-        // ═══════════════ MAIN PLACEMENT LOOP ═══════════════
+        // ===== MAIN PLACEMENT LOOP =====
         while (placed < effectiveMaxTry) {
             if (abortSignal?.aborted) throw abortError();
             await maybeYield();
 
+            // -----------------------------------------------------------
+            // REPLICATE-FIRST-LAYER PHASE
+            // -----------------------------------------------------------
+            if (replicatePhase) {
+                let layerPlaced = 0;
+                for (const fp of firstLayerPlacements) {
+                    if (placed >= effectiveMaxTry) break;
+                    if (abortSignal?.aborted) throw abortError();
+                    await maybeYield();
+
+                    const od = allOrients[fp.orientIdx];
+                    const { sizeX, sizeY, sizeZ, pieceNX, pieceNZ, pieceHeights, pieceMask } = od;
+
+                    // Find base height (full bounding rect — avoids multi-orient blind spots)
+                    let baseH = 0;
+                    for (let pz = 0; pz < pieceNZ; pz++) {
+                        for (let px = 0; px < pieceNX; px++) {
+                            const hIdx = (fp.gz + pz) * gridNX + (fp.gx + px);
+                            if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
+                        }
+                    }
+
+                    // Height fit check
+                    if (baseH + sizeY > boxH + 0.01) continue;
+                    let fits = true;
+                    for (let pz = 0; pz < pieceNZ && fits; pz++) {
+                        for (let px = 0; px < pieceNX; px++) {
+                            const pIdx = pz * pieceNX + px;
+                            if (!pieceMask[pIdx]) continue;
+                            if (baseH + pieceHeights[pIdx] + heightEps > boxH) { fits = false; break; }
+                        }
+                    }
+                    if (!fits) continue;
+
+                    // BVH collision
+                    const posX = fp.gx * cellSize + sizeX / 2;
+                    const posZ = fp.gz * cellSize + sizeZ / 2;
+                    tmpMatB.makeTranslation(posX, baseH, posZ);
+                    tmpBox.copy(od.localBbox).applyMatrix4(tmpMatB);
+                    if (candidateIntersectsAny(tmpMatB, tmpBox, fp.orientIdx)) continue;
+
+                    // Place
+                    if (!dryRun) {
+                        const im = instancedMeshes[fp.orientIdx];
+                        const idx = orientCounts[fp.orientIdx];
+                        tmpObj.position.set(posX, baseH, posZ);
+                        tmpObj.rotation.set(0, 0, 0);
+                        tmpObj.updateMatrix();
+                        im.setMatrixAt(idx, tmpObj.matrix);
+                        const color = new THREE.Color(this.pieceColors[placed % numColors]);
+                        im.setColorAt(idx, color);
+                        positionsOut.push(new THREE.Vector3(posX, baseH, posZ));
+                        pieceDataOut.push({ orientIdx: fp.orientIdx });
+                    }
+                    orientCounts[fp.orientIdx]++;
+                    placedAabbs.push(tmpBox.clone());
+                    placedMatrices.push(tmpMatB.clone());
+                    placedOrientIdxs.push(fp.orientIdx);
+
+                    // Update heightmap — mask-filtered for contact
+                    for (let pz = 0; pz < pieceNZ; pz++) {
+                        for (let px = 0; px < pieceNX; px++) {
+                            const pIdx = pz * pieceNX + px;
+                            if (!pieceMask[pIdx]) continue;
+                            const hIdx = (fp.gz + pz) * gridNX + (fp.gx + px);
+                            const top = baseH + pieceHeights[pIdx] + packingGap;
+                            if (top > heightMap[hIdx]) heightMap[hIdx] = top;
+                        }
+                    }
+
+                    placed++;
+                    layerPlaced++;
+                    if (onProgress && (placed % 5 === 0)) {
+                        onProgress({ placed, maxTry: effectiveMaxTry });
+                    }
+                }
+                if (layerPlaced === 0) {
+                    console.log(`[HeightMapAsync] Replicate done after ${placed} piece(s)`);
+                    break;
+                }
+                continue;
+            }
+
+            // -----------------------------------------------------------
+            // GREEDY SCAN — try all orientations, pick best (lowest) fit
+            // -----------------------------------------------------------
             let bestX = -1;
             let bestZ = -1;
             let bestH = Infinity;
             let bestOrientIdx = 0;
 
-            // Scan all orientations × all grid positions → pick lowest fit
             for (let oi = 0; oi < allOrients.length; oi++) {
                 const od = allOrients[oi];
-                const { pieceNX, pieceNZ, pieceMask: mask, pieceHeights: pH, sizeX: sx, sizeY: sy, sizeZ: sz } = od;
+                const { pieceNX, pieceNZ, pieceMask, pieceHeights, sizeX, sizeY, sizeZ } = od;
 
                 for (let gz = 0; gz <= gridNZ - pieceNZ; gz++) {
                     for (let gx = 0; gx <= gridNX - pieceNX; gx++) {
                         if (((gx + gz) & 255) === 0) {
                             await maybeYield();
-                            if (onProgress) onProgress({ placed, maxTry: effectiveMaxTry });
+                            if (onProgress) {
+                                onProgress({ placed, maxTry: effectiveMaxTry });
+                            }
                         }
 
                         const x0 = gx * cellSize;
                         const z0 = gz * cellSize;
-                        if (x0 + sx > boxL || z0 + sz > boxW) continue;
+                        if (x0 + sizeX > boxL || z0 + sizeZ > boxW) continue;
 
-                        // BaseH: read ALL cells in bounding rect (stable uses mask; for
-                        // multi-orient we need full-rect to avoid blind spots — when single
-                        // orient, mask cells == all relevant cells anyway since there's no
-                        // cross-orient mismatch)
                         let baseH = 0;
                         for (let pz = 0; pz < pieceNZ; pz++) {
                             for (let px = 0; px < pieceNX; px++) {
-                                const pIdx = pz * pieceNX + px;
-                                if (!mask[pIdx]) continue;
                                 const hIdx = (gz + pz) * gridNX + (gx + px);
                                 if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
                             }
@@ -1018,13 +1110,15 @@ export class SceneManager {
 
                         if (baseH >= bestH) continue;
 
-                        // Fits check (mask-filtered — same as stable)
+                        // In replicate mode, only floor placements in greedy phase
+                        if (replicateFirstLayer && baseH > 0.5) continue;
+
                         let fits = true;
                         for (let pz = 0; pz < pieceNZ && fits; pz++) {
                             for (let px = 0; px < pieceNX; px++) {
                                 const pIdx = pz * pieceNX + px;
-                                if (!mask[pIdx]) continue;
-                                const top = baseH + pH[pIdx];
+                                if (!pieceMask[pIdx]) continue;
+                                const top = baseH + pieceHeights[pIdx];
                                 if (top + heightEps > boxH) { fits = false; break; }
                             }
                         }
@@ -1039,7 +1133,20 @@ export class SceneManager {
                 }
             }
 
-            if (bestX < 0 || bestZ < 0 || !Number.isFinite(bestH)) break;
+            if (bestX < 0 || bestZ < 0 || !Number.isFinite(bestH)) {
+                // If replicate mode: switch to replication
+                if (replicateFirstLayer && firstLayerPlacements.length > 0) {
+                    console.log(`[HeightMapAsync] First layer: ${firstLayerPlacements.length} piece(s). Replicating...`);
+                    replicatePhase = true;
+                    continue;
+                }
+                break;
+            }
+
+            if (singleLayer && bestH > 0.5) {
+                console.log(`[HeightMapAsync] Single-layer complete: ${placed} piece(s)`);
+                break;
+            }
 
             const od = allOrients[bestOrientIdx];
             const { sizeX, sizeY, sizeZ, pieceNX, pieceNZ, pieceMask, pieceHeights } = od;
@@ -1054,7 +1161,7 @@ export class SceneManager {
             tmpMatB.makeTranslation(posX, posY, posZ);
             tmpBox.copy(od.localBbox).applyMatrix4(tmpMatB);
 
-            // BVH collision check (same bump logic as stable: cellSize, mask-filtered)
+            // BVH collision check — prevent lateral penetration
             if (candidateIntersectsAny(tmpMatB, tmpBox, bestOrientIdx)) {
                 const bump = cellSize;
                 for (let pz = 0; pz < pieceNZ; pz++) {
@@ -1083,6 +1190,7 @@ export class SceneManager {
                 const color = new THREE.Color(this.pieceColors[colorIndex]);
                 im.setColorAt(idx, color);
                 positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+                pieceDataOut.push({ orientIdx: bestOrientIdx });
             }
 
             orientCounts[bestOrientIdx]++;
@@ -1090,7 +1198,7 @@ export class SceneManager {
             placedMatrices.push(tmpMatB.clone());
             placedOrientIdxs.push(bestOrientIdx);
 
-            // Update height map (mask-filtered — same as stable for contact/nesting)
+            // Update height map — mask-filtered for accurate nesting/contact
             for (let pz = 0; pz < pieceNZ; pz++) {
                 for (let px = 0; px < pieceNX; px++) {
                     const pIdx = pz * pieceNX + px;
@@ -1101,19 +1209,19 @@ export class SceneManager {
                 }
             }
 
+            // Record first-layer placement
+            if (replicateFirstLayer && bestH < 0.5) {
+                firstLayerPlacements.push({ gx: bestX, gz: bestZ, orientIdx: bestOrientIdx });
+            }
+
             placed++;
             if (onProgress && (placed === 1 || (placed % 5) === 0 || placed === effectiveMaxTry)) {
                 onProgress({ placed, maxTry: effectiveMaxTry });
             }
         }
 
-        // Debug stats
-        const hmMin = Math.min(...heightMap);
-        const hmMax = Math.max(...heightMap);
         const orientBreakdown = orientCounts.map((c, i) => `orient${i}=${c}`).join(', ');
         console.log(`[HeightMapAsync] placed=${placed} (${orientBreakdown}), maxTry=${effectiveMaxTry}, skips=${consecutiveSkips}`);
-        console.log(`[HeightMapAsync] heightMap range: [${hmMin.toFixed(1)}, ${hmMax.toFixed(1)}], utilization: ${(hmMax / boxH * 100).toFixed(1)}%`);
-        if (multiOrient) console.log(`[HeightMapAsync] Mixed orientations: ${allOrients.length} used`);
 
         if (!dryRun) {
             for (let oi = 0; oi < instancedMeshes.length; oi++) {
@@ -1134,6 +1242,12 @@ export class SceneManager {
                 geometry: primary.geometry,
                 vertices: primary.positions ? new Float32Array(primary.positions.array) : null,
                 positions: positionsOut,
+                pieceData: pieceDataOut,
+                orientations: allOrients.map(od => ({
+                    geometry: od.geometry,
+                    vertices: od.positions ? new Float32Array(od.positions.array) : null,
+                    sizeX: od.sizeX, sizeY: od.sizeY, sizeZ: od.sizeZ
+                })),
                 boxDims: { l: boxL, w: boxW, h: boxH }
             };
         }
