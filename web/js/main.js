@@ -460,7 +460,11 @@ function buildOrientedGeometry(originalGeometry, tilt, yawDeg) {
  */
 function buildOrientationPool(baseGeometry, boxL, boxW, boxH) {
     const pool = [];
-    const yaws = [0, 90, 180, 270];
+    // Square box -> 0° & 90°; rectangular box -> 0° & 180°.
+    // The 90° case for rectangular boxes is handled earlier when choosing
+    // the base wall-parallel orientation, so the pool only needs the mirror.
+    const isSquare = Math.abs(boxL - boxW) < 1;
+    const yaws = isSquare ? [0, 90] : [0, 180];
 
     for (const yaw of yaws) {
         const geom = baseGeometry.clone();
@@ -485,6 +489,32 @@ function buildOrientationPool(baseGeometry, boxL, boxW, boxH) {
     return pool;
 }
 
+function computeWallAlignedGridCapacity(geometry, boxL, boxW, packingGap = 0) {
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const sizeX = bb.max.x - bb.min.x;
+    const sizeZ = bb.max.z - bb.min.z;
+    const stepX = sizeX + packingGap;
+    const stepZ = sizeZ + packingGap;
+    const gridNX = Math.max(1, Math.floor((boxL + packingGap + 0.01) / stepX));
+    const gridNZ = Math.max(1, Math.floor((boxW + packingGap + 0.01) / stepZ));
+    const count = gridNX * gridNZ;
+    const usedL = gridNX * sizeX + Math.max(0, gridNX - 1) * packingGap;
+    const usedW = gridNZ * sizeZ + Math.max(0, gridNZ - 1) * packingGap;
+    const leftoverL = Math.max(0, boxL - usedL);
+    const leftoverW = Math.max(0, boxW - usedW);
+    return {
+        sizeX,
+        sizeZ,
+        gridNX,
+        gridNZ,
+        count,
+        leftoverL,
+        leftoverW,
+        leftoverArea: leftoverL * boxW + leftoverW * boxL - leftoverL * leftoverW
+    };
+}
+
 /**
  * Generate yaw candidates from gravity-settled base.
  * Piece is locked to its resting orientation; only Y-axis rotation changes.
@@ -495,12 +525,15 @@ function buildOrientationPool(baseGeometry, boxL, boxW, boxH) {
  */
 function generateYawCandidates(stableBases, boxL, boxW, boxH, allowRotation) {
     const candidates = [];
+    const stableOnlyBases = stableBases.filter(base => base.stability?.stable);
+    const sourceBases = stableOnlyBases.length > 0 ? stableOnlyBases : stableBases;
+    const isSquareBox = Math.abs(boxL - boxW) < 1;
     const yaws = allowRotation
-        ? [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]
+        ? (isSquareBox ? [0, 90] : [0, 90, 180, 270])
         : [0];
 
-    for (let baseIndex = 0; baseIndex < stableBases.length; baseIndex++) {
-        const base = stableBases[baseIndex];
+    for (let baseIndex = 0; baseIndex < sourceBases.length; baseIndex++) {
+        const base = sourceBases[baseIndex];
         for (const yawDeg of yaws) {
             const oriented = base.geometry.clone();
             applyYawToGeometry(oriented, yawDeg);
@@ -523,7 +556,7 @@ function generateYawCandidates(stableBases, boxL, boxW, boxH, allowRotation) {
         }
     }
 
-    console.log(`[Orientation] Multi-base yaw search: ${candidates.length} candidates (${stableBases.length} bases × ${yaws.length} yaw)`);
+    console.log(`[Orientation] Multi-base yaw search: ${candidates.length} candidates (${sourceBases.length} stable bases × ${yaws.length} yaw)`);
     return candidates;
 }
 
@@ -1591,7 +1624,7 @@ async function handleCalculate() {
                 await nextFrame();
                 if (state.stlGeometry) {
                     if (values.heightMapNesting) {
-                        const maxDraw = 500;
+                        const rawMaxDraw = 500;
                     const stableBases = state.stlStableOrientations?.length
                         ? state.stlStableOrientations
                         : [{ quat: null, geometry: (state.stlAlignedGeometry || state.stlGeometry), stability: null }];
@@ -1603,10 +1636,16 @@ async function handleCalculate() {
                     stlBBox.getSize(stlSize);
                     const pieceBBoxVol = stlSize.x * stlSize.y * stlSize.z;
                     const boxVol = values.boxL * values.boxW * values.boxH;
+                    const maxByWeight = (values.maxWeight > 0 && values.objWeight > 0)
+                        ? Math.max(0, Math.floor(values.maxWeight / values.objWeight))
+                        : Infinity;
+                    const maxDraw = Number.isFinite(maxByWeight)
+                        ? Math.min(rawMaxDraw, maxByWeight)
+                        : rawMaxDraw;
                     const maxTry = pieceBBoxVol > 0
                         ? Math.min(2000, Math.max(maxDraw, Math.ceil(boxVol / pieceBBoxVol * 1.2)))
                         : maxDraw;
-                    console.log(`[Packing] boxVol=${boxVol.toFixed(0)}, pieceBBoxVol=${pieceBBoxVol.toFixed(1)}, maxTry=${maxTry}, maxDraw=${maxDraw}`);
+                    console.log(`[Packing] boxVol=${boxVol.toFixed(0)}, pieceBBoxVol=${pieceBBoxVol.toFixed(1)}, maxTry=${maxTry}, maxDraw=${maxDraw}, weightCap=${Number.isFinite(maxByWeight) ? maxByWeight : 'none'}`);
 
                     // --- Step 1: Use precomputed stable orientation (from load/simplify) + generate yaw candidates ---
                     setCalcProgress(true, 8, `Cercant millor orientació Y (${stableBases.length} bases)...`, calcStartTime);
@@ -1635,10 +1674,17 @@ async function handleCalculate() {
 
                         const footprintArea = computeFootprintArea(c.oriented);
                         const stability = getSupportStability(c.oriented);
+                        const gridFit = computeWallAlignedGridCapacity(
+                            c.oriented,
+                            values.boxL,
+                            values.boxW,
+                            values.packingGap
+                        );
+                        const dryRunMaxTry = Math.min(50, maxTry); // fast evaluation, enough to rank
                         const trial = await state.sceneManager.addPackedSTLHeightMapAsync({
                             stlGeometry: c.oriented,
                             maxDraw,
-                            maxTry,
+                            maxTry: dryRunMaxTry,
                             packingGap: values.packingGap,
                             colorCount: values.colorCount,
                             boxL: values.boxL,
@@ -1660,15 +1706,21 @@ async function handleCalculate() {
                             yawDeg: c.yawDeg,
                             name: c.name,
                             count: count || 0,
+                            gridCount: gridFit.count,
+                            gridNX: gridFit.gridNX,
+                            gridNZ: gridFit.gridNZ,
+                            leftoverArea: gridFit.leftoverArea,
                             stable: !!stability?.stable,
                             baseArea: footprintArea || 0
                         });
                     }
 
-                    // --- Step 3: Pick best orientation (density first, then stability / base area) ---
+                    // --- Step 3: Pick best wall-parallel orientation first, then density ---
                     evalResults.sort((a, b) => {
-                        if (b.count !== a.count) return b.count - a.count;
                         if (b.stable !== a.stable) return b.stable ? 1 : -1;
+                        if ((b.gridCount || 0) !== (a.gridCount || 0)) return (b.gridCount || 0) - (a.gridCount || 0);
+                        if (b.count !== a.count) return b.count - a.count;
+                        if ((a.leftoverArea || 0) !== (b.leftoverArea || 0)) return (a.leftoverArea || 0) - (b.leftoverArea || 0);
                         return (b.baseArea || 0) - (a.baseArea || 0);
                     });
 
@@ -1681,6 +1733,14 @@ async function handleCalculate() {
                         originalGeometry: state.stlGeometry.clone(),
                         results: evalResults
                     };
+
+                    if (evalResults[0]) {
+                        console.log(
+                            `[Orientation] Selected ${evalResults[0].name} ` +
+                            `grid=${evalResults[0].gridNX}x${evalResults[0].gridNZ} (${evalResults[0].gridCount}), ` +
+                            `dryRun=${evalResults[0].count}, leftoverArea=${(evalResults[0].leftoverArea || 0).toFixed(1)}`
+                        );
+                    }
 
                     const bestGeom = buildOrientedGeometry(state.stlGeometry, best.tilt, best.yawDeg);
 
@@ -1760,7 +1820,12 @@ async function handleCalculate() {
                 realDistributionText = drawn.distributionText;
             }
             
-            const displayCount = drawnCount;
+            const maxByWeight = (values.maxWeight > 0 && values.objWeight > 0)
+                ? Math.max(0, Math.floor(values.maxWeight / values.objWeight))
+                : Infinity;
+            const displayCount = Number.isFinite(maxByWeight)
+                ? Math.min(drawnCount, maxByWeight)
+                : drawnCount;
             state.displayCount = displayCount;
 
             console.log(`Rendered ${drawnCount} items (${displayCount} pieces)`);
