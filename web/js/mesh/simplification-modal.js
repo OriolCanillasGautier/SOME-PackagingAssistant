@@ -7,6 +7,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import { MeshSimplifier } from './mesh-simplifier.js';
+import { getStoredLanguage, loadLocale, t } from '../i18n.js';
 
 /**
  * Classe per gestionar el modal de simplificació de malla
@@ -24,8 +25,16 @@ export class SimplificationModal {
         this.currentMesh = null;
         this.onComplete = null;
         this.animationId = null;
+        this.fileName = 'packassist_mesh.stl';
+        this.language = getStoredLanguage();
+        this.locale = null;
         
         this._createModal();
+        this._refreshLanguage().catch(err => console.error('[SimplificationModal] Locale error:', err));
+    }
+
+    modalText(path, variables = {}, fallback = path) {
+        return t(this.locale, `main.simplifyModal.${path}`, variables, fallback);
     }
     
     _createModal() {
@@ -38,7 +47,7 @@ export class SimplificationModal {
         this.modal.innerHTML = `
             <div class="modal-content modal-xlarge">
                 <div class="modal-header">
-                    <h2>Simplificació de Malla 3D</h2>
+                    <h2 id="simplify-title">Simplificació de Malla 3D</h2>
                     <button class="modal-close" id="simplify-modal-close">×</button>
                 </div>
                 <div class="modal-body simplify-modal-body">
@@ -46,74 +55,74 @@ export class SimplificationModal {
                         <!-- Panel de controls -->
                         <div class="simplify-controls">
                             <div class="control-section">
-                                <h3>Malla Original</h3>
+                                <h3 id="simplify-original-title">Malla Original</h3>
                                 <div id="original-stats" class="stats-box">
                                     <div class="stat-row">
-                                        <span>Vèrtexs:</span>
+                                        <span id="simplify-orig-vertices-label">Vèrtexs:</span>
                                         <span id="orig-vertices">-</span>
                                     </div>
                                     <div class="stat-row">
-                                        <span>Triangles:</span>
+                                        <span id="simplify-orig-triangles-label">Triangles:</span>
                                         <span id="orig-faces">-</span>
                                     </div>
                                 </div>
                             </div>
                             
                             <div class="control-section">
-                                <h3>Nivell de Simplificació</h3>
+                                <h3 id="simplify-level-title">Nivell de Simplificació</h3>
                                 <div class="slider-container">
                                     <input type="range" id="simplify-slider" min="0.1" max="100" step="0.1" value="50">
                                     <div class="slider-labels">
-                                        <span>Mínim</span>
+                                        <span id="simplify-minimum-label">Mínim</span>
                                         <span id="simplify-percent">50%</span>
-                                        <span>Original</span>
+                                        <span id="simplify-original-label">Original</span>
                                     </div>
                                 </div>
                                 
                                 <div class="preset-buttons">
-                                    <button class="preset-btn" data-value="0.5">Mínim (0.5%)</button>
-                                    <button class="preset-btn" data-value="5">Ultra ràpid (5%)</button>
-                                    <button class="preset-btn" data-value="25">Ràpid (25%)</button>
-                                    <button class="preset-btn" data-value="50">Equilibrat (50%)</button>
-                                    <button class="preset-btn" data-value="75">Detallat (75%)</button>
-                                    <button class="preset-btn" data-value="100">Original (100%)</button>
+                                    <button class="preset-btn" data-value="0.5" id="preset-minimum">Mínim (0.5%)</button>
+                                    <button class="preset-btn" data-value="5" id="preset-ultra-fast">Ultra ràpid (5%)</button>
+                                    <button class="preset-btn" data-value="25" id="preset-fast">Ràpid (25%)</button>
+                                    <button class="preset-btn" data-value="50" id="preset-balanced">Equilibrat (50%)</button>
+                                    <button class="preset-btn" data-value="75" id="preset-detailed">Detallat (75%)</button>
+                                    <button class="preset-btn" data-value="100" id="preset-original">Original (100%)</button>
                                 </div>
                             </div>
                             
                             <div class="control-section">
-                                <h3>Opcions</h3>
+                                <h3 id="simplify-options-title">Opcions</h3>
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="preserve-features" checked>
-                                    Preservar característiques importants
+                                    <span id="simplify-preserve-label">Preservar característiques importants</span>
                                 </label>
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="create-envelope">
-                                    Crear embolcall convex (tanca forats)
+                                    <span id="simplify-envelope-label">Crear embolcall convex (tanca forats)</span>
                                 </label>
                                 <div id="simplify-backend" class="backend-indicator" style="margin-top:8px;font-size:11px;color:var(--text-muted);"></div>
                             </div>
                             
                             <div class="control-section">
-                                <h3>Malla Resultant</h3>
+                                <h3 id="simplify-result-title">Malla Resultant</h3>
                                 <div id="result-stats" class="stats-box stats-result">
                                     <div class="stat-row">
-                                        <span>Vèrtexs:</span>
+                                        <span id="simplify-result-vertices-label">Vèrtexs:</span>
                                         <span id="result-vertices">-</span>
                                     </div>
                                     <div class="stat-row">
-                                        <span>Triangles:</span>
+                                        <span id="simplify-result-triangles-label">Triangles:</span>
                                         <span id="result-faces">-</span>
                                     </div>
                                     <div class="stat-row reduction">
-                                        <span>Reducció:</span>
+                                        <span id="simplify-reduction-label">Reducció:</span>
                                         <span id="result-reduction">-</span>
                                     </div>
                                     <div class="stat-row quality">
-                                        <span>Qualitat volum:</span>
+                                        <span id="simplify-quality-label">Qualitat volum:</span>
                                         <span id="result-quality">-</span>
                                     </div>
                                     <div class="stat-row">
-                                        <span>Estanqueïtat:</span>
+                                        <span id="simplify-watertight-label">Estanqueïtat:</span>
                                         <span id="result-watertight">-</span>
                                     </div>
                                 </div>
@@ -121,15 +130,15 @@ export class SimplificationModal {
                             </div>
                             
                             <div class="control-section">
-                                <h3>Visualització</h3>
+                                <h3 id="simplify-visualization-title">Visualització</h3>
                                 <div class="view-toggle">
-                                    <button class="view-btn active" data-view="simplified">Simplificada</button>
-                                    <button class="view-btn" data-view="original">Original</button>
-                                    <button class="view-btn" data-view="compare">Comparar</button>
+                                    <button class="view-btn active" data-view="simplified" id="view-simplified">Simplificada</button>
+                                    <button class="view-btn" data-view="original" id="view-original">Original</button>
+                                    <button class="view-btn" data-view="compare" id="view-compare">Comparar</button>
                                 </div>
                                 <label class="checkbox-label">
                                     <input type="checkbox" id="show-wireframe">
-                                    Mostrar wireframe
+                                    <span id="simplify-wireframe-label">Mostrar wireframe</span>
                                 </label>
                             </div>
                         </div>
@@ -137,12 +146,13 @@ export class SimplificationModal {
                         <!-- Visor 3D -->
                         <div class="simplify-viewer">
                             <div id="simplify-canvas"></div>
-                            <div class="viewer-hint">Arrossega per girar | Scroll per zoom</div>
+                            <div class="viewer-hint" id="simplify-viewer-hint">Arrossega per girar | Scroll per zoom</div>
                         </div>
                     </div>
                 </div>
                 <div class="modal-footer">
                     <button id="simplify-cancel" class="btn-secondary">Cancel·lar</button>
+                    <button id="simplify-download" class="btn-secondary">Descarregar STL</button>
                     <button id="simplify-apply" class="btn-primary">Aplicar Simplificació</button>
                 </div>
             </div>
@@ -151,6 +161,50 @@ export class SimplificationModal {
         document.body.appendChild(this.modal);
         this._addStyles();
         this._setupEventListeners();
+    }
+
+    async _refreshLanguage() {
+        this.language = getStoredLanguage();
+        this.locale = await loadLocale(this.language);
+        if (!this.modal) return;
+
+        const setText = (id, value) => {
+            const el = this.modal.querySelector(`#${id}`);
+            if (el) el.textContent = value;
+        };
+
+        setText('simplify-title', this.modalText('title'));
+        setText('simplify-original-title', this.modalText('originalMesh'));
+        setText('simplify-orig-vertices-label', this.modalText('vertices'));
+        setText('simplify-orig-triangles-label', this.modalText('triangles'));
+        setText('simplify-level-title', this.modalText('simplificationLevel'));
+        setText('simplify-minimum-label', this.modalText('minimum'));
+        setText('simplify-original-label', this.modalText('original'));
+        setText('preset-minimum', this.modalText('presetMinimum'));
+        setText('preset-ultra-fast', this.modalText('presetUltraFast'));
+        setText('preset-fast', this.modalText('presetFast'));
+        setText('preset-balanced', this.modalText('presetBalanced'));
+        setText('preset-detailed', this.modalText('presetDetailed'));
+        setText('preset-original', this.modalText('presetOriginal'));
+        setText('simplify-options-title', this.modalText('options'));
+        setText('simplify-preserve-label', this.modalText('preserveFeatures'));
+        setText('simplify-envelope-label', this.modalText('createEnvelope'));
+        setText('simplify-result-title', this.modalText('resultMesh'));
+        setText('simplify-result-vertices-label', this.modalText('vertices'));
+        setText('simplify-result-triangles-label', this.modalText('triangles'));
+        setText('simplify-reduction-label', this.modalText('reduction'));
+        setText('simplify-quality-label', this.modalText('volumeQuality'));
+        setText('simplify-watertight-label', this.modalText('watertight'));
+        setText('simplify-visualization-title', this.modalText('visualization'));
+        setText('view-simplified', this.modalText('viewSimplified'));
+        setText('view-original', this.modalText('viewOriginal'));
+        setText('view-compare', this.modalText('viewCompare'));
+        setText('simplify-wireframe-label', this.modalText('showWireframe'));
+        setText('simplify-viewer-hint', this.modalText('viewerHint'));
+        setText('simplify-cancel', this.locale?.common?.buttons?.cancel || 'Cancel');
+        setText('simplify-download', this.locale?.common?.buttons?.download || 'Download');
+        setText('simplify-apply', this.modalText('apply'));
+        this._updateResultStats();
     }
     
     _addStyles() {
@@ -223,7 +277,7 @@ export class SimplificationModal {
             }
             
             .stats-result {
-                background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(59, 130, 246, 0.1));
+                background: var(--bg-secondary);
                 border-color: var(--accent-green);
             }
             
@@ -413,6 +467,10 @@ export class SimplificationModal {
         this.modal.querySelector('#simplify-apply').addEventListener('click', () => {
             this._applySimplification().catch(err => console.error('[SimplificationModal] Apply error:', err));
         });
+
+        this.modal.querySelector('#simplify-download').addEventListener('click', () => {
+            this._downloadCurrentSTL().catch(err => console.error('[SimplificationModal] Download error:', err));
+        });
     }
     
     /**
@@ -421,9 +479,11 @@ export class SimplificationModal {
      * @param {Function} onComplete - Callback quan s'aplica la simplificació
      * @param {ArrayBuffer|null} rawSTLData - Raw STL binary (for server-side simplification)
      */
-    open(geometry, onComplete, rawSTLData = null) {
+    open(geometry, onComplete, rawSTLData = null, fileName = 'packassist_mesh.stl') {
+        this._refreshLanguage().catch(err => console.error('[SimplificationModal] Locale refresh error:', err));
         this.originalGeometry = geometry.clone();
         this.onComplete = onComplete;
+        this.fileName = fileName;
         
         // Crear simplificador (pass raw STL for server path)
         this.simplifier = new MeshSimplifier(geometry, rawSTLData);
@@ -440,6 +500,35 @@ export class SimplificationModal {
         // Simplificació inicial al 50%
         this.modal.querySelector('#simplify-slider').value = 50;
         this._onSliderChange(50);
+    }
+
+    _ensureSTLFileName(fileName) {
+        if (!fileName) return 'packassist_mesh.stl';
+        const dot = fileName.lastIndexOf('.');
+        const base = dot >= 0 ? fileName.slice(0, dot) : fileName;
+        return `${base}.stl`;
+    }
+
+    _downloadBuffer(buffer, fileName) {
+        const blob = new Blob([buffer], { type: 'model/stl' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = this._ensureSTLFileName(fileName);
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async _downloadCurrentSTL() {
+        const geometry = this.simplifiedGeometry || this.originalGeometry;
+        if (!geometry || !this.simplifier) return;
+        const fileName = this.simplifiedGeometry
+            ? this._ensureSTLFileName(this.fileName.replace(/(\.[^.]+)?$/, '_preview.stl'))
+            : this._ensureSTLFileName(this.fileName);
+        const buffer = this.simplifier.toBinarySTL(geometry);
+        this._downloadBuffer(buffer, fileName);
     }
     
     close() {
@@ -602,10 +691,10 @@ export class SimplificationModal {
         if (wtEl) {
             const be = stats.boundaryEdges ?? -1;
             if (be === 0) {
-                wtEl.textContent = 'Sòlida';
+                wtEl.textContent = this.modalText('solid');
                 wtEl.style.color = 'var(--accent-green)';
             } else if (be > 0) {
-                wtEl.textContent = `${be} arestes obertes`;
+                wtEl.textContent = this.modalText('openEdges', { count: be });
                 wtEl.style.color = 'var(--accent-orange, #f59e0b)';
             } else {
                 wtEl.textContent = '-';
@@ -619,7 +708,7 @@ export class SimplificationModal {
             const vol = parseFloat(stats.volumePreservation);
             if (vol < 80) {
                 warnEl.style.display = 'block';
-                warnEl.textContent = `Atenció: la simplificació ha alterat significativament el volum (${stats.volumePreservation}%). Prova un nivell més alt per preservar la forma.`;
+                warnEl.textContent = this.modalText('qualityWarning', { percent: stats.volumePreservation });
             } else {
                 warnEl.style.display = 'none';
             }
@@ -630,9 +719,9 @@ export class SimplificationModal {
         if (beEl) {
             const usedServer = this.simplifier._serverAvailable === true;
             if (usedServer) {
-                beEl.innerHTML = '<span style="color:var(--accent-green);">PyMeshLab (servidor)</span> — topologia i forats preservats';
+                beEl.innerHTML = `<span style="color:var(--accent-green);">${this.modalText('backendServer')}</span> - ${this.modalText('backendServerNote')}`;
             } else {
-                beEl.innerHTML = '<span style="color:var(--accent-orange,#f59e0b);">JS fallback</span> — qualitat limitada. Inicia <code>mesh_server.py</code> per millors resultats.';
+                beEl.innerHTML = `<span style="color:var(--accent-orange,#f59e0b);">${this.modalText('backendFallback')}</span> - ${this.modalText('backendFallbackNote')}`;
             }
         }
     }

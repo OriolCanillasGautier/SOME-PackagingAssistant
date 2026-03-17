@@ -28,6 +28,12 @@ Llista de coses a polir. Prioritzat per impacte a UX/correctesa.
   - Actualment deixa 20%+ d'espai lliure a la part superior o resultats absurds (8 peces en caixa de 150).
   - Substituir heurística actual per **Skyline-based layering** amb footprint real (polígon 2D offset per gap).
   - Validació d'estabilitat amb **LBCP** (Load-Bearable Convex Polygon) per evitar revalidació global.
+- [x] **Opcions d'estratègia STL a la UI**:
+  - Selector `stable-contact` / `hybrid` / `physics-assisted` / `legacy`.
+  - Controls per estrictesa, esforç de cerca, side stacking i settle check.
+- [ ] **Validar estratègies STL amb casos reals**:
+  - Confirmar que no hi hagi overlap ni floating en els casos problemàtics actuals.
+  - Mesurar quan `hybrid` o `physics-assisted` recuperen peces sense desestabilitzar la pila.
 - [x] **Orientacio estable per defecte (gravetat + yaw)**:
   - Drop fisic amb Rapier per trobar la pose estable.
   - Provar yaw cada 30 graus sobre la base estable.

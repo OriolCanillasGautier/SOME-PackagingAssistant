@@ -52,33 +52,88 @@ export function optimizeByWeight(maxL, maxW, maxH, targetUnits) {
  * @param {number} objWeight - Weight per unit
  * @returns {string} HTML debug info
  */
-function createDebugInfo(orientations, maxWeight, objWeight) {
+function getCalculatorLabels(custom = {}) {
+    return {
+        piecesUnit: 'peces',
+        distributionLabel: 'Distribució (L×W×H)',
+        estimatedTotalWeightLabel: 'Pes total estimat',
+        totalWeightLabel: 'Pes total',
+        perPieceSuffix: 'g/peça',
+        materialFallback: 'material',
+        volumeEfficiencyLabel: 'Eficiència volum',
+        bestOrientationLabel: 'Orientació òptima',
+        stlVolumeTitle: 'Volum STL',
+        realVolumeLabel: 'Volum real',
+        boundingBoxLabel: 'Bounding box',
+        fillRatioLabel: 'Ratio ompliment',
+        theoreticalVolumeMaxLabel: 'Màx. teòric (volum)',
+        weightLimitWarning: '⚠️ Factor limitant: PES (no dimensions)',
+        orientationComparisonTitle: "Comparació d'Orientacions",
+        orientationColumn: 'Orientació',
+        unitsColumn: 'Unitats',
+        distributionColumn: 'Dist.',
+        weightColumn: 'Pes',
+        volumeColumn: 'Vol%',
+        weightLimitedSuffix: 'Limitat per pes',
+        validationPositive: 'Tots els valors han de ser majors que 0.',
+        validationSingleUnitTooHeavy: "El pes d'una sola unitat supera la capacitat màxima de la caixa.",
+        noUnitFits: 'No cap cap unitat a la caixa.',
+        debugOrientationsTitle: 'Orientacions provades:',
+        debugDiagnosticTitle: 'Diagnòstic:',
+        debugMaxCapacity: 'Capacitat màxima',
+        debugUnitWeight: 'Pes per unitat',
+        debugTheoreticalByWeight: 'Màxim teòric per pes',
+        debugSolution: 'Solució',
+        debugWeightLimitedUnits: '{count} unitats limitades per pes',
+        debugProblem: 'Problema',
+        debugSingleWeightTooHigh: 'El pes individual és massa alt',
+        debugDimensionsTooLarge: 'Les dimensions són massa grans per la caixa',
+        orientationOriginal: 'Original (L×W×H)',
+        orientationRotY: 'Rotació Y (L×H×W)',
+        orientationRotZ: 'Rotació Z (W×L×H)',
+        orientationRotXY: 'Rotació XY (W×H×L)',
+        orientationRotXZ: 'Rotació XZ (H×L×W)',
+        orientationRotYZ: 'Rotació YZ (H×W×L)',
+        orientationNoRotation: 'Sense rotació',
+        ...custom
+    };
+}
+
+function formatLabel(template, variables = {}) {
+    return String(template).replace(/\{(\w+)\}/g, (_, key) => {
+        const value = variables[key];
+        return value == null ? `{${key}}` : String(value);
+    });
+}
+
+function createDebugInfo(orientations, maxWeight, objWeight, labels = {}) {
+    const text = getCalculatorLabels(labels);
     const maxByWeight = objWeight > 0 ? Math.floor(maxWeight / objWeight) : 0;
     
-    let debug = '<h3>Orientacions provades:</h3><ul>';
+    let debug = `<h3>${text.debugOrientationsTitle}</h3><ul>`;
     
     for (const ori of orientations) {
         const status = ori.fitsWeight ? '' : '';
-        debug += `<li>${status} <strong>${ori.name}</strong>: ${ori.units} unitats `;
-        debug += `(${ori.distribution}) - Pes: ${ori.weight.toFixed(2)}kg</li>`;
+        debug += `<li>${status} <strong>${ori.name}</strong>: ${ori.units} ${text.unitsColumn.toLowerCase()} `;
+        debug += `(${ori.distribution}) - ${text.weightColumn}: ${ori.weight.toFixed(2)}kg</li>`;
     }
     debug += '</ul>';
 
-    debug += '<h3>Diagnòstic:</h3><ul>';
-    debug += `<li>Capacitat màxima: ${maxWeight.toFixed(1)} kg</li>`;
-    debug += `<li>Pes per unitat: ${objWeight.toFixed(3)} kg</li>`;
-    debug += `<li>Màxim teòric per pes: ${maxByWeight} unitats</li>`;
+    debug += `<h3>${text.debugDiagnosticTitle}</h3><ul>`;
+    debug += `<li>${text.debugMaxCapacity}: ${maxWeight.toFixed(1)} kg</li>`;
+    debug += `<li>${text.debugUnitWeight}: ${objWeight.toFixed(3)} kg</li>`;
+    debug += `<li>${text.debugTheoreticalByWeight}: ${maxByWeight} ${text.unitsColumn.toLowerCase()}</li>`;
     debug += '</ul>';
 
     const hasUnits = orientations.some(ori => ori.units > 0);
     if (hasUnits) {
         if (maxByWeight > 0) {
-            debug += `<p><strong>Solució</strong>: ${maxByWeight} unitats limitades per pes</p>`;
+            debug += `<p><strong>${text.debugSolution}</strong>: ${formatLabel(text.debugWeightLimitedUnits, { count: maxByWeight })}</p>`;
         } else {
-            debug += '<p><strong>Problema</strong>: El pes individual és massa alt</p>';
+            debug += `<p><strong>${text.debugProblem}</strong>: ${text.debugSingleWeightTooHigh}</p>`;
         }
     } else {
-        debug += '<p><strong>Problema</strong>: Les dimensions són massa grans per la caixa</p>';
+        debug += `<p><strong>${text.debugProblem}</strong>: ${text.debugDimensionsTooLarge}</p>`;
     }
 
     return debug;
@@ -92,6 +147,7 @@ function createDebugInfo(orientations, maxWeight, objWeight) {
  * @returns {string} HTML summary
  */
 export function createSummary(count, config, allOrientations, extra = {}) {
+    const text = getCalculatorLabels(extra.labels);
     const dims = config?.dimensions || [0, 0, 0];
 
     // Volume-based theoretical max (from real mesh volume if available)
@@ -114,33 +170,33 @@ export function createSummary(count, config, allOrientations, extra = {}) {
     let summary = `
     <div class="results-hero">
         <div class="hero-number">${count}</div>
-        <div class="hero-label">peces</div>
+        <div class="hero-label">${text.piecesUnit}</div>
     </div>
 
     <div class="results-cards">
         <div class="result-card">
             <div class="card-body">
                 <div class="card-value">${config?.distribution || '0×0×0'}</div>
-                <div class="card-label">Distribució (L×W×H)</div>
+                <div class="card-label">${text.distributionLabel}</div>
             </div>
         </div>
         <div class="result-card">
             <div class="card-body">
                 <div class="card-value">${estTotalWeightKg ? estTotalWeightKg + ' kg' : totalWeight + ' kg'}</div>
-                <div class="card-label">${estTotalWeightKg ? 'Pes total estimat' : 'Pes total'}</div>
-                ${estPieceWeightG ? `<div class="card-sub">${estPieceWeightG} g/peça · ${materialName || 'material'}</div>` : ''}
+                <div class="card-label">${estTotalWeightKg ? text.estimatedTotalWeightLabel : text.totalWeightLabel}</div>
+                ${estPieceWeightG ? `<div class="card-sub">${estPieceWeightG} ${text.perPieceSuffix} · ${materialName || text.materialFallback}</div>` : ''}
             </div>
         </div>
         <div class="result-card">
             <div class="card-body">
                 <div class="card-value">${volEff}%</div>
-                <div class="card-label">Eficiència volum</div>
+                <div class="card-label">${text.volumeEfficiencyLabel}</div>
             </div>
         </div>
         <div class="result-card">
             <div class="card-body">
                 <div class="card-value">${config?.name || '—'}</div>
-                <div class="card-label">Orientació òptima</div>
+                <div class="card-label">${text.bestOrientationLabel}</div>
             </div>
         </div>
     </div>`;
@@ -149,14 +205,14 @@ export function createSummary(count, config, allOrientations, extra = {}) {
     if (meshVolumeCC) {
         summary += `
     <div class="results-section">
-        <h3>Volum STL</h3>
+        <h3>${text.stlVolumeTitle}</h3>
         <div class="info-grid">
-            <div class="info-item"><span class="info-label">Volum real</span><span class="info-value">${meshVolumeCC} cm³</span></div>
-            <div class="info-item"><span class="info-label">Bounding box</span><span class="info-value">${bboxVolumeCC} cm³</span></div>
-            <div class="info-item"><span class="info-label">Ratio ompliment</span><span class="info-value">${fillRatio}%</span></div>`;
+            <div class="info-item"><span class="info-label">${text.realVolumeLabel}</span><span class="info-value">${meshVolumeCC} cm³</span></div>
+            <div class="info-item"><span class="info-label">${text.boundingBoxLabel}</span><span class="info-value">${bboxVolumeCC} cm³</span></div>
+            <div class="info-item"><span class="info-label">${text.fillRatioLabel}</span><span class="info-value">${fillRatio}%</span></div>`;
         if (volTheoretical !== null) {
             summary += `
-            <div class="info-item"><span class="info-label">Màx. teòric (volum)</span><span class="info-value">${volTheoretical}</span></div>`;
+            <div class="info-item"><span class="info-label">${text.theoreticalVolumeMaxLabel}</span><span class="info-value">${volTheoretical}</span></div>`;
         }
         summary += `
         </div>
@@ -164,22 +220,22 @@ export function createSummary(count, config, allOrientations, extra = {}) {
     }
 
     if (config?.limitedBy === 'weight') {
-        summary += `<div class="results-warning">⚠️ Factor limitant: PES (no dimensions)</div>`;
+        summary += `<div class="results-warning">${text.weightLimitWarning}</div>`;
     }
 
     // Orientations comparison table
     if (allOrientations.length > 1) {
         summary += `
     <details class="results-section orientations-details">
-        <summary><h3>Comparació d'Orientacions</h3></summary>
+        <summary><h3>${text.orientationComparisonTitle}</h3></summary>
         <table>
             <thead>
                 <tr>
-                    <th>Orientació</th>
-                    <th>Units</th>
-                    <th>Dist.</th>
-                    <th>Pes</th>
-                    <th>Vol%</th>
+                    <th>${text.orientationColumn}</th>
+                    <th>${text.unitsColumn}</th>
+                    <th>${text.distributionColumn}</th>
+                    <th>${text.weightColumn}</th>
+                    <th>${text.volumeColumn}</th>
                 </tr>
             </thead>
             <tbody>`;
@@ -228,20 +284,23 @@ export function calcularEmpaquetatge(params) {
         allowRotation = true,
         packingGap = 0, // Separació entre peces en mm (0 = sense gap)
         orientationOverrides = null,
-        meshVolume = 0 // Real mesh volume in mm³ (0 = use bounding box)
+        meshVolume = 0, // Real mesh volume in mm³ (0 = use bounding box)
+        labels = null
     } = params;
+
+    const text = getCalculatorLabels(labels || {});
 
     // Validation
     if ([objL, objW, objH, objWeight, boxL, boxW, boxH, maxWeight].some(v => v <= 0)) {
         return {
-            summary: '<p>Tots els valors han de ser majors que 0.</p>',
+            summary: `<p>${text.validationPositive}</p>`,
             data: null
         };
     }
 
     if (objWeight > maxWeight) {
         return {
-            summary: '<p>El pes d\'una sola unitat supera la capacitat màxima de la caixa.</p>',
+            summary: `<p>${text.validationSingleUnitTooHeavy}</p>`,
             data: null
         };
     }
@@ -267,16 +326,16 @@ export function calcularEmpaquetatge(params) {
             [objDims[2], objDims[1], objDims[0]],
         ];
         orientationNames = [
-            'Original (L×W×H)',
-            'Rotació Y (L×H×W)',
-            'Rotació Z (W×L×H)',
-            'Rotació XY (W×H×L)',
-            'Rotació XZ (H×L×W)',
-            'Rotació YZ (H×W×L)',
+            text.orientationOriginal,
+            text.orientationRotY,
+            text.orientationRotZ,
+            text.orientationRotXY,
+            text.orientationRotXZ,
+            text.orientationRotYZ,
         ];
     } else {
         orientations = [[objDims[0], objDims[1], objDims[2]]];
-        orientationNames = ['Sense rotació'];
+        orientationNames = [text.orientationNoRotation];
     }
 
     let bestFit = 0;
@@ -358,7 +417,7 @@ export function calcularEmpaquetatge(params) {
         if (!bestDist) continue;
 
         const weightConfig = {
-            name: `${orientationNames[i]} (Limitat per pes)`,
+            name: `${orientationNames[i]} (${text.weightLimitedSuffix})`,
             dimensions: [ol, ow, oh],
             rotation: Array.isArray(orientationOverrides) && orientationOverrides[i]?.rotation
                 ? orientationOverrides[i].rotation
@@ -384,9 +443,9 @@ export function calcularEmpaquetatge(params) {
 
     // No solution found
     if (bestFit === 0 || !bestConfig) {
-        const debug = createDebugInfo(allOrientations, maxWeight, objWeight);
+        const debug = createDebugInfo(allOrientations, maxWeight, objWeight, text);
         return {
-            summary: `<p>No cap cap unitat a la caixa.</p>${debug}`,
+            summary: `<p>${text.noUnitFits}</p>${debug}`,
             data: null
         };
     }
@@ -399,6 +458,7 @@ export function calcularEmpaquetatge(params) {
     const summary = createSummary(bestFit, bestConfig, allOrientations, {
         volumeTheoreticalMax,
         meshVolumeMM3: meshVolume > 0 ? meshVolume : null,
+        labels: text,
     });
 
     return {

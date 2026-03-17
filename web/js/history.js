@@ -4,13 +4,16 @@
  */
 
 import { StorageManager } from './storage/storage-manager.js';
+import { getStoredLanguage, loadLocale, setStoredLanguage, t } from './i18n.js';
 
 // State
 const state = {
     storage: null,
     history: [],
     filteredHistory: [],
-    selectedItem: null
+    selectedItem: null,
+    language: getStoredLanguage(),
+    locale: null
 };
 
 // DOM Elements
@@ -24,6 +27,7 @@ const elements = {
     filterSearch: document.getElementById('filter-search'),
     exportBtn: document.getElementById('export-btn'),
     clearBtn: document.getElementById('clear-btn'),
+    langToggle: document.getElementById('lang-toggle'),
     // Modal
     detailModal: document.getElementById('detail-modal'),
     modalBody: document.getElementById('modal-body'),
@@ -36,9 +40,13 @@ const elements = {
  * Initialize the history page
  */
 async function init() {
+    state.locale = await loadLocale(state.language);
+
     // Initialize storage
     state.storage = new StorageManager();
     await state.storage.init();
+
+    applyLanguage();
     
     // Load history
     await loadHistory();
@@ -51,6 +59,10 @@ async function init() {
  * Setup event listeners
  */
 function setupEventListeners() {
+    elements.langToggle?.addEventListener('click', () => {
+        toggleLanguage().catch(error => console.error('Language toggle error:', error));
+    });
+
     // Filters
     elements.filterMode?.addEventListener('change', applyFilters);
     elements.filterDate?.addEventListener('change', applyFilters);
@@ -69,6 +81,89 @@ function setupEventListeners() {
     });
 }
 
+function historyText(path, variables = {}, fallback = '') {
+    return t(state.locale, `history.${path}`, variables, fallback);
+}
+
+function commonText(path, variables = {}, fallback = '') {
+    return t(state.locale, `common.${path}`, variables, fallback);
+}
+
+async function toggleLanguage() {
+    state.language = state.language === 'ca' ? 'en' : 'ca';
+    setStoredLanguage(state.language);
+    state.locale = await loadLocale(state.language);
+    applyLanguage();
+    applyFilters();
+    updateStats();
+}
+
+function applyLanguage() {
+    const localeCode = state.locale?.meta?.locale || (state.language === 'ca' ? 'ca-ES' : 'en-US');
+
+    document.documentElement.lang = state.language;
+    document.title = historyText('pageTitle');
+
+    if (elements.langToggle) {
+        elements.langToggle.innerHTML = state.language === 'ca'
+            ? '<span class="lang-active">CA</span><span class="lang-sep">/</span><span class="lang-inactive">EN</span>'
+            : '<span class="lang-inactive">CA</span><span class="lang-sep">/</span><span class="lang-active">EN</span>';
+    }
+
+    const setText = (id, value) => {
+        const el = document.getElementById(id);
+        if (el) el.textContent = value;
+    };
+
+    setText('history-page-title', historyText('headerTitle'));
+    setText('history-page-subtitle', historyText('headerSubtitle'));
+    setText('calculator-link', historyText('calculatorLink'));
+    setText('filter-mode-label', historyText('filterMode'));
+    setText('filter-date-label', historyText('filterDate'));
+    setText('filter-search-label', historyText('filterSearch'));
+    setText('th-date', historyText('tableDate'));
+    setText('th-mode', historyText('tableMode'));
+    setText('th-piece', historyText('tablePiece'));
+    setText('th-box', historyText('tableBox'));
+    setText('th-pieces', historyText('tablePieces'));
+    setText('th-weight', historyText('tableWeight'));
+    setText('th-stl', historyText('tableStl'));
+    setText('th-actions', historyText('tableActions'));
+    setText('loading-history-text', historyText('loadingHistory'));
+    setText('empty-title', historyText('emptyTitle'));
+    setText('empty-subtitle', historyText('emptySubtitle'));
+    setText('empty-link', commonText('buttons.goToCalculator'));
+    setText('detail-modal-title', historyText('detailTitle'));
+    setText('modal-load', historyText('detailLoad'));
+    setText('modal-cancel', commonText('buttons.close'));
+
+    if (elements.exportBtn) {
+        elements.exportBtn.textContent = commonText('buttons.exportCsv');
+        elements.exportBtn.title = historyText('exportTitle');
+    }
+    if (elements.clearBtn) {
+        elements.clearBtn.textContent = commonText('buttons.clearAll');
+        elements.clearBtn.title = historyText('clearTitle');
+    }
+    if (elements.filterSearch) {
+        elements.filterSearch.placeholder = historyText('searchPlaceholder');
+    }
+    if (elements.filterMode) {
+        const modeOptions = [historyText('modeAll'), historyText('modeOptimized'), historyText('modeBulk')];
+        Array.from(elements.filterMode.options).forEach((option, index) => {
+            if (modeOptions[index]) option.textContent = modeOptions[index];
+        });
+    }
+    if (elements.filterDate) {
+        const dateOptions = [historyText('dateAll'), historyText('dateToday'), historyText('dateWeek'), historyText('dateMonth')];
+        Array.from(elements.filterDate.options).forEach((option, index) => {
+            if (dateOptions[index]) option.textContent = dateOptions[index];
+        });
+    }
+
+    elements.historyBody.dataset.localeCode = localeCode;
+}
+
 /**
  * Load calculation history
  */
@@ -79,7 +174,7 @@ async function loadHistory() {
         updateStats();
     } catch (error) {
         console.error('Error loading history:', error);
-        showError('Error carregant l\'historial');
+        showError(historyText('loadError'));
     }
 }
 
@@ -134,7 +229,8 @@ function renderTable() {
     
     elements.historyBody.innerHTML = state.filteredHistory.map(item => {
         const date = new Date(item.timestamp);
-        const dateStr = date.toLocaleDateString('ca-ES', { 
+        const localeCode = state.locale?.meta?.locale || 'ca-ES';
+        const dateStr = date.toLocaleDateString(localeCode, {
             day: '2-digit', 
             month: '2-digit', 
             year: 'numeric',
@@ -144,7 +240,7 @@ function renderTable() {
         
         const modeClass = item.mode === 'optimized' ? 'optimized' : 'bulk';
         const modeIcon = item.mode === 'optimized' ? '' : '';
-        const modeName = item.mode === 'optimized' ? 'Optimitzat' : 'A Granel';
+        const modeName = item.mode === 'optimized' ? historyText('modeOptimized') : historyText('modeBulk');
         
         const pieceDims = item.pieceDims ? 
             `${item.pieceDims.l?.toFixed(1) || '?'}×${item.pieceDims.w?.toFixed(1) || '?'}×${item.pieceDims.h?.toFixed(1) || '?'}` : 
@@ -170,8 +266,8 @@ function renderTable() {
                 <td>${stlName}</td>
                 <td>
                     <div class="action-btns">
-                        <button class="action-btn view" data-id="${item.id}" title="Veure detalls">Veure</button>
-                        <button class="action-btn delete" data-id="${item.id}" title="Eliminar">Eliminar</button>
+                        <button class="action-btn view" data-id="${item.id}" title="${historyText('viewTitle')}">${commonText('buttons.view')}</button>
+                        <button class="action-btn delete" data-id="${item.id}" title="${historyText('deleteTitle')}">${commonText('buttons.delete')}</button>
                     </div>
                 </td>
             </tr>
@@ -214,9 +310,9 @@ function updateStats() {
     const bulk = state.history.filter(h => h.mode === 'bulk').length;
     
     elements.historyStats.innerHTML = `
-        <span class="stat">Total: <span class="stat-value">${total}</span></span>
-        <span class="stat">Optimitzat: <span class="stat-value">${optimized}</span></span>
-        <span class="stat">A Granel: <span class="stat-value">${bulk}</span></span>
+        <span class="stat">${historyText('statsTotal')}: <span class="stat-value">${total}</span></span>
+        <span class="stat">${historyText('statsOptimized')}: <span class="stat-value">${optimized}</span></span>
+        <span class="stat">${historyText('statsBulk')}: <span class="stat-value">${bulk}</span></span>
     `;
 }
 
@@ -230,7 +326,8 @@ function showDetailModal(id) {
     state.selectedItem = item;
     
     const date = new Date(item.timestamp);
-    const dateStr = date.toLocaleDateString('ca-ES', { 
+    const localeCode = state.locale?.meta?.locale || 'ca-ES';
+    const dateStr = date.toLocaleDateString(localeCode, {
         weekday: 'long',
         day: 'numeric', 
         month: 'long', 
@@ -240,7 +337,7 @@ function showDetailModal(id) {
     });
     
     const modeIcon = item.mode === 'optimized' ? '' : '';
-    const modeName = item.mode === 'optimized' ? 'Mode Optimitzat' : 'Mode a Granel';
+    const modeName = item.mode === 'optimized' ? historyText('modeOptimizedLong') : historyText('modeBulkLong');
     
     elements.modalBody.innerHTML = `
         <div class="detail-header">
@@ -249,62 +346,62 @@ function showDetailModal(id) {
         
         <div class="detail-grid">
             <div class="detail-section">
-                <h3>Dimensions de la Peça</h3>
+                <h3>${historyText('detailPieceSection')}</h3>
                 <div class="detail-row">
-                    <span class="detail-label">Llargada</span>
+                    <span class="detail-label">${historyText('detailLength')}</span>
                     <span class="detail-value">${item.pieceDims?.l?.toFixed(2) || '-'} mm</span>
                 </div>
                 <div class="detail-row">
-                    <span class="detail-label">Amplada</span>
+                    <span class="detail-label">${historyText('detailWidth')}</span>
                     <span class="detail-value">${item.pieceDims?.w?.toFixed(2) || '-'} mm</span>
                 </div>
                 <div class="detail-row">
-                    <span class="detail-label">Alçada</span>
+                    <span class="detail-label">${historyText('detailHeight')}</span>
                     <span class="detail-value">${item.pieceDims?.h?.toFixed(2) || '-'} mm</span>
                 </div>
                 <div class="detail-row">
-                    <span class="detail-label">Pes</span>
+                    <span class="detail-label">${historyText('detailWeight')}</span>
                     <span class="detail-value">${item.pieceWeight || '-'} kg</span>
                 </div>
             </div>
             
             <div class="detail-section">
-                <h3>Dimensions de la Caixa</h3>
+                <h3>${historyText('detailBoxSection')}</h3>
                 <div class="detail-row">
-                    <span class="detail-label">Llargada</span>
+                    <span class="detail-label">${historyText('detailLength')}</span>
                     <span class="detail-value">${item.boxDims?.length?.toFixed(0) || '-'} mm</span>
                 </div>
                 <div class="detail-row">
-                    <span class="detail-label">Amplada</span>
+                    <span class="detail-label">${historyText('detailWidth')}</span>
                     <span class="detail-value">${item.boxDims?.width?.toFixed(0) || '-'} mm</span>
                 </div>
                 <div class="detail-row">
-                    <span class="detail-label">Alçada</span>
+                    <span class="detail-label">${historyText('detailHeight')}</span>
                     <span class="detail-value">${item.boxDims?.height?.toFixed(0) || '-'} mm</span>
                 </div>
                 <div class="detail-row">
-                    <span class="detail-label">Pes màxim</span>
+                    <span class="detail-label">${historyText('detailMaxWeight')}</span>
                     <span class="detail-value">${item.maxWeight || '-'} kg</span>
                 </div>
             </div>
             
             <div class="detail-section">
-                <h3>Resultat</h3>
+                <h3>${historyText('detailResultSection')}</h3>
                 <div class="detail-row">
-                    <span class="detail-label">Mode</span>
+                    <span class="detail-label">${historyText('detailMode')}</span>
                     <span class="detail-value">${modeIcon} ${modeName}</span>
                 </div>
                 <div class="detail-row">
-                    <span class="detail-label">Peces</span>
+                    <span class="detail-label">${historyText('detailPieces')}</span>
                     <span class="detail-value" style="color: var(--accent-green); font-size: 1.2rem;">${item.pieceCount || '-'}</span>
                 </div>
             </div>
             
             <div class="detail-section">
-                <h3>Fitxer STL</h3>
+                <h3>${historyText('detailFileSection')}</h3>
                 <div class="detail-row">
-                    <span class="detail-label">Nom</span>
-                    <span class="detail-value">${item.stlFileName || 'Cap STL associat'}</span>
+                    <span class="detail-label">${historyText('detailName')}</span>
+                    <span class="detail-value">${item.stlFileName || historyText('detailNoStl')}</span>
                 </div>
             </div>
         </div>
@@ -350,14 +447,14 @@ function loadSelectedData() {
  * Delete item
  */
 async function deleteItem(id) {
-    if (!confirm('Segur que vols eliminar aquest càlcul de l\'historial?')) return;
+    if (!confirm(historyText('deleteConfirm'))) return;
     
     try {
         await state.storage.deleteCalculation(id);
         await loadHistory();
     } catch (error) {
         console.error('Error deleting item:', error);
-        alert('Error eliminant el càlcul');
+        alert(historyText('deleteError'));
     }
 }
 
@@ -366,22 +463,22 @@ async function deleteItem(id) {
  */
 function exportToCSV() {
     if (state.filteredHistory.length === 0) {
-        alert('No hi ha dades per exportar');
+        alert(historyText('exportEmpty'));
         return;
     }
     
     const headers = [
-        'Data',
-        'Mode',
-        'Peça Llargada (mm)',
-        'Peça Amplada (mm)',
-        'Peça Alçada (mm)',
-        'Pes Peça (kg)',
-        'Caixa Llargada (mm)',
-        'Caixa Amplada (mm)',
-        'Caixa Alçada (mm)',
-        'Pes Màxim (kg)',
-        'Peces',
+        historyText('tableDate'),
+        historyText('tableMode'),
+        `${historyText('tablePiece')} L`,
+        `${historyText('tablePiece')} W`,
+        `${historyText('tablePiece')} H`,
+        `${historyText('tableWeight')} peça`,
+        `${historyText('tableBox')} L`,
+        `${historyText('tableBox')} W`,
+        `${historyText('tableBox')} H`,
+        historyText('detailMaxWeight'),
+        historyText('tablePieces'),
         'STL'
     ];
     
@@ -409,7 +506,7 @@ function exportToCSV() {
     
     const link = document.createElement('a');
     link.href = url;
-    link.download = `packassist_historial_${new Date().toISOString().split('T')[0]}.csv`;
+    link.download = `${historyText('csvFileName')}_${new Date().toISOString().split('T')[0]}.csv`;
     link.click();
     
     URL.revokeObjectURL(url);
@@ -419,15 +516,15 @@ function exportToCSV() {
  * Confirm clear history
  */
 async function confirmClearHistory() {
-    if (!confirm('Segur que vols esborrar TOT l\'historial?\n\nAquesta acció no es pot desfer.')) return;
-    if (!confirm('ÚLTIMA OPORTUNITAT: S\'esborraran tots els càlculs. Continuar?')) return;
+    if (!confirm(historyText('clearConfirm1'))) return;
+    if (!confirm(historyText('clearConfirm2'))) return;
     
     try {
         await state.storage.clearHistory();
         await loadHistory();
     } catch (error) {
         console.error('Error clearing history:', error);
-        alert('Error esborrant l\'historial');
+        alert(historyText('clearError'));
     }
 }
 

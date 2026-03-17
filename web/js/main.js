@@ -4,6 +4,7 @@
  */
 
 import * as THREE from 'three';
+import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_42';
 import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=force_update_42';
 import { SceneManager } from './visualization/scene.js?v=force_update_42';
@@ -11,6 +12,7 @@ import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-worl
 import { ReportGenerator } from './report/report-generator.js?v=force_update_42';
 import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_42';
 import { StorageManager } from './storage/storage-manager.js?v=force_update_42';
+import { loadLocale, t as localeText, getStoredLanguage, setStoredLanguage } from './i18n.js?v=force_update_42';
 
 // Helper for dynamic limits
 function updateMaxPiecesLimit() {
@@ -35,7 +37,8 @@ function updateMaxPiecesLimit() {
 // Application state
 const state = {
     mode: 'optimized', // 'optimized' or 'bulk'
-    language: 'ca', // 'ca' or 'en'
+    language: getStoredLanguage(), // 'ca' or 'en'
+    locale: null,
     stlGeometry: null,
     stlAlignedGeometry: null, // transient in-memory geometry aligned to stable gravity orientation
     stlSettledQuat: null, // cached quaternion from gravity drop on current loaded geometry
@@ -59,6 +62,24 @@ const state = {
     calcAbortController: null
 };
 
+const stlExporter = new STLExporter();
+
+function mainText(path, variables = {}, fallback = path) {
+    return state.locale ? localeText(state.locale, `main.${path}`, variables, fallback) : fallback;
+}
+
+function commonText(path, variables = {}, fallback = path) {
+    return state.locale ? localeText(state.locale, `common.${path}`, variables, fallback) : fallback;
+}
+
+function mainRaw(path, fallback = null) {
+    return state.locale ? localeText(state.locale, `main.${path}`, {}, fallback ?? path) : (fallback ?? path);
+}
+
+function getCalculatorLabels() {
+    return mainRaw('results', {});
+}
+
 function buildSimplifiedFileName(originalName, percentKeep) {
     if (!originalName) return originalName;
     const dot = originalName.lastIndexOf('.');
@@ -68,6 +89,94 @@ function buildSimplifiedFileName(originalName, percentKeep) {
     const pctLabel = Number.isFinite(pct) ? (pct < 1 ? pct.toFixed(1) : String(Math.round(pct))) : 'simp';
     const cleanedBase = base.replace(/_simp\d+(?:\.\d+)?pct$/i, '');
     return `${cleanedBase}_simp${pctLabel}pct${ext}`;
+}
+
+function ensureSTLFileName(fileName) {
+    if (!fileName) return 'packassist_mesh.stl';
+    const dot = fileName.lastIndexOf('.');
+    const base = dot >= 0 ? fileName.slice(0, dot) : fileName;
+    return `${base}.stl`;
+}
+
+function downloadArrayBuffer(buffer, fileName, mimeType = 'model/stl') {
+    const blob = new Blob([buffer], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportGeometryToBinarySTL(geometry) {
+    const mesh = new THREE.Mesh(geometry.clone(), new THREE.MeshBasicMaterial());
+    const exported = stlExporter.parse(mesh, { binary: true });
+    if (exported instanceof ArrayBuffer) return exported;
+    if (exported?.buffer instanceof ArrayBuffer) return exported.buffer;
+    throw new Error('Binary STL export failed');
+}
+
+function downloadCurrentSTL(fileNameOverride = null, geometryOverride = null) {
+    const geometry = geometryOverride || state.stlGeometry;
+    if (!geometry) return;
+
+    const sourceName = fileNameOverride || state.stlFileName || 'packassist_mesh.stl';
+    const fileName = ensureSTLFileName(sourceName);
+    const canUseCachedData = !geometryOverride && state.stlFileData instanceof ArrayBuffer && /\.stl$/i.test(sourceName);
+    const data = canUseCachedData ? state.stlFileData : exportGeometryToBinarySTL(geometry);
+    downloadArrayBuffer(data, fileName, 'model/stl');
+}
+
+function bindSTLStatusActions(geometryForSimplify = null) {
+    document.getElementById('download-stl-btn')?.addEventListener('click', () => {
+        try {
+            downloadCurrentSTL();
+        } catch (error) {
+            console.error('Error downloading STL:', error);
+            elements.stlStatus.className = 'stl-status error';
+            elements.stlStatus.textContent = mainText('downloadStlError', {}, 'Could not download STL');
+        }
+    });
+
+    document.getElementById('simplify-mesh-btn')?.addEventListener('click', () => {
+        const sourceGeometry = geometryForSimplify || state.stlGeometry;
+        if (!sourceGeometry) return;
+
+        const modal = getSimplificationModal();
+        modal.open(sourceGeometry, async (simplifiedGeometry, simplifiedSTLData, meta = {}) => {
+            let geometry = simplifiedGeometry;
+            centerToOrigin(geometry);
+
+            state.stlGeometry = geometry;
+            elements.stlStatus.className = 'stl-status';
+            elements.stlStatus.textContent = 'Preparant orientació estable...';
+            elements.stlStatus.style.display = 'block';
+            await updateStableOrientationCache();
+            updateMeshIntegrityCache(state.stlGeometry);
+
+            if (simplifiedSTLData instanceof ArrayBuffer) {
+                state.stlFileData = simplifiedSTLData;
+                state.stlFileName = buildSimplifiedFileName(state.stlFileName, meta.percentKeep);
+                await saveSTLToHistory();
+            }
+
+            elements.objLength.value = state.stlDimensions.length.toFixed(2);
+            elements.objWidth.value = state.stlDimensions.width.toFixed(2);
+            elements.objHeight.value = state.stlDimensions.height.toFixed(2);
+
+            const newPositions = geometry.getAttribute('position');
+            elements.stlStatus.className = 'stl-status success';
+            elements.stlStatus.innerHTML = `${mainText('statusSimplified', {
+                vertices: newPositions.count.toLocaleString(),
+                length: state.stlDimensions.length.toFixed(2),
+                width: state.stlDimensions.width.toFixed(2),
+                height: state.stlDimensions.height.toFixed(2)
+            }, 'Simplified')} <button id="download-stl-btn" class="btn-small" style="margin-left:8px;">${mainText('downloadStl', {}, 'Download STL')}</button><br>${buildOrientationAndIntegrityLine()}`;
+            bindSTLStatusActions();
+        }, state.stlFileData, state.stlFileName || 'packassist_mesh.stl');
+    });
 }
 
 // UI translations
@@ -197,10 +306,10 @@ function buildOrientationAndIntegrityLine() {
     const baseCount = state.stlStableOrientations?.length || 1;
     const integrityText = state.stlIntegrity
         ? (state.stlIntegrity.skipped
-            ? ' | Malla: check no disponible (massa gran)'
-            : ` | Malla: ${state.stlIntegrity.watertight ? 'tancada' : 'amb fuites'}`)
+            ? ` | ${mainText('meshLabel', {}, 'Mesh')}: ${mainText('integrityUnavailable', {}, 'check unavailable')}`
+            : ` | ${mainText('meshLabel', {}, 'Mesh')}: ${state.stlIntegrity.watertight ? mainText('integrityClosed', {}, 'closed') : mainText('integrityLeaking', {}, 'leaking')}`)
         : '';
-    return `Orientació: ${state.orientationPrepMs.toFixed(0)} ms (${baseCount} bases)${integrityText}`;
+    return `${mainText('orientationLabel', {}, 'Orientation')}: ${state.orientationPrepMs.toFixed(0)} ms (${baseCount} ${mainText('basesLabel', {}, 'bases')})${integrityText}`;
 }
 
 function updateMeshIntegrityCache(geometry) {
@@ -318,14 +427,19 @@ async function findStableOrientationByGravity(geometry, initialQuat = null) {
     return settledQuat;
 }
 
-function randomQuaternion() {
-    const euler = new THREE.Euler(
-        (Math.random() * 2 - 1) * Math.PI,
-        (Math.random() * 2 - 1) * Math.PI,
-        (Math.random() * 2 - 1) * Math.PI,
-        'XYZ'
-    );
-    return new THREE.Quaternion().setFromEuler(euler);
+function getDeterministicOrientationSeeds() {
+    const eulers = [
+        [0, 0, 0],
+        [Math.PI / 2, 0, 0],
+        [-Math.PI / 2, 0, 0],
+        [0, Math.PI / 2, 0],
+        [0, -Math.PI / 2, 0],
+        [0, 0, Math.PI / 2],
+        [0, 0, -Math.PI / 2],
+        [Math.PI, 0, 0]
+    ];
+
+    return eulers.map(([x, y, z]) => new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z, 'XYZ')));
 }
 
 function quatAngularDistanceDeg(a, b) {
@@ -335,8 +449,7 @@ function quatAngularDistanceDeg(a, b) {
 
 async function findStableOrientationCandidatesByGravity(geometry, sampleCount = 4) {
     const uniqueQuats = [];
-    const seeds = [null];
-    for (let i = 1; i < sampleCount; i++) seeds.push(randomQuaternion());
+    const seeds = [null, ...getDeterministicOrientationSeeds().slice(0, Math.max(0, sampleCount - 1))];
 
     for (const seed of seeds) {
         let quat = null;
@@ -378,7 +491,7 @@ async function updateStableOrientationCache() {
     const t0 = performance.now();
     const pos = state.stlGeometry.getAttribute('position');
     const vertexCount = pos ? pos.count : 0;
-    const sampleCount = vertexCount > 60000 ? 1 : (vertexCount > 20000 ? 2 : 4);
+    const sampleCount = vertexCount > 60000 ? 4 : (vertexCount > 20000 ? 6 : 8);
     let quats = [];
     try {
         quats = await findStableOrientationCandidatesByGravity(state.stlGeometry, sampleCount);
@@ -413,12 +526,31 @@ async function updateStableOrientationCache() {
         stableBases.push({ quat, geometry: alignedGeometry, stability });
     }
 
+    try {
+        const fallbackGeometry = state.stlGeometry.clone();
+        alignToStableBase(fallbackGeometry);
+        recenterGeometry(fallbackGeometry);
+        const fallbackStability = getSupportStability(fallbackGeometry);
+        const fallbackDims = extractDimensions(fallbackGeometry);
+        const alreadyPresent = stableBases.some(base => {
+            const dims = extractDimensions(base.geometry);
+            return Math.abs(dims.length - fallbackDims.length) < 0.5 &&
+                Math.abs(dims.width - fallbackDims.width) < 0.5 &&
+                Math.abs(dims.height - fallbackDims.height) < 0.5;
+        });
+        if (!alreadyPresent) {
+            stableBases.push({ quat: null, geometry: fallbackGeometry, stability: fallbackStability });
+        }
+    } catch (error) {
+        console.warn('[Orientation] Stable-base fallback candidate failed:', error?.message || error);
+    }
+
     stableBases.sort((a, b) => {
         const aStable = a.stability?.stable ? 1 : 0;
         const bStable = b.stability?.stable ? 1 : 0;
         if (bStable !== aStable) return bStable - aStable;
-        const aArea = a.stability?.area || 0;
-        const bArea = b.stability?.area || 0;
+        const aArea = a.stability?.supportArea || 0;
+        const bArea = b.stability?.supportArea || 0;
         if (Math.abs(bArea - aArea) > 1e-6) return bArea - aArea;
         const ad = extractDimensions(a.geometry);
         const bd = extractDimensions(b.geometry);
@@ -489,23 +621,101 @@ function buildOrientationPool(baseGeometry, boxL, boxW, boxH) {
     return pool;
 }
 
+function buildOrientationPoolFromCandidates(candidatePool, boxL, boxW, boxH) {
+    const pool = [];
+    const seen = new Set();
+
+    for (const candidate of candidatePool) {
+        if (!candidate?.oriented) continue;
+        const geom = candidate.oriented.clone();
+        recenterGeometry(geom);
+        geom.computeBoundingBox();
+        const bb = geom.boundingBox;
+        const sx = bb.max.x - bb.min.x;
+        const sy = bb.max.y - bb.min.y;
+        const sz = bb.max.z - bb.min.z;
+        if (sx > boxL + 0.01 || sz > boxW + 0.01 || sy > boxH + 0.01) continue;
+
+        const key = [candidate.name || '', candidate.tiltName || '', candidate.yawDeg || 0, sx.toFixed(2), sy.toFixed(2), sz.toFixed(2)].join('_');
+        if (seen.has(key)) continue;
+        seen.add(key);
+        pool.push({ geometry: geom, yaw: candidate.yawDeg || 0, name: candidate.name || `${candidate.yawDeg || 0}°` });
+    }
+
+    console.log(`[OrientPool] Built ${pool.length} candidate orientations: ${pool.map(o => o.name).join(', ')}`);
+    return pool;
+}
+
+function compactGridSpacingCollides(geometry, dx, dz) {
+    if (!geometry) return false;
+    if (!geometry.boundsTree && typeof geometry.computeBoundsTree === 'function') {
+        geometry.computeBoundsTree();
+    }
+    if (!geometry.boundsTree) return false;
+    const matrix = new THREE.Matrix4().makeTranslation(dx, 0, dz);
+    return geometry.boundsTree.intersectsGeometry(geometry, matrix);
+}
+
 function computeWallAlignedGridCapacity(geometry, boxL, boxW, packingGap = 0) {
     geometry.computeBoundingBox();
     const bb = geometry.boundingBox;
     const sizeX = bb.max.x - bb.min.x;
     const sizeZ = bb.max.z - bb.min.z;
+    const factors = [1.0, 0.98, 0.96, 0.94, 0.92, 0.9, 0.88];
+    let best = null;
+
+    for (const fx of factors) {
+        for (const fz of factors) {
+            const stepX = Math.max(sizeX + packingGap * 0.35, (sizeX + packingGap) * fx);
+            const stepZ = Math.max(sizeZ + packingGap * 0.35, (sizeZ + packingGap) * fz);
+
+            if (compactGridSpacingCollides(geometry, stepX, 0)) continue;
+            if (compactGridSpacingCollides(geometry, 0, stepZ)) continue;
+            if (compactGridSpacingCollides(geometry, stepX, stepZ)) continue;
+
+            const gridNX = Math.max(1, Math.floor((boxL - sizeX + 0.01) / stepX) + 1);
+            const gridNZ = Math.max(1, Math.floor((boxW - sizeZ + 0.01) / stepZ) + 1);
+            const count = gridNX * gridNZ;
+            const usedL = sizeX + Math.max(0, gridNX - 1) * stepX;
+            const usedW = sizeZ + Math.max(0, gridNZ - 1) * stepZ;
+            const leftoverL = Math.max(0, boxL - usedL);
+            const leftoverW = Math.max(0, boxW - usedW);
+            const leftoverArea = leftoverL * boxW + leftoverW * boxL - leftoverL * leftoverW;
+
+            if (!best || count > best.count || (count === best.count && leftoverArea < best.leftoverArea)) {
+                best = {
+                    sizeX,
+                    sizeZ,
+                    stepX,
+                    stepZ,
+                    gridNX,
+                    gridNZ,
+                    count,
+                    leftoverL,
+                    leftoverW,
+                    leftoverArea
+                };
+            }
+        }
+    }
+
+    if (best) return best;
+
     const stepX = sizeX + packingGap;
     const stepZ = sizeZ + packingGap;
-    const gridNX = Math.max(1, Math.floor((boxL + packingGap + 0.01) / stepX));
-    const gridNZ = Math.max(1, Math.floor((boxW + packingGap + 0.01) / stepZ));
+    const gridNX = Math.max(1, Math.floor((boxL - sizeX + 0.01) / stepX) + 1);
+    const gridNZ = Math.max(1, Math.floor((boxW - sizeZ + 0.01) / stepZ) + 1);
     const count = gridNX * gridNZ;
-    const usedL = gridNX * sizeX + Math.max(0, gridNX - 1) * packingGap;
-    const usedW = gridNZ * sizeZ + Math.max(0, gridNZ - 1) * packingGap;
+    const usedL = sizeX + Math.max(0, gridNX - 1) * stepX;
+    const usedW = sizeZ + Math.max(0, gridNZ - 1) * stepZ;
     const leftoverL = Math.max(0, boxL - usedL);
     const leftoverW = Math.max(0, boxW - usedW);
+
     return {
         sizeX,
         sizeZ,
+        stepX,
+        stepZ,
         gridNX,
         gridNZ,
         count,
@@ -523,8 +733,9 @@ function computeWallAlignedGridCapacity(geometry, boxL, boxW, packingGap = 0) {
  * @param {boolean} allowRotation
  * @returns {Array}
  */
-function generateYawCandidates(stableBases, boxL, boxW, boxH, allowRotation) {
+function generateYawCandidates(originalGeometry, stableBases, boxL, boxW, boxH, allowRotation, placementStrategy = 'stable-contact') {
     const candidates = [];
+    const seen = new Set();
     const stableOnlyBases = stableBases.filter(base => base.stability?.stable);
     const sourceBases = stableOnlyBases.length > 0 ? stableOnlyBases : stableBases;
     const isSquareBox = Math.abs(boxL - boxW) < 1;
@@ -532,21 +743,29 @@ function generateYawCandidates(stableBases, boxL, boxW, boxH, allowRotation) {
         ? (isSquareBox ? [0, 90] : [0, 90, 180, 270])
         : [0];
 
+    const pushCandidate = (candidate) => {
+        candidate.oriented.computeBoundingBox();
+        const bb = candidate.oriented.boundingBox;
+        const sX = bb.max.x - bb.min.x;
+        const sY = bb.max.y - bb.min.y;
+        const sZ = bb.max.z - bb.min.z;
+        if (sX > boxL + 0.01 || sZ > boxW + 0.01 || sY > boxH + 0.01) return;
+
+        const key = [sX, sY, sZ, candidate.yawDeg]
+            .map(v => Number(v).toFixed(2))
+            .join('_');
+        if (seen.has(key)) return;
+        seen.add(key);
+        candidates.push(candidate);
+    };
+
     for (let baseIndex = 0; baseIndex < sourceBases.length; baseIndex++) {
         const base = sourceBases[baseIndex];
         for (const yawDeg of yaws) {
             const oriented = base.geometry.clone();
             applyYawToGeometry(oriented, yawDeg);
 
-            oriented.computeBoundingBox();
-            const bb = oriented.boundingBox;
-            const sX = bb.max.x - bb.min.x;
-            const sY = bb.max.y - bb.min.y;
-            const sZ = bb.max.z - bb.min.z;
-
-            if (sX > boxL + 0.01 || sZ > boxW + 0.01 || sY > boxH + 0.01) continue;
-
-            candidates.push({
+            pushCandidate({
                 tilt: { quat: base.quat, baseIndex },
                 tiltName: `Base ${baseIndex + 1}`,
                 yawDeg,
@@ -554,6 +773,27 @@ function generateYawCandidates(stableBases, boxL, boxW, boxH, allowRotation) {
                 oriented,
             });
         }
+    }
+
+    const includeAxisPermutations = placementStrategy !== 'stable-contact';
+
+    if (allowRotation && originalGeometry && includeAxisPermutations) {
+        const permutations = [
+            [0, 1, 2], [0, 2, 1], [1, 0, 2],
+            [1, 2, 0], [2, 0, 1], [2, 1, 0]
+        ];
+        permutations.forEach((perm, permIndex) => {
+            const oriented = originalGeometry.clone();
+            applyPermutation(oriented, perm);
+            recenterGeometry(oriented);
+            pushCandidate({
+                tilt: { quat: null, baseIndex: permIndex },
+                tiltName: `Axis ${permIndex + 1}`,
+                yawDeg: 0,
+                name: `A${permIndex + 1} · P${perm.join('')}`,
+                oriented,
+            });
+        });
     }
 
     console.log(`[Orientation] Multi-base yaw search: ${candidates.length} candidates (${sourceBases.length} stable bases × ${yaws.length} yaw)`);
@@ -602,7 +842,7 @@ function renderOrientationAlternativesUI(evalResult) {
                 <tr>
                     <td>${r.name}</td>
                     <td>${r.count}</td>
-                    <td><button class="btn-small" data-action="view-ori" data-idx="${idx}" ${disabled}>VEURE</button></td>
+                    <td><button class="btn-small" data-action="view-ori" data-idx="${idx}" ${disabled}>${mainText('orientationView')}</button></td>
                 </tr>
             `;
         })
@@ -610,13 +850,13 @@ function renderOrientationAlternativesUI(evalResult) {
 
     const html = `
         <div style="margin-top: 10px;">
-            <button class="btn-small" data-action="toggle-ori">Alternatives d'orientació</button>
+            <button class="btn-small" data-action="toggle-ori">${mainText('orientationAlternatives')}</button>
             <div data-role="ori-panel" style="display:none; margin-top: 8px;" class="results-content">
                 <table>
                     <thead>
                         <tr>
-                            <th>Orientació</th>
-                            <th>Peces</th>
+                            <th>${mainText('orientationLabel')}</th>
+                            <th>${mainRaw('results.unitsColumn', 'Units')}</th>
                             <th></th>
                         </tr>
                     </thead>
@@ -624,7 +864,7 @@ function renderOrientationAlternativesUI(evalResult) {
                         ${rows}
                     </tbody>
                 </table>
-                <p class="info-text" style="margin-top:6px;">* Comparació feta amb col·lisions reals (no travessen).</p>
+                <p class="info-text" style="margin-top:6px;">${mainText('orientationCompareHint')}</p>
             </div>
         </div>
     `;
@@ -643,7 +883,11 @@ const elements = {
     objHeight: document.getElementById('obj-height'),
     objWeight: document.getElementById('obj-weight'),
     allowRotation: document.getElementById('allow-rotation'),
-    heightMapNesting: document.getElementById('heightmap-nesting'),
+    placementStrategy: document.getElementById('placement-strategy'),
+    placementStability: document.getElementById('placement-stability'),
+    placementSearchEffort: document.getElementById('placement-search-effort'),
+    placementSideStacking: document.getElementById('placement-side-stacking'),
+    placementSettleCheck: document.getElementById('placement-settle-check'),
     stlUpload: document.getElementById('stl-upload'),
     stlStatus: document.getElementById('stl-status'),
     optPieceColors: document.getElementById('opt-piece-colors'),
@@ -754,11 +998,13 @@ function nextFrame() {
  * Initialize the application
  */
 async function init() {
+    state.locale = await loadLocale(state.language);
     state.sceneManager = new SceneManager(elements.threeCanvas);
     state.reportGenerator = new ReportGenerator(state.sceneManager);
     state.storage = new StorageManager();
     await state.storage.init();
     setupEventListeners();
+    await applyLanguage();
     await loadSTLHistory();
     switchMode(state.mode);
     initRapier().then(() => {
@@ -800,6 +1046,10 @@ function ensureMeshServer() {
  * Setup all event listeners
  */
 function setupEventListeners() {
+    elements.langToggle?.addEventListener('click', () => {
+        toggleLanguage().catch(err => console.error('Language toggle error:', err));
+    });
+
     elements.modeButtons.forEach(btn => {
         btn.addEventListener('click', () => switchMode(btn.dataset.mode));
     });
@@ -841,6 +1091,13 @@ function setupEventListeners() {
 
     elements.optPieceColors?.addEventListener('input', (e) => {
         elements.optPieceColorsValue.textContent = e.target.value;
+    });
+
+    elements.placementStrategy?.addEventListener('change', () => {
+        const isLegacy = elements.placementStrategy.value === 'legacy';
+        if (elements.placementSettleCheck) {
+            elements.placementSettleCheck.disabled = isLegacy;
+        }
     });
 
     elements.dropHeight.addEventListener('input', (e) => {
@@ -903,9 +1160,6 @@ function setupEventListeners() {
     elements.modalCancel?.addEventListener('click', closeReportModal);
     elements.modalDownload?.addEventListener('click', downloadReportFromModal);
     
-    // Language toggle
-    elements.langToggle?.addEventListener('click', toggleLanguage);
-
     elements.colorCount?.addEventListener('input', (e) => {
         elements.colorCountValue.textContent = e.target.value;
     });
@@ -1002,7 +1256,7 @@ function switchMode(mode) {
     
     // Reset results
     if (!isOptimized) {
-        elements.results.innerHTML = '<p class="placeholder-text">Configura les opcions i inicia la simulació</p>';
+        elements.results.innerHTML = `<p class="placeholder-text">${mainText('bulkPlaceholder')}</p>`;
         state.sceneManager.clearPieces();
     }
 }
@@ -1019,7 +1273,9 @@ async function handleSTLUpload(event) {
     // Check if format is supported
     if (!isSupported(file.name)) {
         elements.stlStatus.className = 'stl-status error';
-        elements.stlStatus.textContent = `Format no suportat. Formats vàlids: ${SUPPORTED_EXTENSIONS.join(', ')}`;
+        elements.stlStatus.textContent = mainText('unsupportedFormat', {
+            formats: SUPPORTED_EXTENSIONS.join(', ')
+        });
         elements.stlStatus.style.display = 'block';
         return;
     }
@@ -1068,41 +1324,21 @@ async function handleSTLUpload(event) {
         
         if (vertexCount <= VERTEX_THRESHOLD) {
             elements.stlStatus.className = 'stl-status success';
-            elements.stlStatus.innerHTML = `Dimensions: ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm<br>${buildOrientationAndIntegrityLine()}`;
+            elements.stlStatus.innerHTML = `${mainText('statusDimensions', {
+                length: state.stlDimensions.length.toFixed(2),
+                width: state.stlDimensions.width.toFixed(2),
+                height: state.stlDimensions.height.toFixed(2)
+            })} <button id="download-stl-btn" class="btn-small" style="margin-left:8px;">${mainText('downloadStl')}</button><br>${buildOrientationAndIntegrityLine()}`;
+            bindSTLStatusActions();
         } else {
             const triangleCount = Math.floor(vertexCount / 3);
             const baseCount = state.stlStableOrientations?.length || 1;
             elements.stlStatus.className = 'stl-status warning';
-            elements.stlStatus.innerHTML = `⚠️ Malla complexa (${triangleCount.toLocaleString()} triangles / ${vertexCount.toLocaleString()} vèrtexs). El rendiment pot ser lent. <button id="simplify-mesh-btn" class="btn-small">Simplificar</button> <span style="margin-left:8px; opacity:.85;">Orientació: ${state.orientationPrepMs.toFixed(0)} ms (${baseCount} bases)</span>`;
-
-            document.getElementById('simplify-mesh-btn')?.addEventListener('click', () => {
-                const modal = getSimplificationModal();
-                modal.open(geometry, async (simplifiedGeometry, simplifiedSTLData, meta = {}) => {
-                    geometry = simplifiedGeometry;
-                    centerToOrigin(geometry);
-
-                    state.stlGeometry = geometry;
-                    elements.stlStatus.className = 'stl-status';
-                    elements.stlStatus.textContent = 'Preparant orientació estable...';
-                    elements.stlStatus.style.display = 'block';
-                    await updateStableOrientationCache();
-                    updateMeshIntegrityCache(state.stlGeometry);
-
-                    if (simplifiedSTLData instanceof ArrayBuffer) {
-                        state.stlFileData = simplifiedSTLData;
-                        state.stlFileName = buildSimplifiedFileName(state.stlFileName, meta.percentKeep);
-                        await saveSTLToHistory();
-                    }
-
-                    elements.objLength.value = state.stlDimensions.length.toFixed(2);
-                    elements.objWidth.value = state.stlDimensions.width.toFixed(2);
-                    elements.objHeight.value = state.stlDimensions.height.toFixed(2);
-
-                    const newPositions = geometry.getAttribute('position');
-                    elements.stlStatus.className = 'stl-status success';
-                    elements.stlStatus.innerHTML = `Simplificat: ${newPositions.count.toLocaleString()} vèrtexs | ${state.stlDimensions.length.toFixed(2)} × ${state.stlDimensions.width.toFixed(2)} × ${state.stlDimensions.height.toFixed(2)} mm<br>${buildOrientationAndIntegrityLine()}`;
-                }, state.stlFileData);
-            });
+            elements.stlStatus.innerHTML = `⚠️ ${mainText('complexMeshWarning', {
+                triangles: triangleCount.toLocaleString(),
+                vertices: vertexCount.toLocaleString()
+            })} <button id="simplify-mesh-btn" class="btn-small">${commonText('buttons.simplify')}</button> <button id="download-stl-btn" class="btn-small" style="margin-left:8px;">${mainText('downloadStl')}</button> <span style="margin-left:8px; opacity:.85;">${mainText('orientationLabel')}: ${state.orientationPrepMs.toFixed(0)} ms (${baseCount} ${mainText('basesLabel')})</span>`;
+            bindSTLStatusActions(geometry);
         }
         
         // Save to history
@@ -1194,18 +1430,18 @@ async function loadSTLHistory() {
                 <div class="stl-info">
                     <input type="text" class="stl-name-input" value="${escapeHtml(file.name)}" 
                            data-id="${file.id}" data-field="name" 
-                           title="Clic per editar el nom">
+                           title="${mainText('editNameTitle')}">
                     <div class="stl-meta">
                         <span class="stl-dims">${dims} mm</span>
                         <input type="number" class="stl-weight-input" value="${file.weight || 0}" 
                                step="0.001" min="0" data-id="${file.id}" data-field="weight"
-                               title="Pes per unitat">
+                               title="${mainText('unitWeightTitle')}">
                         <span class="stl-weight-unit">kg</span>
                     </div>
                 </div>
                 <div class="stl-actions">
-                    <button class="stl-btn load" data-id="${file.id}" title="Carregar">Carregar</button>
-                    <button class="stl-btn delete" data-id="${file.id}" title="Eliminar">Eliminar</button>
+                    <button class="stl-btn download" data-id="${file.id}" title="${commonText('buttons.download')}">${commonText('buttons.download')}</button>
+                    <button class="stl-btn delete" data-id="${file.id}" title="${commonText('buttons.delete')}">${commonText('buttons.delete')}</button>
                 </div>
             </div>
             `;
@@ -1262,12 +1498,12 @@ function setupSTLHistoryListeners() {
         });
     });
     
-    // Load button
-    elements.stlHistoryList.querySelectorAll('.stl-btn.load').forEach(btn => {
+    // Download button
+    elements.stlHistoryList.querySelectorAll('.stl-btn.download').forEach(btn => {
         btn.addEventListener('click', async (e) => {
             e.stopPropagation();
             const id = parseInt(e.target.dataset.id);
-            await loadSTLFromHistory(id);
+            await downloadSTLFromHistory(id);
         });
     });
     
@@ -1312,6 +1548,16 @@ async function updateSTLField(id, field, value) {
         console.log(`Updated STL ${id} ${field} to:`, value);
     } catch (error) {
         console.error('Error updating STL field:', error);
+    }
+}
+
+async function downloadSTLFromHistory(id) {
+    try {
+        const file = await state.storage.getFile(id);
+        if (!file?.data || !file?.name) return;
+        downloadArrayBuffer(file.data, ensureSTLFileName(file.name), 'model/stl');
+    } catch (error) {
+        console.error('Error downloading STL from history:', error);
     }
 }
 
@@ -1373,7 +1619,7 @@ async function loadSTLFromHistory(id) {
     } catch (error) {
         console.error('Error loading STL from history:', error);
         elements.stlStatus.className = 'stl-status error';
-        elements.stlStatus.textContent = `Error carregant: ${error.message}`;
+        elements.stlStatus.textContent = mainText('loadError', { message: error.message });
         elements.stlStatus.style.display = 'block';
     }
 }
@@ -1446,7 +1692,12 @@ function getInputValues() {
         boxH: parseFloat(elements.boxHeight.value) || 0,
         maxWeight: parseFloat(elements.maxWeight.value) || 0,
         allowRotation: elements.allowRotation.checked,
-        heightMapNesting: elements.heightMapNesting?.checked ?? true,
+        heightMapNesting: !!state.stlGeometry,
+        placementStrategy: elements.placementStrategy?.value || 'stable-contact',
+        placementStability: elements.placementStability?.value || 'strict',
+        placementSearchEffort: elements.placementSearchEffort?.value || 'balanced',
+        placementSideStacking: elements.placementSideStacking?.checked ?? true,
+        placementSettleCheck: elements.placementSettleCheck?.checked ?? true,
         materialDensity: (() => {
             const val = elements.materialDensity?.value;
             if (!val || val === '0') return 0;
@@ -1528,7 +1779,7 @@ async function handleCalculate() {
     await nextFrame();
 
     try {
-        elements.results.innerHTML = '<p class="loading-text">Calculant...</p>';
+        elements.results.innerHTML = `<p class="loading-text">${mainText('calculating')}</p>`;
 
         // Allow UI update
         await new Promise(resolve => setTimeout(resolve, 10));
@@ -1588,7 +1839,8 @@ async function handleCalculate() {
         const result = calcularEmpaquetatge({
             ...values,
             orientationOverrides,
-            meshVolume
+            meshVolume,
+            labels: getCalculatorLabels()
         });
 
         // Don't show results yet — wait until placement finishes for accurate count
@@ -1600,7 +1852,7 @@ async function handleCalculate() {
             elements.results.classList.add('fade-in');
         } else {
             // For heightmap: show placeholder, real results will be shown after placement
-            elements.results.innerHTML = '<p class="loading-text">Col·locant peces...</p>';
+            elements.results.innerHTML = `<p class="loading-text">${mainText('placingPieces')}</p>`;
         }
 
         // Update 3D visualization
@@ -1645,6 +1897,12 @@ async function handleCalculate() {
                     const maxTry = pieceBBoxVol > 0
                         ? Math.min(2000, Math.max(maxDraw, Math.ceil(boxVol / pieceBBoxVol * 1.2)))
                         : maxDraw;
+                    const searchEffortMultiplier = values.placementSearchEffort === 'dense'
+                        ? 1.45
+                        : values.placementSearchEffort === 'fast'
+                        ? 0.75
+                        : 1.0;
+                    const effectiveMaxTry = Math.max(maxDraw, Math.min(3000, Math.ceil(maxTry * searchEffortMultiplier)));
                     console.log(`[Packing] boxVol=${boxVol.toFixed(0)}, pieceBBoxVol=${pieceBBoxVol.toFixed(1)}, maxTry=${maxTry}, maxDraw=${maxDraw}, weightCap=${Number.isFinite(maxByWeight) ? maxByWeight : 'none'}`);
 
                     // --- Step 1: Use precomputed stable orientation (from load/simplify) + generate yaw candidates ---
@@ -1654,7 +1912,13 @@ async function handleCalculate() {
 
                     // --- Step 1b: Generate yaw candidates on oriented source ---
                     const candidates = generateYawCandidates(
-                        stableBases, values.boxL, values.boxW, values.boxH, values.allowRotation
+                        state.stlGeometry,
+                        stableBases,
+                        values.boxL,
+                        values.boxW,
+                        values.boxH,
+                        values.allowRotation,
+                        values.placementStrategy
                     );
 
                     if (candidates.length === 0) {
@@ -1674,13 +1938,20 @@ async function handleCalculate() {
 
                         const footprintArea = computeFootprintArea(c.oriented);
                         const stability = getSupportStability(c.oriented);
+                        c.oriented.computeBoundingBox();
+                        const candidateBox = c.oriented.boundingBox;
+                        const candidateHeight = candidateBox ? (candidateBox.max.y - candidateBox.min.y) : Infinity;
                         const gridFit = computeWallAlignedGridCapacity(
                             c.oriented,
                             values.boxL,
                             values.boxW,
                             values.packingGap
                         );
-                        const dryRunMaxTry = Math.min(50, maxTry); // fast evaluation, enough to rank
+                        const dryRunMaxTry = values.placementSearchEffort === 'dense'
+                            ? Math.min(120, effectiveMaxTry)
+                            : values.placementSearchEffort === 'fast'
+                            ? Math.min(30, effectiveMaxTry)
+                            : Math.min(60, effectiveMaxTry);
                         const trial = await state.sceneManager.addPackedSTLHeightMapAsync({
                             stlGeometry: c.oriented,
                             maxDraw,
@@ -1690,6 +1961,11 @@ async function handleCalculate() {
                             boxL: values.boxL,
                             boxW: values.boxW,
                             boxH: values.boxH,
+                            placementStrategy: values.placementStrategy,
+                            stabilityMode: values.placementStability,
+                            allowSideStacking: values.placementSideStacking,
+                            useSettleCheck: values.placementSettleCheck,
+                            searchEffort: values.placementSearchEffort,
                             dryRun: true,
                             abortSignal,
                             onProgress: ({ placed, maxTry: mt }) => {
@@ -1711,63 +1987,108 @@ async function handleCalculate() {
                             gridNZ: gridFit.gridNZ,
                             leftoverArea: gridFit.leftoverArea,
                             stable: !!stability?.stable,
-                            baseArea: footprintArea || 0
+                            baseArea: footprintArea || 0,
+                            height: candidateHeight
                         });
                     }
 
-                    // --- Step 3: Pick best wall-parallel orientation first, then density ---
-                    evalResults.sort((a, b) => {
-                        if (b.stable !== a.stable) return b.stable ? 1 : -1;
-                        if ((b.gridCount || 0) !== (a.gridCount || 0)) return (b.gridCount || 0) - (a.gridCount || 0);
-                        if (b.count !== a.count) return b.count - a.count;
-                        if ((a.leftoverArea || 0) !== (b.leftoverArea || 0)) return (a.leftoverArea || 0) - (b.leftoverArea || 0);
-                        return (b.baseArea || 0) - (a.baseArea || 0);
-                    });
+                    const sortDenseBand = (list, { stableFirst = false, prioritizeDenseBase = true } = {}) => {
+                        list.sort((a, b) => {
+                            if (prioritizeDenseBase && (b.gridCount || 0) !== (a.gridCount || 0)) {
+                                return (b.gridCount || 0) - (a.gridCount || 0);
+                            }
+                            if (stableFirst && b.stable !== a.stable) return b.stable ? 1 : -1;
+                            if (b.count !== a.count) return b.count - a.count;
+                            if ((a.height || Infinity) !== (b.height || Infinity)) {
+                                return (a.height || Infinity) - (b.height || Infinity);
+                            }
+                            if (!stableFirst && b.stable !== a.stable) return b.stable ? 1 : -1;
+                            if ((a.leftoverArea || 0) !== (b.leftoverArea || 0)) return (a.leftoverArea || 0) - (b.leftoverArea || 0);
+                            return (b.baseArea || 0) - (a.baseArea || 0);
+                        });
+                        return list;
+                    };
 
-                    let best = evalResults[0] || { tilt: { quat: state.stlSettledQuat }, yawDeg: 0, name: 'Y 0°', count: 0 };
+                    let rankedEvalResults = [...evalResults];
+
+                    // --- Step 3: Pick the orientation.
+                    // Stable-contact must stay within the densest first-layer band, then choose
+                    // the most stable candidate inside that band. Other modes keep looser ranking.
+                    if (values.placementStrategy === 'stable-contact' && rankedEvalResults.length > 0) {
+                        const bestGridCount = Math.max(...rankedEvalResults.map(result => result.gridCount || 0));
+                        const denseBand = rankedEvalResults.filter(result => (result.gridCount || 0) >= Math.max(1, bestGridCount - 1));
+                        rankedEvalResults = sortDenseBand(denseBand, { stableFirst: true, prioritizeDenseBase: true });
+                    } else {
+                        const prioritizeDenseBase = values.placementStrategy !== 'legacy';
+                        rankedEvalResults = sortDenseBand(rankedEvalResults, {
+                            stableFirst: false,
+                            prioritizeDenseBase
+                        });
+                    }
+
+                    let best = rankedEvalResults[0] || { tilt: { quat: state.stlSettledQuat }, yawDeg: 0, name: 'Y 0°', count: 0 };
 
                     state.orientationEval = {
                         values: { ...values },
                         maxDraw,
                         maxTry,
                         originalGeometry: state.stlGeometry.clone(),
-                        results: evalResults
+                        results: rankedEvalResults
                     };
 
-                    if (evalResults[0]) {
+                    if (rankedEvalResults[0]) {
                         console.log(
-                            `[Orientation] Selected ${evalResults[0].name} ` +
-                            `grid=${evalResults[0].gridNX}x${evalResults[0].gridNZ} (${evalResults[0].gridCount}), ` +
-                            `dryRun=${evalResults[0].count}, leftoverArea=${(evalResults[0].leftoverArea || 0).toFixed(1)}`
+                            `[Orientation] Selected ${rankedEvalResults[0].name} ` +
+                            `grid=${rankedEvalResults[0].gridNX}x${rankedEvalResults[0].gridNZ} (${rankedEvalResults[0].gridCount}), ` +
+                            `dryRun=${rankedEvalResults[0].count}, leftoverArea=${(rankedEvalResults[0].leftoverArea || 0).toFixed(1)}`
                         );
                     }
 
                     const bestGeom = buildOrientedGeometry(state.stlGeometry, best.tilt, best.yawDeg);
 
                     // Build orientation pool for mixed-orientation packing
-                    const orientPool = buildOrientationPool(
-                        bestGeom,
-                        values.boxL, values.boxW, values.boxH
-                    );
+                    const orientPool = values.placementStrategy === 'stable-contact'
+                        ? buildOrientationPoolFromCandidates(
+                            sortDenseBand([...evalResults], {
+                                stableFirst: false,
+                                prioritizeDenseBase: true
+                            })
+                                .slice(0, 6)
+                                .map(result => candidates[result.candidateIndex])
+                                .filter(Boolean),
+                            values.boxL,
+                            values.boxW,
+                            values.boxH
+                        )
+                        : buildOrientationPool(
+                            bestGeom,
+                            values.boxL, values.boxW, values.boxH
+                        );
 
                     drawn = await state.sceneManager.addPackedSTLHeightMapAsync({
                         stlGeometry: bestGeom,
                         orientationPool: orientPool,
-                        useMixedOrientations: orientPool.length > 1,
+                        useMixedOrientations: orientPool.length > 1 && (values.placementSideStacking || values.placementStrategy === 'stable-contact'),
+                        lockPrimaryFirstLayer: values.placementStrategy === 'stable-contact',
                         maxDraw,
-                        maxTry,
+                        maxTry: effectiveMaxTry,
                         packingGap: values.packingGap,
                         colorCount: values.colorCount,
                         boxL: values.boxL,
                         boxW: values.boxW,
                         boxH: values.boxH,
+                        placementStrategy: values.placementStrategy,
+                        stabilityMode: values.placementStability,
+                        allowSideStacking: values.placementSideStacking,
+                        useSettleCheck: values.placementSettleCheck,
+                        searchEffort: values.placementSearchEffort,
                         dryRun: false,
                         abortSignal,
                         onProgress: ({ placed, maxTry }) => {
                             const start = 70;
                             const end = 95;
                             const t = maxTry > 0 ? (placed / maxTry) : 0;
-                            setCalcProgress(true, start + (end - start) * t, `Col·locant peces ${Math.floor(placed)}/${maxTry}...`, calcStartTime);
+                            setCalcProgress(true, start + (end - start) * t, mainText('placingPiecesProgress', { placed: Math.floor(placed), maxTry }), calcStartTime);
                         }
                     });
 
@@ -1834,14 +2155,19 @@ async function handleCalculate() {
             const estTotalWeight = estPieceWeight * displayCount;
 
             // Material name for display
-            const materialNames = { '2700': 'Alumini', '7850': 'Acer', '1200': 'Plàstic', '8940': 'Coure' };
+            const materialNames = {
+                '2700': mainText('materialAluminium').split(' (')[0],
+                '7850': mainText('materialSteel').split(' (')[0],
+                '1200': mainText('materialPlastic').split(' (')[0],
+                '8940': mainText('materialCopper').split(' (')[0]
+            };
             const matName = materialNames[String(matDensity)] || (matDensity > 0 ? `${matDensity} kg/m³` : null);
 
             // Build final summary with ACTUAL count (not grid estimate)
             const finalConfig = { ...result.data.bestOrientation };
             if (isHeightmap) {
                 // Override with real placement data
-                finalConfig.distribution = realDistributionText || `${displayCount} (heightmap)`;
+                finalConfig.distribution = realDistributionText || `${displayCount} (${mainText('heightmapSuffix')})`;
                 finalConfig.weight = displayCount * values.objWeight;
                 const volObj = meshVolume > 0 ? meshVolume : (values.objL * values.objW * values.objH);
                 const volBox = values.boxL * values.boxW * values.boxH;
@@ -1855,6 +2181,7 @@ async function handleCalculate() {
                 estimatedPieceWeight: estPieceWeight,
                 estimatedTotalWeight: estTotalWeight,
                 materialName: matName,
+                labels: getCalculatorLabels(),
             });
             elements.results.innerHTML = finalSummary;
             elements.results.classList.add('fade-in');
@@ -1891,7 +2218,7 @@ async function handleCalculate() {
         setTimeout(() => setCalcProgress(false, 0), 1200);
     } catch (err) {
         if (err?.name === 'AbortError') {
-            elements.results.innerHTML = '<p class="placeholder-text">Càlcul cancel·lat.</p>';
+            elements.results.innerHTML = `<p class="placeholder-text">${mainText('calcCancelled')}</p>`;
             // Clean up scene on cancellation
             state.sceneManager?.clearPieces();
             if (elements.reportButtons) elements.reportButtons.style.display = 'none';
@@ -2098,7 +2425,7 @@ async function applyGravityTest() {
                 state.lastResults.pieceCount = insideCount;
             }
             if (elements.simulationStatus) {
-                elements.simulationStatus.textContent = `Gravetat estabilitzada — ${insideCount} peces a la caixa`;
+                elements.simulationStatus.textContent = mainText('gravitySettled', { count: insideCount });
             }
         }
     };
@@ -2118,7 +2445,7 @@ async function applyGravityTest() {
                 state.lastResults.pieceCount = insideCount;
             }
             if (elements.simulationStatus) {
-                elements.simulationStatus.textContent = `⚠️ Temps de simulació esgotat — ${insideCount} peces a la caixa`;
+                elements.simulationStatus.textContent = mainText('gravityTimeout', { count: insideCount });
             }
             return;
         }
@@ -2167,7 +2494,7 @@ async function startSimulation() {
     
     // Validate inputs
     if ([values.objL, values.objW, values.objH, values.boxL, values.boxW, values.boxH].some(v => v <= 0)) {
-        elements.results.innerHTML = '<p>Totes les dimensions han de ser majors que 0</p>';
+        elements.results.innerHTML = `<p>${mainText('invalidDimensions')}</p>`;
         return;
     }
     
@@ -2208,7 +2535,7 @@ async function startSimulation() {
         elements.resetSimBtn.style.display = 'block';
         
     } catch (error) {
-        elements.results.innerHTML = `<p>Error inicialitzant simulació: ${error.message}</p>`;
+        elements.results.innerHTML = `<p>${mainText('simulationInitError', { message: error.message })}</p>`;
     }
 }
 
@@ -2249,7 +2576,7 @@ function resetSimulation() {
     elements.simulationStatus.className = 'simulation-status';
     elements.simulationStatus.textContent = '';
     
-    elements.results.innerHTML = '<p class="placeholder-text">Configura les opcions i inicia la simulació</p>';
+    elements.results.innerHTML = `<p class="placeholder-text">${mainText('bulkPlaceholder')}</p>`;
 }
 
 /**
@@ -2262,18 +2589,17 @@ async function updateSimulationStatus(status) {
     
     if (status.status === 'settled' || status.status === 'timeout' || status.status === 'saturated') {
         const values = getInputValues();
-        const removedText = status.removed > 0 ? `<li><strong>Peces eliminades (fora):</strong> ${status.removed}</li>` : '';
+        const localizedRemovedText = status.removed > 0 ? `<li><strong>${mainText('bulkRemoved')}</strong> ${status.removed}</li>` : '';
         
         elements.results.innerHTML = `
-            <h1>Resultat Simulació a Granel</h1>
+            <h1>${mainText('bulkResultTitle')}</h1>
             <ul>
-                <li><strong>Peces deixades caure:</strong> ${status.dropped}</li>
-                <li><strong>Peces dins la caixa:</strong> ${status.inside}</li>
-                ${removedText}
-                <li><strong>Eficiència:</strong> ${((status.inside / status.dropped) * 100).toFixed(1)}%</li>
+                <li><strong>${mainText('bulkDropped')}</strong> ${status.dropped}</li>
+                <li><strong>${mainText('bulkInside')}</strong> ${status.inside}</li>
+                ${localizedRemovedText}
+                <li><strong>${mainText('bulkEfficiency')}</strong> ${((status.inside / status.dropped) * 100).toFixed(1)}%</li>
             </ul>
-            <p>En mode a granel, les peces s'acomoden de forma natural per gravetat. 
-            El resultat pot variar entre execucions degut a la física.</p>
+            <p>${mainText('bulkExplanation')}</p>
         `;
         
         // Store results for report
@@ -2328,16 +2654,18 @@ async function updateSimulationStatus(status) {
 /**
  * Toggle UI language between CA and EN
  */
-function toggleLanguage() {
+async function toggleLanguage() {
     state.language = state.language === 'ca' ? 'en' : 'ca';
-    applyLanguage();
+    setStoredLanguage(state.language);
+    await applyLanguage();
 }
 
 /**
  * Apply current language to all UI elements
  */
-function applyLanguage() {
-    const t = uiTranslations[state.language];
+async function applyLanguage() {
+    state.locale = await loadLocale(state.language);
+    const t = state.locale.main;
     const btn = elements.langToggle;
     if (btn) {
         const active = btn.querySelector('.lang-active');
@@ -2350,6 +2678,8 @@ function applyLanguage() {
             inactive.textContent = 'CA';
         }
     }
+
+    document.title = t.pageTitle;
     
     // Header
     const headerH1 = document.querySelector('.header h1');
@@ -2399,13 +2729,117 @@ function applyLanguage() {
     
     // Checkbox labels
     const rotLabel = document.querySelector('label[for="allow-rotation"]');
-    const heightLabel = document.querySelector('label[for="heightmap-nesting"]');
     const randRotLabel = document.querySelector('label[for="random-rotation"]');
     const autoCapLabel = document.querySelector('label[for="auto-capacity"]');
+    const solidLabel = document.querySelector('label[for="solid-piece"]');
+    const customDensityLabel = document.querySelector('label[for="custom-density"]');
+    const wallThicknessLabel = document.querySelector('label[for="wall-thickness"]');
+    const materialDensityLabel = document.querySelector('label[for="material-density"]');
     if (rotLabel) rotLabel.textContent = t.allowRotation;
-    if (heightLabel) heightLabel.textContent = t.heightmapNesting;
     if (randRotLabel) randRotLabel.textContent = t.randomRotation;
     if (autoCapLabel) autoCapLabel.textContent = t.autoCapacity;
+    if (solidLabel) solidLabel.textContent = t.solidPiece;
+    if (customDensityLabel) customDensityLabel.textContent = t.customDensity;
+    if (wallThicknessLabel) wallThicknessLabel.textContent = t.wallThickness;
+    if (materialDensityLabel) materialDensityLabel.textContent = t.materialDensity;
+
+    const placementOptionsTitle = document.getElementById('placement-options-title');
+    const placementStrategyLabel = document.querySelector('label[for="placement-strategy"]');
+    const placementStabilityLabel = document.querySelector('label[for="placement-stability"]');
+    const placementSearchLabel = document.querySelector('label[for="placement-search-effort"]');
+    const placementSideLabel = document.querySelector('label[for="placement-side-stacking"]');
+    const placementSettleLabel = document.querySelector('label[for="placement-settle-check"]');
+    const placementHint = document.getElementById('placement-hint');
+    if (placementOptionsTitle) placementOptionsTitle.textContent = t.placementOptionsTitle;
+    if (placementStrategyLabel) placementStrategyLabel.textContent = t.placementStrategyLabel;
+    if (placementStabilityLabel) placementStabilityLabel.textContent = t.placementStabilityLabel;
+    if (placementSearchLabel) placementSearchLabel.textContent = t.placementSearchEffortLabel;
+    if (placementSideLabel) placementSideLabel.textContent = t.placementSideStacking;
+    if (placementSettleLabel) placementSettleLabel.textContent = t.placementSettleCheck;
+    if (placementHint) placementHint.textContent = t.placementHint;
+
+    if (elements.placementStrategy) {
+        const optionTexts = [
+            t.placementStrategyStable,
+            t.placementStrategyHybrid,
+            t.placementStrategyPhysics,
+            t.placementStrategyLegacy
+        ];
+        Array.from(elements.placementStrategy.options).forEach((option, index) => {
+            if (optionTexts[index]) option.textContent = optionTexts[index];
+        });
+    }
+    if (elements.placementStability) {
+        const optionTexts = [
+            t.placementStabilityStrict,
+            t.placementStabilityMedium,
+            t.placementStabilityLoose
+        ];
+        Array.from(elements.placementStability.options).forEach((option, index) => {
+            if (optionTexts[index]) option.textContent = optionTexts[index];
+        });
+    }
+    if (elements.placementSearchEffort) {
+        const optionTexts = [
+            t.placementSearchFast,
+            t.placementSearchBalanced,
+            t.placementSearchDense
+        ];
+        Array.from(elements.placementSearchEffort.options).forEach((option, index) => {
+            if (optionTexts[index]) option.textContent = optionTexts[index];
+        });
+    }
+
+    if (elements.materialDensity) {
+        const optionTexts = [
+            t.materialNone,
+            t.materialAluminium,
+            t.materialSteel,
+            t.materialPlastic,
+            t.materialCopper,
+            t.materialCustom
+        ];
+        Array.from(elements.materialDensity.options).forEach((option, index) => {
+            if (optionTexts[index]) option.textContent = optionTexts[index];
+        });
+    }
+
+    const optColorsLabel = document.querySelector('label[for="opt-piece-colors"]');
+    if (optColorsLabel) {
+        optColorsLabel.innerHTML = `${t.colorCount} <span id="opt-piece-colors-value">${elements.optPieceColorsValue.textContent}</span>`;
+    }
+    const packingGapLabel = document.querySelector('label[for="packing-gap"]');
+    if (packingGapLabel) {
+        packingGapLabel.innerHTML = `${t.packingGap} <span id="packing-gap-value">${elements.packingGapValue.textContent}</span> mm`;
+    }
+    const dropHeightLabel = document.querySelector('label[for="drop-height"]');
+    if (dropHeightLabel) {
+        dropHeightLabel.innerHTML = `${t.dropHeight} <span id="drop-height-value">${elements.dropHeightValue.textContent}</span>mm`;
+    }
+    const maxPiecesLabel = document.querySelector('label[for="max-pieces"]');
+    if (maxPiecesLabel) {
+        maxPiecesLabel.innerHTML = `${t.maxPieces} <span id="max-pieces-value">${elements.maxPiecesValue.textContent}</span>`;
+    }
+    const dropIntervalLabel = document.querySelector('label[for="drop-interval"]');
+    if (dropIntervalLabel) {
+        dropIntervalLabel.innerHTML = `${t.dropInterval} <span id="drop-interval-value">${elements.dropIntervalValue.textContent}</span>`;
+    }
+    const vibrationFrequencyLabel = document.querySelector('label[for="vibration-frequency"]');
+    if (vibrationFrequencyLabel) {
+        vibrationFrequencyLabel.innerHTML = `${t.vibFreq} <span id="vibration-frequency-value">${elements.vibrationFrequencyValue.textContent}</span> Hz`;
+    }
+    const vibrationAmplitudeLabel = document.querySelector('label[for="vibration-amplitude"]');
+    if (vibrationAmplitudeLabel) {
+        vibrationAmplitudeLabel.innerHTML = `${t.vibAmp} <span id="vibration-amplitude-value">${elements.vibrationAmplitudeValue.textContent}</span> mm`;
+    }
+    const vibrationNoiseLabel = document.querySelector('label[for="vibration-noise"]');
+    if (vibrationNoiseLabel) {
+        vibrationNoiseLabel.innerHTML = `${t.vibNoise} <span id="vibration-noise-value">${elements.vibrationNoiseValue.textContent}</span> mm`;
+    }
+    const pieceColorsLabel = document.querySelector('label[for="piece-colors"]');
+    if (pieceColorsLabel) {
+        pieceColorsLabel.innerHTML = `${t.colorCount} <span id="piece-colors-value">${elements.pieceColorsValue.textContent}</span>`;
+    }
     
     // Buttons
     elements.calculateBtn.textContent = t.calculateBtn;
@@ -2417,7 +2851,6 @@ function applyLanguage() {
     
     // Report modal
     const modalTitle = document.querySelector('.modal-header h2');
-    const modalLangTitle = document.querySelector('.config-section h3');
     const modalDownload = document.getElementById('modal-download');
     const modalCancel = document.getElementById('modal-cancel');
     if (modalTitle) modalTitle.textContent = t.reportTitle;
@@ -2430,7 +2863,7 @@ function applyLanguage() {
     
     // Placeholder
     const placeholder = document.querySelector('.placeholder-text');
-    if (placeholder) placeholder.textContent = t.placeholder;
+    if (placeholder) placeholder.textContent = state.mode === 'optimized' ? t.placeholder : t.bulkPlaceholder;
     
     // Also sync the report language radio
     const radioToCheck = document.querySelector(`input[name="report-lang"][value="${state.language}"]`);
@@ -2491,7 +2924,7 @@ async function updateReportPreview() {
         
     } catch (error) {
         console.error('Error updating preview:', error);
-        elements.reportPreviewFrame.innerHTML = '<p class="loading-text" style="color: red;">Error carregant previsualització</p>';
+        elements.reportPreviewFrame.innerHTML = `<p class="loading-text" style="color: red;">${mainText('reportPreviewError')}</p>`;
     }
 }
 
@@ -2508,7 +2941,7 @@ async function downloadReportFromModal() {
         closeReportModal();
     } catch (error) {
         console.error('Error generating report:', error);
-        alert('Error generant l\'informe.');
+        alert(mainText('reportGenerateError'));
     }
 }
 
@@ -2518,9 +2951,7 @@ async function downloadReportFromModal() {
  */
 async function generateReport(language) {
     if (!state.lastResults) {
-        alert(language === 'ca' 
-            ? 'No hi ha resultats per generar l\'informe. Executa una simulació primer.'
-            : 'No results to generate report. Run a simulation first.');
+        alert(mainText('reportNoResults'));
         return;
     }
     
@@ -2528,9 +2959,7 @@ async function generateReport(language) {
         await state.reportGenerator.downloadReport(state.lastResults, language);
     } catch (error) {
         console.error('Error generating report:', error);
-        alert(language === 'ca' 
-            ? 'Error generant l\'informe.'
-            : 'Error generating report.');
+        alert(mainText('reportGenerateError'));
     }
 }
 

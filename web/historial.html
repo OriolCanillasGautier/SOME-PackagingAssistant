@@ -12,10 +12,17 @@
         <!-- Header -->
         <header class="header">
             <div class="header-content">
-                <h1>Historial de Càlculs</h1>
-                <p>Consulta i gestiona els teus càlculs anteriors</p>
+                <div class="lang-toggle-wrapper">
+                    <button id="lang-toggle" class="lang-toggle" title="Canviar idioma / Switch language">
+                        <span class="lang-active">CA</span>
+                        <span class="lang-sep">/</span>
+                        <span class="lang-inactive">EN</span>
+                    </button>
+                </div>
+                <h1 id="history-page-title">Historial de Càlculs</h1>
+                <p id="history-page-subtitle">Consulta i gestiona els teus càlculs anteriors</p>
                 <nav class="header-nav">
-                    <a href="index.html" class="nav-link">Calculadora</a>
+                    <a href="index.html" class="nav-link" id="calculator-link">Calculadora</a>
                 </nav>
             </div>
         </header>
@@ -39,7 +46,7 @@
             <!-- Filters -->
             <div class="history-filters">
                 <div class="filter-group">
-                    <label for="filter-mode">Mode:</label>
+                    <label for="filter-mode" id="filter-mode-label">Mode:</label>
                     <select id="filter-mode">
                         <option value="all">Tots</option>
                         <option value="optimized">Optimitzat</option>
@@ -47,7 +54,7 @@
                     </select>
                 </div>
                 <div class="filter-group">
-                    <label for="filter-date">Data:</label>
+                    <label for="filter-date" id="filter-date-label">Data:</label>
                     <select id="filter-date">
                         <option value="all">Totes</option>
                         <option value="today">Avui</option>
@@ -56,7 +63,7 @@
                     </select>
                 </div>
                 <div class="filter-group search-group">
-                    <label for="filter-search">Cerca:</label>
+                    <label for="filter-search" id="filter-search-label">Cerca:</label>
                     <input type="text" id="filter-search" placeholder="Nom d'STL...">
                 </div>
             </div>
@@ -66,20 +73,20 @@
                 <table class="history-table" id="history-table">
                     <thead>
                         <tr>
-                            <th>Data</th>
-                            <th>Mode</th>
-                            <th>Peça (mm)</th>
-                            <th>Caixa (mm)</th>
-                            <th>Peces</th>
-                            <th>Pes</th>
-                            <th>STL</th>
-                            <th>Accions</th>
+                            <th id="th-date">Data</th>
+                            <th id="th-mode">Mode</th>
+                            <th id="th-piece">Peça (mm)</th>
+                            <th id="th-box">Caixa (mm)</th>
+                            <th id="th-pieces">Peces</th>
+                            <th id="th-weight">Pes</th>
+                            <th id="th-stl">STL</th>
+                            <th id="th-actions">Accions</th>
                         </tr>
                     </thead>
                     <tbody id="history-body">
                         <tr>
                             <td colspan="8" class="loading-cell">
-                                <span class="loading">Carregant historial...</span>
+                                <span class="loading" id="loading-history-text">Carregant historial...</span>
                             </td>
                         </tr>
                     </tbody>
@@ -89,9 +96,9 @@
             <!-- Empty State -->
             <div class="history-empty" id="history-empty" style="display: none;">
                 <div class="empty-icon"></div>
-                <h2>Cap càlcul guardat</h2>
-                <p>Quan facis un càlcul a la calculadora, apareixerà aquí automàticament.</p>
-                <a href="index.html" class="btn-primary">Anar a la Calculadora</a>
+                <h2 id="empty-title">Cap càlcul guardat</h2>
+                <p id="empty-subtitle">Quan facis un càlcul a la calculadora, apareixerà aquí automàticament.</p>
+                <a href="index.html" class="btn-primary" id="empty-link">Anar a la Calculadora</a>
             </div>
         </main>
 
@@ -99,7 +106,7 @@
         <div id="detail-modal" class="modal" style="display: none;">
             <div class="modal-content modal-large">
                 <div class="modal-header">
-                    <h2>Detalls del Càlcul</h2>
+                    <h2 id="detail-modal-title">Detalls del Càlcul</h2>
                     <button id="modal-close" class="modal-close">×</button>
                 </div>
                 <div class="modal-body" id="modal-body">

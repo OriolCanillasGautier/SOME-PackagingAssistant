@@ -292,7 +292,8 @@ body {
 }
 
 .input-group input[type="number"],
-.input-group input[type="text"] {
+.input-group input[type="text"],
+.input-group select {
     width: 100%;
     padding: 10px 12px;
     background: var(--bg-input);
@@ -307,6 +308,31 @@ body {
     outline: none;
     border-color: var(--accent-blue);
     box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+.input-group select:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.2);
+}
+
+.placement-options {
+    margin-bottom: 12px;
+    padding: 12px;
+    background: rgba(59, 130, 246, 0.06);
+    border: 1px solid rgba(59, 130, 246, 0.18);
+    border-radius: var(--radius-sm);
+}
+
+.placement-options h3 {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: var(--text-primary);
+    margin-bottom: 10px;
+}
+
+.placement-options .input-group:last-of-type {
+    margin-bottom: 0;
 }
 
 /* Checkbox Group */
@@ -669,7 +695,8 @@ body {
     bottom: 0;
     z-index: 100;
     padding: 12px 0 4px;
-    background: linear-gradient(to bottom, transparent, var(--bg-primary) 30%);
+    background: var(--bg-primary);
+    border-top: 1px solid rgba(148, 163, 184, 0.18);
 }
 .report-float-btn {
     width: 100%;
@@ -816,10 +843,10 @@ body {
 .results-hero {
     text-align: center;
     padding: 16px 12px;
-    background: linear-gradient(135deg, rgba(16, 185, 129, 0.08), rgba(59, 130, 246, 0.08));
+    background: var(--bg-secondary);
     border-radius: var(--radius-md);
     margin-bottom: 16px;
-    border: 1px solid rgba(16, 185, 129, 0.2);
+    border: 1px solid rgba(16, 185, 129, 0.28);
 }
 .results-hero .hero-number {
     font-size: 3rem;
@@ -1293,24 +1320,26 @@ body {
 
 .stl-history-item {
     display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 10px;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 12px;
     background: var(--bg-input);
-    border-radius: var(--radius-sm);
+    border-radius: 12px;
     cursor: pointer;
     transition: all 0.2s;
     font-size: 0.85rem;
-    border: 1px solid transparent;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    flex-wrap: wrap;
 }
 
 .stl-history-item:hover {
-    background: rgba(59, 130, 246, 0.15);
+    background: rgba(59, 130, 246, 0.08);
     border-color: var(--accent-blue);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12);
 }
 
 .stl-history-item.active {
-    background: rgba(59, 130, 246, 0.2);
+    background: rgba(59, 130, 246, 0.14);
     border-color: var(--accent-blue);
 }
 
@@ -1321,10 +1350,10 @@ body {
 
 .stl-history-item .stl-info {
     flex: 1;
-    min-width: 0;
+    min-width: 220px;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 6px;
 }
 
 .stl-history-item .stl-name-input {
@@ -1350,22 +1379,26 @@ body {
 .stl-history-item .stl-meta {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+    flex-wrap: wrap;
     font-size: 0.75rem;
     color: var(--text-muted);
 }
 
 .stl-history-item .stl-dims {
     font-family: 'Consolas', monospace;
+    padding: 2px 8px;
+    background: rgba(148, 163, 184, 0.12);
+    border-radius: 999px;
 }
 
 .stl-history-item .stl-weight-input {
-    width: 50px;
-    padding: 2px 4px;
+    width: 68px;
+    padding: 4px 6px;
     font-size: 0.75rem;
     background: var(--bg-card);
     border: 1px solid var(--border-color);
-    border-radius: 4px;
+    border-radius: 8px;
     color: var(--text-primary);
     text-align: right;
 }
@@ -1382,33 +1415,56 @@ body {
 
 .stl-history-item .stl-actions {
     display: flex;
-    gap: 4px;
-    opacity: 0;
-    transition: opacity 0.2s;
-}
-
-.stl-history-item:hover .stl-actions {
-    opacity: 1;
+    gap: 6px;
+    margin-left: auto;
+    flex-wrap: wrap;
+    justify-content: flex-end;
 }
 
 .stl-history-item .stl-btn {
-    padding: 4px 6px;
-    border: none;
-    background: var(--bg-card);
+    padding: 6px 10px;
+    border: 1px solid rgba(148, 163, 184, 0.25);
+    background: rgba(255, 255, 255, 0.04);
     color: var(--text-secondary);
-    border-radius: 4px;
+    border-radius: 999px;
     cursor: pointer;
     font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
     transition: all 0.2s;
 }
 
 .stl-history-item .stl-btn:hover {
     background: var(--accent-blue);
     color: white;
+    border-color: var(--accent-blue);
 }
 
 .stl-history-item .stl-btn.delete:hover {
     background: var(--accent-red);
+    border-color: var(--accent-red);
+}
+
+@media (max-width: 720px) {
+    .stl-history-item {
+        padding: 10px;
+    }
+
+    .stl-history-item .stl-info {
+        min-width: 0;
+        width: 100%;
+    }
+
+    .stl-history-item .stl-actions {
+        width: 100%;
+        margin-left: 0;
+        justify-content: flex-start;
+    }
+
+    .stl-history-item .stl-btn {
+        flex: 1 1 calc(33.333% - 6px);
+        text-align: center;
+    }
 }
 
 .stl-history-empty {

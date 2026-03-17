@@ -100,6 +100,14 @@ Cada fase és autocontinguda i desplegable independentment.
 - [ ] Substituir creació de `THREE.Mesh` individuals a `addPackedSTLHeightMap()` per `InstancedMesh`.
 - [ ] Reusar el patró de la versió async (ja implementat).
 
+### 4.4 Estratègies de col·locació STL
+- [x] Nova UI d'estratègia a `index.html`: `stable-contact`, `hybrid`, `physics-assisted`, `legacy`.
+- [x] Controls nous a `main.js`: nivell d'estabilitat, esforç de cerca, side stacking i settle check.
+- [x] `addPackedSTLHeightMapAsync()` ara evita la replicació cega fora del mode legacy.
+- [x] Validació de suport per capes superiors amb perfils `strict|medium|loose`.
+- [ ] Afegir una passada de validació física curta per al mode `physics-assisted` (post-placement) i recollir mètriques de fallada.
+- [ ] Afinar casos límit on el heightmap encara perdi encaixos obvis de primera capa.
+
 ### 4.3 InstancedMesh per mode bulk
 - [ ] Pre-crear InstancedMesh amb `maxCount` estimat a `dropPiece()`
 - [ ] Incrementar `instancedMesh.count` en lloc de crear `THREE.Mesh`
@@ -175,7 +183,7 @@ Cada fase és autocontinguda i desplegable independentment.
 | 1 | `displayCount` coincideix a UI, escena 3D, gravetat i PDF. Cap referència a safety factor. | ✅ |
 | 2 | STL + alumini → pes estimat a UI i PDF. Volum real vs bounding box etiquetat. | ✅ |
 | 3 | STL >50k tri → missatge amb simplificador. Cancel → escena neta. Progrés amb fases + crono. STL simplificada persistent. PDF 2 pàgines. | ✅ |
-| 4 | maxTry adaptatiu ✅, caixes plenes fins dalt, InstancedMesh a sync + bulk. | ⏳ |
+| 4 | maxTry adaptatiu ✅, estratègies de col·locació STL ✅, InstancedMesh a sync + bulk. | ⏳ |
 | 5 | Caixa 600×400×300, peça 100×80×50 → més peces que grid. Cap superposició. | |
 | 6 | Gravetat: no s'eleven, cauen suau, vibren. Bulk: drops en files, 3 refills. | |
 | 7 | `http://localhost/api/health` → OK. Upload/llistat/eliminació STL funciona. | |

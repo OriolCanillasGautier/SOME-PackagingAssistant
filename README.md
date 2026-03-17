@@ -15,6 +15,8 @@ The application runs directly in the browser (ES Modules + CDN imports). No buil
 - Gravity-based stable orientation for STL pieces (settled pose + yaw search)
 - Stable orientation is precomputed on STL load/simplify and reused in calculations (faster recalculation)
 - Multiple gravity-stable bases are sampled and evaluated (better packing for asymmetric shapes)
+- Configurable STL placement strategies: stable contact, hybrid, physics-assisted, and legacy
+- Support-aware upper-layer validation with stability strictness, side-stacking toggle, and search-effort control
 - Material selector with estimated weight (aluminium, steel, plastic, copper, custom)
 - Packing gap (spacing between pieces)
 - Weight-limited optimization
