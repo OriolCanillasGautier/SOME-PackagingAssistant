@@ -592,11 +592,8 @@ function buildOrientedGeometry(originalGeometry, tilt, yawDeg) {
  */
 function buildOrientationPool(baseGeometry, boxL, boxW, boxH) {
     const pool = [];
-    // Square box -> 0° & 90°; rectangular box -> 0° & 180°.
-    // The 90° case for rectangular boxes is handled earlier when choosing
-    // the base wall-parallel orientation, so the pool only needs the mirror.
-    const isSquare = Math.abs(boxL - boxW) < 1;
-    const yaws = isSquare ? [0, 90] : [0, 180];
+    // Try all 4 cardinal yaw rotations to maximize interlocking potential
+    const yaws = [0, 90, 180, 270];
 
     for (const yaw of yaws) {
         const geom = baseGeometry.clone();
@@ -888,6 +885,7 @@ const elements = {
     placementSearchEffort: document.getElementById('placement-search-effort'),
     placementSideStacking: document.getElementById('placement-side-stacking'),
     placementSettleCheck: document.getElementById('placement-settle-check'),
+    placementLayerSeparator: document.getElementById('placement-layer-separator'),
     stlUpload: document.getElementById('stl-upload'),
     stlStatus: document.getElementById('stl-status'),
     optPieceColors: document.getElementById('opt-piece-colors'),
@@ -1693,11 +1691,12 @@ function getInputValues() {
         maxWeight: parseFloat(elements.maxWeight.value) || 0,
         allowRotation: elements.allowRotation.checked,
         heightMapNesting: !!state.stlGeometry,
-        placementStrategy: elements.placementStrategy?.value || 'stable-contact',
-        placementStability: elements.placementStability?.value || 'strict',
+        placementStrategy: elements.placementStrategy?.value || 'auto',
+        placementStability: 'medium',
         placementSearchEffort: elements.placementSearchEffort?.value || 'balanced',
         placementSideStacking: elements.placementSideStacking?.checked ?? true,
-        placementSettleCheck: elements.placementSettleCheck?.checked ?? true,
+        placementSettleCheck: true,
+        placementLayerSeparator: Math.max(0, parseFloat(elements.placementLayerSeparator?.value) || 0),
         materialDensity: (() => {
             const val = elements.materialDensity?.value;
             if (!val || val === '0') return 0;
@@ -1788,6 +1787,12 @@ async function handleCalculate() {
         setCalcProgress(true, 2, 'Preparant dades...', calcStartTime);
         await nextFrame();
         const values = getInputValues();
+
+        // Resolve 'auto' strategy to 'stable-contact' with post-packing gravity
+        const isAutoStrategy = values.placementStrategy === 'auto';
+        if (isAutoStrategy) {
+            values.placementStrategy = 'stable-contact';
+        }
 
         let orientationOverrides = null;
 
@@ -1966,6 +1971,7 @@ async function handleCalculate() {
                             allowSideStacking: values.placementSideStacking,
                             useSettleCheck: values.placementSettleCheck,
                             searchEffort: values.placementSearchEffort,
+                            layerSeparator: values.placementLayerSeparator,
                             dryRun: true,
                             abortSignal,
                             onProgress: ({ placed, maxTry: mt }) => {
@@ -2046,6 +2052,14 @@ async function handleCalculate() {
 
                     const bestGeom = buildOrientedGeometry(state.stlGeometry, best.tilt, best.yawDeg);
 
+                    // Auto strategy resolves to stable-contact + gravity refinement
+                    let resolvedStrategy = values.placementStrategy;
+                    if (isAutoStrategy) {
+                        resolvedStrategy = 'stable-contact';
+                        values.placementStrategy = resolvedStrategy;
+                        console.log(`[Auto] resolved to ${resolvedStrategy}`);
+                    }
+
                     // Build orientation pool for mixed-orientation packing
                     const orientPool = values.placementStrategy === 'stable-contact'
                         ? buildOrientationPoolFromCandidates(
@@ -2082,6 +2096,7 @@ async function handleCalculate() {
                         allowSideStacking: values.placementSideStacking,
                         useSettleCheck: values.placementSettleCheck,
                         searchEffort: values.placementSearchEffort,
+                        layerSeparator: values.placementLayerSeparator,
                         dryRun: false,
                         abortSignal,
                         onProgress: ({ placed, maxTry }) => {
@@ -2150,6 +2165,25 @@ async function handleCalculate() {
             state.displayCount = displayCount;
 
             console.log(`Rendered ${drawnCount} items (${displayCount} pieces)`);
+
+            stopGravitySimulation();
+            const autoGravity = isAutoStrategy || values.placementStrategy === 'physics-assisted';
+            if (values.mode === 'optimized' && autoGravity && displayCount > 0) {
+                if (elements.simulationStatus) {
+                    elements.simulationStatus.textContent = 'Compactant amb gravetat...';
+                    elements.simulationStatus.style.display = 'block';
+                }
+                setTimeout(() => {
+                    // Auto: moderate damping (allows small rotations, prevents full tipping)
+                    // Physics-assisted: low damping (allows natural rotation)
+                    applyGravityTest({
+                        lockRotations: false,
+                        settleAngularDamping: isAutoStrategy ? 12.0 : 3.0
+                    }).catch(error => {
+                        console.error('[GravityRefine] Automatic settle failed:', error);
+                    });
+                }, 0);
+            }
 
             // Estimated total weight (estPieceWeight computed above, before calcularEmpaquetatge)
             const estTotalWeight = estPieceWeight * displayCount;
@@ -2278,12 +2312,18 @@ async function initGravitySimulation() {
     // Slight convex-hull shrink to reduce explosive separation
     const hullScale = 0.995;
 
-    placement.positions.forEach((pos, idx) => {
+    const placementItems = placement.items?.length
+        ? placement.items
+        : (placement.positions || []).map((position, index) => ({ position, orientIdx: 0, index }));
+
+    placementItems.forEach((item, idx) => {
+        const pos = item.position;
+        const orientation = placement.orientations?.[item.orientIdx] || null;
         const color = pieceColors.length > 0 ? pieceColors[idx % colorCount] : 0x3b82f6;
         let mesh;
 
-        if (placement.type === 'stl' && placement.geometry) {
-            const geometry = placement.geometry.clone();
+        if (placement.type === 'stl' && (orientation?.geometry || placement.geometry)) {
+            const geometry = (orientation?.geometry || placement.geometry).clone();
             geometry.computeBoundingBox();
             const bbox = geometry.boundingBox;
             const center = new THREE.Vector3();
@@ -2301,8 +2341,9 @@ async function initGravitySimulation() {
             state.sceneManager.scene.add(mesh);
             state.sceneManager.pieces.push(mesh);
 
-            if (placement.vertices) {
-                const verts = placement.vertices;
+            const hullVertices = orientation?.vertices || placement.vertices;
+            if (hullVertices) {
+                const verts = hullVertices;
                 const centered = new Float32Array(verts.length);
                 for (let i = 0; i < verts.length; i += 3) {
                     centered[i] = verts[i] - center.x;
@@ -2316,9 +2357,9 @@ async function initGravitySimulation() {
             } else {
                 const bodyPos = new THREE.Vector3(pos.x + center.x, pos.y + center.y, pos.z + center.z);
                 physics.addCuboid({
-                    l: placement.dims.l,
-                    w: placement.dims.w,
-                    h: placement.dims.h
+                    l: orientation?.dims?.l || placement.dims.l,
+                    w: orientation?.dims?.w || placement.dims.w,
+                    h: orientation?.dims?.h || placement.dims.h
                 }, bodyPos, null, mesh, center);
             }
         } else {
@@ -2368,7 +2409,8 @@ async function initGravitySimulation() {
 }
 
 
-async function applyGravityTest() {
+async function applyGravityTest(options = {}) {
+    const { lockRotations = false, settleAngularDamping = 3.0 } = options;
     if (!state.sceneManager?.lastPlacement) return;
 
     if (!state.gravitySimulation) {
@@ -2401,14 +2443,15 @@ async function applyGravityTest() {
                 elements.simulationStatus.textContent = 'Vibrant per compactar...';
             }
         } else if (sim.phase === 'vibrating') {
-            // Vibration settle — reduce damping slightly and unlock rotations
+            // Vibration settle — unlock rotations for natural settling (unless locked)
             sim.phase = 'settling';
             sim.physics.settledCount = 0;
-            // Slightly relax damping for final settling
+            if (!lockRotations) sim.physics.lockAllRotations(false);
+            // Adjust damping for final settling
             for (const { body } of sim.physics.meshBodies) {
                 if (!body || !body.isValid?.()) continue;
                 body.setLinearDamping(1.0);
-                body.setAngularDamping(3.0);
+                body.setAngularDamping(settleAngularDamping);
             }
             if (elements.simulationStatus) {
                 elements.simulationStatus.textContent = 'Assentament final...';
@@ -2454,6 +2497,7 @@ async function applyGravityTest() {
         if (sim.phase === 'vibrating' && !sim.physics.isVibrating) {
             sim.phase = 'settling';
             sim.physics.settledCount = 0;
+            if (!lockRotations) sim.physics.lockAllRotations(false);
             if (elements.simulationStatus) {
                 elements.simulationStatus.textContent = 'Assentament final...';
             }
@@ -2745,37 +2789,25 @@ async function applyLanguage() {
 
     const placementOptionsTitle = document.getElementById('placement-options-title');
     const placementStrategyLabel = document.querySelector('label[for="placement-strategy"]');
-    const placementStabilityLabel = document.querySelector('label[for="placement-stability"]');
     const placementSearchLabel = document.querySelector('label[for="placement-search-effort"]');
     const placementSideLabel = document.querySelector('label[for="placement-side-stacking"]');
-    const placementSettleLabel = document.querySelector('label[for="placement-settle-check"]');
+    const placementLayerSepLabel = document.querySelector('label[for="placement-layer-separator"]');
     const placementHint = document.getElementById('placement-hint');
     if (placementOptionsTitle) placementOptionsTitle.textContent = t.placementOptionsTitle;
     if (placementStrategyLabel) placementStrategyLabel.textContent = t.placementStrategyLabel;
-    if (placementStabilityLabel) placementStabilityLabel.textContent = t.placementStabilityLabel;
     if (placementSearchLabel) placementSearchLabel.textContent = t.placementSearchEffortLabel;
     if (placementSideLabel) placementSideLabel.textContent = t.placementSideStacking;
-    if (placementSettleLabel) placementSettleLabel.textContent = t.placementSettleCheck;
+    if (placementLayerSepLabel) placementLayerSepLabel.textContent = t.placementLayerSeparator;
     if (placementHint) placementHint.textContent = t.placementHint;
 
     if (elements.placementStrategy) {
         const optionTexts = [
+            t.placementStrategyAuto,
             t.placementStrategyStable,
-            t.placementStrategyHybrid,
             t.placementStrategyPhysics,
             t.placementStrategyLegacy
         ];
         Array.from(elements.placementStrategy.options).forEach((option, index) => {
-            if (optionTexts[index]) option.textContent = optionTexts[index];
-        });
-    }
-    if (elements.placementStability) {
-        const optionTexts = [
-            t.placementStabilityStrict,
-            t.placementStabilityMedium,
-            t.placementStabilityLoose
-        ];
-        Array.from(elements.placementStability.options).forEach((option, index) => {
             if (optionTexts[index]) option.textContent = optionTexts[index];
         });
     }
