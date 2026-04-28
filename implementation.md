@@ -105,7 +105,22 @@ Cada fase és autocontinguda i desplegable independentment.
 - [x] Controls nous a `main.js`: nivell d'estabilitat, esforç de cerca, side stacking i settle check.
 - [x] `addPackedSTLHeightMapAsync()` ara evita la replicació cega fora del mode legacy.
 - [x] Validació de suport per capes superiors amb perfils `strict|medium|loose`.
-- [ ] Afegir una passada de validació física curta per al mode `physics-assisted` (post-placement) i recollir mètriques de fallada.
+- [x] **Gravetat automàtica per stable-contact**: `main.js` ara llança `applyGravityTest()` també en mode `stable-contact` (no només `physics-assisted`). Perfil suau: rotacions bloquejades, `settleLinearDamping=3.0`, `settleAngularDamping=15.0` — les peces llisquen lateralment per compactar-se sense bolcar-se.
+- [x] **Search effort controla qualitat de grid**: `searchEffort` (dens/equilibrat/ràpid) ara modifica:
+  - Factors de compactació a `_findBestGridLayoutForOrientation()`: dens afegeix 0.50/0.45/0.40, ràpid talla per sota de 0.70.
+  - Mida de cel·la (`cellSize`): dens `/25`, ràpid `/15`, equilibrat `/20`.
+  - `maxConsecutiveSkips`: dens ×4, ràpid ×2, equilibrat ×3.
+- [x] **Phase 1B rotation-aware**: a cada capa replicada, prova TOTES les orientacions a cada slot (no només l'original). Escull l'orientació amb menor alçada visual resultant, amb check BVH per evitar col·lisions.
+- [x] **Phase 2 sub-grid adaptatiu**: escaneig a pas sub-cel·la segons esforç: dens=0.25, equilibrat=0.5, ràpid=1.0 (original). Posicions intermèdies permeten col·locar peces en buits entre grid cells, amb BVH com a àrbitre real.
+- [x] **Phase 2 llindars d'estabilitat adaptatius**: `supportRatio` i `drift` ara escalen amb `searchEffort`: dens (0.78/0.32), equilibrat (0.88/0.24), ràpid (0.92/0.20). Mode dens accepta suport parcial per col·locar peces en buits irregulars.
+- [x] **Bugfix crític gravetat**: `values.mode` → `state.mode` — `getInputValues()` no retorna `mode`, la condició de gravetat no es complia mai. Ara usa `state.mode` correctament.
+- [x] **Diagnòstic de gravetat**: logs `[GravityRefine]` afegits al trigger, `applyGravityTest()`, i settled callback per traçar tot el flux.
+- [x] **Selecció d'orientació per capacitat total**: `sortDenseBand()` ara usa `gridCapacity = gridCount × numLayers` en lloc de `gridCount` cru. Això prefereix orientacions amb capes més primes (més capes = més replicacions de floor-fill). B3 (4×15=60) empata amb B1 (5×12=60), però B3 guanya pel tiebreaker de `height` (13.3<15.5), permetent +3 peces via floor-fill extra.
+- [x] **Dense band filter adaptatiu**: el filtre de candidats ara usa `gridCapacity` amb llindar del 85% (`≥ floor(bestGridCap * 0.85)`), permetent orientacions amb menys peces/capa però més capes totals.
+- [x] **Factors de compactació ampliats**: `computeWallAlignedGridCapacity()` ara prova factors fins a 0.70 (abans 0.88), sincronitzant amb `_findBestGridLayoutForOrientation()`.
+- [x] **Estimació floor-fill filtrada per alçada**: l'estimació de `estFloorFillPerLayer` ara descarta orientacions amb alçada > 115% de l'alçada del candidat principal. Evita inflació d'estimates per orientacions altes que bloquegen múltiples capes.
+- [x] **Gravetat amb separació diferencial**: `applyGravityTest()` reescrit completament. Les peces reben impulsos aleatoris verticals + laterals al inici per separar-les de les posicions de heightmap. Fricció ultra-baixa (0.05), amortiment lineal 0.4, vibració de parets 2.5mm/8Hz, jitter lateral periòdic cada 250ms. 3 cicles de vibració amb intensitat decreixent. Gestió de fases simplificada: `onSettled` només gestiona `initial→vibrating` i `settling→done`; la detecció de fi de vibració es fa al bucle `animate`.
+- [x] **Physics: `setAllFriction()` i `applyLateralJitter()`**: nous mètodes a `PhysicsWorld` per canviar fricció de totes les peces i aplicar impulsos laterals aleatoris durant la gravetat.
 - [ ] Afinar casos límit on el heightmap encara perdi encaixos obvis de primera capa.
 
 ### 4.3 InstancedMesh per mode bulk

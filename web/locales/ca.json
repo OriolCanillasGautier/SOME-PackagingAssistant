@@ -45,7 +45,6 @@
     "allowRotation": "Permet girar l'objecte (explorar orientacions)",
     "placementOptionsTitle": "Opcions de Col·locació STL",
     "placementStrategyLabel": "Estratègia de col·locació",
-    "placementStrategyAuto": "Auto (millor resultat)",
     "placementStrategyStable": "Contacte estable",
     "placementStrategyPhysics": "Assistit per física",
     "placementStrategyLegacy": "Llegat",

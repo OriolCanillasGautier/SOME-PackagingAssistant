@@ -118,8 +118,7 @@
                             <div class="input-group">
                                 <label for="placement-strategy">Estratègia de col·locació</label>
                                 <select id="placement-strategy">
-                                    <option value="auto" selected>Auto (millor resultat)</option>
-                                    <option value="stable-contact">Contacte estable</option>
+                                    <option value="stable-contact" selected>Contacte estable</option>
                                     <option value="physics-assisted">Assistit per física</option>
                                     <option value="legacy">Llegat</option>
                                 </select>
@@ -132,6 +131,14 @@
                                     <option value="dense">Dens</option>
                                 </select>
                             </div>
+                            <div class="input-group">
+                                <label for="stacking-quality">Qualitat d'apilat</label>
+                                <select id="stacking-quality">
+                                    <option value="1">1 — Contacte màxim (possible solapament lleu)</option>
+                                    <option value="2" selected>2 — Equilibrat (nidificació + col·lisió)</option>
+                                    <option value="3">3 — Segur (sense nidificació, gaps mínims)</option>
+                                </select>
+                            </div>
                             <div class="input-group checkbox-group">
                                 <input type="checkbox" id="placement-side-stacking" checked>
                                 <label for="placement-side-stacking">Permetre apilat lateral/vertical si és estable</label>
@@ -140,7 +147,7 @@
                                 <label for="placement-layer-separator">Separador entre capes (mm)</label>
                                 <input type="number" id="placement-layer-separator" value="0" min="0" max="50" step="0.5">
                             </div>
-                            <p class="hint-text" id="placement-hint">Mode per defecte: Auto. Compara estratègies i tria la millor amb compactació per gravetat.</p>
+                            <p class="hint-text" id="placement-hint">Contacte estable: col·locació densa amb suport físic. Assistit per física: compacta amb gravetat post-col·locació.</p>
                         </div>
                         <div class="input-group slider-group">
                             <label for="opt-piece-colors">Nombre de colors: <span id="opt-piece-colors-value">10</span></label>
@@ -153,15 +160,15 @@
                         <h2>Dimensions de la Caixa</h2>
                         <div class="input-group">
                             <label for="box-length">Llargada (mm)</label>
-                            <input type="number" id="box-length" value="150" min="0.1" step="1">
+                            <input type="number" id="box-length" value="160" min="0.1" step="1">
                         </div>
                         <div class="input-group">
                             <label for="box-width">Amplada (mm)</label>
-                            <input type="number" id="box-width" value="150" min="0.1" step="1">
+                            <input type="number" id="box-width" value="160" min="0.1" step="1">
                         </div>
                         <div class="input-group">
                             <label for="box-height">Alçada (mm)</label>
-                            <input type="number" id="box-height" value="200" min="0.1" step="1">
+                            <input type="number" id="box-height" value="160" min="0.1" step="1">
                         </div>
                         <div class="input-group">
                             <label for="max-weight">Pes màxim (kg)</label>
@@ -327,6 +334,6 @@
     </div>
 
     <!-- Main Script -->
-    <script type="module" src="js/main.js?v=force_update_42"></script>
+    <script type="module" src="js/main.js?v=grid_fix_v3"></script>
 </body>
 </html>

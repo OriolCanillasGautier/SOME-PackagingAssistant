@@ -62,6 +62,10 @@ export class PhysicsWorld {
         this.vibrationAmplitudeJitter = 0.35; // +/- 35%
         this.vibrationNoise = 0.15; // mm random jitter per step
 
+        // Settle detection thresholds (configurable per-mode)
+        this.settleVelocityThreshold = 5.0; // mm/s
+        this.settleAngularThreshold = 0.5;  // rad/s
+        this.settleFramesRequired = 60;     // ~1s at 60fps
         
         // Lid Press settings
         this.lidBody = null;
@@ -480,8 +484,8 @@ export class PhysicsWorld {
     checkSettled() {
         if (this.meshBodies.length === 0) return false;
         
-        const velocityThreshold = 5.0; // mm/s
-        const angularThreshold = 0.5;
+        const vThresh = this.settleVelocityThreshold;
+        const aThresh = this.settleAngularThreshold;
         let allSettled = true;
         
         for (const { body } of this.meshBodies) {
@@ -490,7 +494,7 @@ export class PhysicsWorld {
             const speed = Math.sqrt(linVel.x ** 2 + linVel.y ** 2 + linVel.z ** 2);
             const angSpeed = Math.sqrt(angVel.x ** 2 + angVel.y ** 2 + angVel.z ** 2);
             
-            if (speed > velocityThreshold || angSpeed > angularThreshold) {
+            if (speed > vThresh || angSpeed > aThresh) {
                 allSettled = false;
                 break;
             }
@@ -498,7 +502,7 @@ export class PhysicsWorld {
 
         if (allSettled) {
             this.settledCount++;
-            if (this.settledCount > 60 && this.onSettled) { // ~1 second of stability
+            if (this.settledCount > this.settleFramesRequired && this.onSettled) {
                 const count = this.countPiecesInBox();
                 this.onSettled(count);
                 return true;
@@ -526,7 +530,7 @@ export class PhysicsWorld {
             // Check if mostly inside box
             if (pos.x > -margin && pos.x < length + margin &&
                 pos.z > -margin && pos.z < width + margin &&
-                pos.y > -margin && pos.y < height + margin * 5) {
+                pos.y > -margin && pos.y < height + margin * 2) {
                 count++;
             }
         }
@@ -825,6 +829,61 @@ export class PhysicsWorld {
             } else if (typeof body.setEnabledRotations === 'function') {
                 const enable = !lock;
                 body.setEnabledRotations(enable, enable, enable, true);
+            }
+        }
+    }
+
+    /**
+     * Change friction coefficient on all piece colliders at runtime.
+     */
+    setAllFriction(friction) {
+        for (const { body } of this.meshBodies) {
+            if (!body || !body.isValid?.()) continue;
+            const numC = body.numColliders();
+            for (let c = 0; c < numC; c++) {
+                const col = body.collider(c);
+                if (col && col.isValid()) col.setFriction(friction);
+            }
+        }
+    }
+
+    /**
+     * Apply a small random horizontal impulse to every piece.
+     * Rotations stay locked; pieces only slide laterally.
+     * @param {number} strength — impulse magnitude in mm·kg/s
+     */
+    applyLateralJitter(strength = 50) {
+        for (const { body } of this.meshBodies) {
+            if (!body || !body.isValid?.()) continue;
+            const ix = (Math.random() * 2 - 1) * strength;
+            const iz = (Math.random() * 2 - 1) * strength;
+            body.applyImpulse({ x: ix, y: 0, z: iz }, true);
+        }
+    }
+
+    /**
+     * Run N physics substeps without rendering — resolves interpenetration.
+     * @param {number} steps — number of world.step() calls
+     */
+    warmUp(steps = 100) {
+        if (!this.world) return;
+        const dt = 1 / 240;
+        this.world.timestep = dt;
+        for (let i = 0; i < steps; i++) {
+            this.world.step();
+        }
+        // Sync meshes after warm-up so visuals reflect resolved positions
+        for (const { body, mesh, offset } of this.meshBodies) {
+            if (!body.isValid()) continue;
+            const pos = body.translation();
+            const rot = body.rotation();
+            mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+            if (offset && typeof offset.x === 'number') {
+                const q = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
+                const off = new THREE.Vector3(offset.x, offset.y, offset.z).applyQuaternion(q);
+                mesh.position.set(pos.x - off.x, pos.y - off.y, pos.z - off.z);
+            } else {
+                mesh.position.set(pos.x, pos.y, pos.z);
             }
         }
     }

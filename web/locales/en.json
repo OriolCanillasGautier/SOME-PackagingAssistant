@@ -45,7 +45,6 @@
     "allowRotation": "Allow object rotation (explore orientations)",
     "placementOptionsTitle": "STL Placement Options",
     "placementStrategyLabel": "Placement strategy",
-    "placementStrategyAuto": "Auto (best result)",
     "placementStrategyStable": "Stable contact",
     "placementStrategyPhysics": "Physics-assisted",
     "placementStrategyLegacy": "Legacy",

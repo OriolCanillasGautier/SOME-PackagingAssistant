@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_42';
 import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=force_update_42';
-import { SceneManager } from './visualization/scene.js?v=force_update_42';
+import { SceneManager } from './visualization/scene.js?v=grid_fix_v1';
 import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-world.js?v=force_update_42';
 import { ReportGenerator } from './report/report-generator.js?v=force_update_42';
 import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_42';
@@ -54,7 +54,6 @@ const state = {
     isSimulating: false,
     gravitySimulation: null,
     physicsWorld: null,
-    orientationEval: null,
     reportGenerator: null,
     lastResults: null, // Store last results for report generation
     displayCount: 0, // Single source of truth for piece count (UI/render/gravity/PDF)
@@ -567,308 +566,6 @@ async function updateStableOrientationCache() {
     return primary?.geometry || null;
 }
 
-/**
- * Build an oriented geometry: gravity base quaternion + yaw rotation.
- * @param {THREE.BufferGeometry} originalGeometry
- * @param {{ quat: THREE.Quaternion }} tilt
- * @param {number} yawDeg
- * @returns {THREE.BufferGeometry}
- */
-function buildOrientedGeometry(originalGeometry, tilt, yawDeg) {
-    const geo = originalGeometry.clone();
-    if (tilt?.quat) {
-        applyQuatToGeometry(geo, tilt.quat);
-    }
-    applyYawToGeometry(geo, yawDeg);
-    return geo;
-}
-
-/**
- * Build a pool of orientations to try during packing.
- * Uses the best base geometry + 4 cardinal yaw rotations.
- * @param {THREE.BufferGeometry} baseGeometry - already in best stable base
- * @param {number} boxL @param {number} boxW @param {number} boxH
- * @returns {Array<{geometry: THREE.BufferGeometry, yaw: number, name: string}>}
- */
-function buildOrientationPool(baseGeometry, boxL, boxW, boxH) {
-    const pool = [];
-    // Try all 4 cardinal yaw rotations to maximize interlocking potential
-    const yaws = [0, 90, 180, 270];
-
-    for (const yaw of yaws) {
-        const geom = baseGeometry.clone();
-        applyYawToGeometry(geom, yaw);
-        recenterGeometry(geom);
-
-        geom.computeBoundingBox();
-        const bb = geom.boundingBox;
-        const sx = bb.max.x - bb.min.x;
-        const sy = bb.max.y - bb.min.y;
-        const sz = bb.max.z - bb.min.z;
-
-        if (sx > boxL + 0.01 || sz > boxW + 0.01 || sy > boxH + 0.01) {
-            console.log(`[OrientPool] Skip ${yaw}° — doesn't fit (${sx.toFixed(1)}×${sy.toFixed(1)}×${sz.toFixed(1)})`);
-            continue;
-        }
-
-        pool.push({ geometry: geom, yaw, name: `${yaw}°` });
-    }
-
-    console.log(`[OrientPool] Built ${pool.length} orientations: ${pool.map(o => o.name).join(', ')}`);
-    return pool;
-}
-
-function buildOrientationPoolFromCandidates(candidatePool, boxL, boxW, boxH) {
-    const pool = [];
-    const seen = new Set();
-
-    for (const candidate of candidatePool) {
-        if (!candidate?.oriented) continue;
-        const geom = candidate.oriented.clone();
-        recenterGeometry(geom);
-        geom.computeBoundingBox();
-        const bb = geom.boundingBox;
-        const sx = bb.max.x - bb.min.x;
-        const sy = bb.max.y - bb.min.y;
-        const sz = bb.max.z - bb.min.z;
-        if (sx > boxL + 0.01 || sz > boxW + 0.01 || sy > boxH + 0.01) continue;
-
-        const key = [candidate.name || '', candidate.tiltName || '', candidate.yawDeg || 0, sx.toFixed(2), sy.toFixed(2), sz.toFixed(2)].join('_');
-        if (seen.has(key)) continue;
-        seen.add(key);
-        pool.push({ geometry: geom, yaw: candidate.yawDeg || 0, name: candidate.name || `${candidate.yawDeg || 0}°` });
-    }
-
-    console.log(`[OrientPool] Built ${pool.length} candidate orientations: ${pool.map(o => o.name).join(', ')}`);
-    return pool;
-}
-
-function compactGridSpacingCollides(geometry, dx, dz) {
-    if (!geometry) return false;
-    if (!geometry.boundsTree && typeof geometry.computeBoundsTree === 'function') {
-        geometry.computeBoundsTree();
-    }
-    if (!geometry.boundsTree) return false;
-    const matrix = new THREE.Matrix4().makeTranslation(dx, 0, dz);
-    return geometry.boundsTree.intersectsGeometry(geometry, matrix);
-}
-
-function computeWallAlignedGridCapacity(geometry, boxL, boxW, packingGap = 0) {
-    geometry.computeBoundingBox();
-    const bb = geometry.boundingBox;
-    const sizeX = bb.max.x - bb.min.x;
-    const sizeZ = bb.max.z - bb.min.z;
-    const factors = [1.0, 0.98, 0.96, 0.94, 0.92, 0.9, 0.88];
-    let best = null;
-
-    for (const fx of factors) {
-        for (const fz of factors) {
-            const stepX = Math.max(sizeX + packingGap * 0.35, (sizeX + packingGap) * fx);
-            const stepZ = Math.max(sizeZ + packingGap * 0.35, (sizeZ + packingGap) * fz);
-
-            if (compactGridSpacingCollides(geometry, stepX, 0)) continue;
-            if (compactGridSpacingCollides(geometry, 0, stepZ)) continue;
-            if (compactGridSpacingCollides(geometry, stepX, stepZ)) continue;
-
-            const gridNX = Math.max(1, Math.floor((boxL - sizeX + 0.01) / stepX) + 1);
-            const gridNZ = Math.max(1, Math.floor((boxW - sizeZ + 0.01) / stepZ) + 1);
-            const count = gridNX * gridNZ;
-            const usedL = sizeX + Math.max(0, gridNX - 1) * stepX;
-            const usedW = sizeZ + Math.max(0, gridNZ - 1) * stepZ;
-            const leftoverL = Math.max(0, boxL - usedL);
-            const leftoverW = Math.max(0, boxW - usedW);
-            const leftoverArea = leftoverL * boxW + leftoverW * boxL - leftoverL * leftoverW;
-
-            if (!best || count > best.count || (count === best.count && leftoverArea < best.leftoverArea)) {
-                best = {
-                    sizeX,
-                    sizeZ,
-                    stepX,
-                    stepZ,
-                    gridNX,
-                    gridNZ,
-                    count,
-                    leftoverL,
-                    leftoverW,
-                    leftoverArea
-                };
-            }
-        }
-    }
-
-    if (best) return best;
-
-    const stepX = sizeX + packingGap;
-    const stepZ = sizeZ + packingGap;
-    const gridNX = Math.max(1, Math.floor((boxL - sizeX + 0.01) / stepX) + 1);
-    const gridNZ = Math.max(1, Math.floor((boxW - sizeZ + 0.01) / stepZ) + 1);
-    const count = gridNX * gridNZ;
-    const usedL = sizeX + Math.max(0, gridNX - 1) * stepX;
-    const usedW = sizeZ + Math.max(0, gridNZ - 1) * stepZ;
-    const leftoverL = Math.max(0, boxL - usedL);
-    const leftoverW = Math.max(0, boxW - usedW);
-
-    return {
-        sizeX,
-        sizeZ,
-        stepX,
-        stepZ,
-        gridNX,
-        gridNZ,
-        count,
-        leftoverL,
-        leftoverW,
-        leftoverArea: leftoverL * boxW + leftoverW * boxL - leftoverL * leftoverW
-    };
-}
-
-/**
- * Generate yaw candidates from gravity-settled base.
- * Piece is locked to its resting orientation; only Y-axis rotation changes.
- * @param {THREE.BufferGeometry} alignedGeometry - already aligned to stable gravity pose
- * @param {number} boxL  @param {number} boxW  @param {number} boxH
- * @param {boolean} allowRotation
- * @returns {Array}
- */
-function generateYawCandidates(originalGeometry, stableBases, boxL, boxW, boxH, allowRotation, placementStrategy = 'stable-contact') {
-    const candidates = [];
-    const seen = new Set();
-    const stableOnlyBases = stableBases.filter(base => base.stability?.stable);
-    const sourceBases = stableOnlyBases.length > 0 ? stableOnlyBases : stableBases;
-    const isSquareBox = Math.abs(boxL - boxW) < 1;
-    const yaws = allowRotation
-        ? (isSquareBox ? [0, 90] : [0, 90, 180, 270])
-        : [0];
-
-    const pushCandidate = (candidate) => {
-        candidate.oriented.computeBoundingBox();
-        const bb = candidate.oriented.boundingBox;
-        const sX = bb.max.x - bb.min.x;
-        const sY = bb.max.y - bb.min.y;
-        const sZ = bb.max.z - bb.min.z;
-        if (sX > boxL + 0.01 || sZ > boxW + 0.01 || sY > boxH + 0.01) return;
-
-        const key = [sX, sY, sZ, candidate.yawDeg]
-            .map(v => Number(v).toFixed(2))
-            .join('_');
-        if (seen.has(key)) return;
-        seen.add(key);
-        candidates.push(candidate);
-    };
-
-    for (let baseIndex = 0; baseIndex < sourceBases.length; baseIndex++) {
-        const base = sourceBases[baseIndex];
-        for (const yawDeg of yaws) {
-            const oriented = base.geometry.clone();
-            applyYawToGeometry(oriented, yawDeg);
-
-            pushCandidate({
-                tilt: { quat: base.quat, baseIndex },
-                tiltName: `Base ${baseIndex + 1}`,
-                yawDeg,
-                name: `B${baseIndex + 1} · Y ${yawDeg}°`,
-                oriented,
-            });
-        }
-    }
-
-    const includeAxisPermutations = placementStrategy !== 'stable-contact';
-
-    if (allowRotation && originalGeometry && includeAxisPermutations) {
-        const permutations = [
-            [0, 1, 2], [0, 2, 1], [1, 0, 2],
-            [1, 2, 0], [2, 0, 1], [2, 1, 0]
-        ];
-        permutations.forEach((perm, permIndex) => {
-            const oriented = originalGeometry.clone();
-            applyPermutation(oriented, perm);
-            recenterGeometry(oriented);
-            pushCandidate({
-                tilt: { quat: null, baseIndex: permIndex },
-                tiltName: `Axis ${permIndex + 1}`,
-                yawDeg: 0,
-                name: `A${permIndex + 1} · P${perm.join('')}`,
-                oriented,
-            });
-        });
-    }
-
-    console.log(`[Orientation] Multi-base yaw search: ${candidates.length} candidates (${sourceBases.length} stable bases × ${yaws.length} yaw)`);
-    return candidates;
-}
-
-function computeFootprintArea(geometry) {
-    const positions = geometry.getAttribute('position');
-    if (!positions || positions.count === 0) return 0;
-    geometry.computeBoundingBox();
-    const bbox = geometry.boundingBox;
-    const sizeY = bbox ? (bbox.max.y - bbox.min.y) : 0;
-
-    let minY = Infinity;
-    for (let i = 0; i < positions.count; i++) {
-        const y = positions.getY(i);
-        if (y < minY) minY = y;
-    }
-
-    const eps = Math.max(0.5, sizeY * 0.02);
-    const maxY = minY + eps;
-    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    let count = 0;
-    for (let i = 0; i < positions.count; i++) {
-        const y = positions.getY(i);
-        if (y <= maxY) {
-            const x = positions.getX(i);
-            const z = positions.getZ(i);
-            minX = Math.min(minX, x);
-            maxX = Math.max(maxX, x);
-            minZ = Math.min(minZ, z);
-            maxZ = Math.max(maxZ, z);
-            count++;
-        }
-    }
-    if (count < 3) return 0;
-    return Math.max(0, (maxX - minX)) * Math.max(0, (maxZ - minZ));
-}
-
-function renderOrientationAlternativesUI(evalResult) {
-    if (!evalResult || !Array.isArray(evalResult.results) || evalResult.results.length === 0) return;
-    const rows = evalResult.results
-        .map((r, idx) => {
-            const disabled = r.count <= 0 ? 'disabled' : '';
-            return `
-                <tr>
-                    <td>${r.name}</td>
-                    <td>${r.count}</td>
-                    <td><button class="btn-small" data-action="view-ori" data-idx="${idx}" ${disabled}>${mainText('orientationView')}</button></td>
-                </tr>
-            `;
-        })
-        .join('');
-
-    const html = `
-        <div style="margin-top: 10px;">
-            <button class="btn-small" data-action="toggle-ori">${mainText('orientationAlternatives')}</button>
-            <div data-role="ori-panel" style="display:none; margin-top: 8px;" class="results-content">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>${mainText('orientationLabel')}</th>
-                            <th>${mainRaw('results.unitsColumn', 'Units')}</th>
-                            <th></th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        ${rows}
-                    </tbody>
-                </table>
-                <p class="info-text" style="margin-top:6px;">${mainText('orientationCompareHint')}</p>
-            </div>
-        </div>
-    `;
-
-    elements.results.insertAdjacentHTML('beforeend', html);
-}
-
 // DOM Elements
 const elements = {
     // Mode buttons
@@ -886,6 +583,7 @@ const elements = {
     placementSideStacking: document.getElementById('placement-side-stacking'),
     placementSettleCheck: document.getElementById('placement-settle-check'),
     placementLayerSeparator: document.getElementById('placement-layer-separator'),
+    stackingQuality: document.getElementById('stacking-quality'),
     stlUpload: document.getElementById('stl-upload'),
     stlStatus: document.getElementById('stl-status'),
     optPieceColors: document.getElementById('opt-piece-colors'),
@@ -1184,45 +882,7 @@ function setupEventListeners() {
 
     // Event delegation for orientation alternatives in results
     elements.results?.addEventListener('click', (e) => {
-        const target = e.target;
-        if (!(target instanceof HTMLElement)) return;
-        const action = target.dataset?.action;
-        if (!action) return;
-
-        if (action === 'toggle-ori') {
-            const panel = elements.results.querySelector('[data-role="ori-panel"]');
-            if (panel) {
-                panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
-            }
-            return;
-        }
-
-        if (action === 'view-ori') {
-            const idx = parseInt(target.dataset.idx, 10);
-            if (!Number.isFinite(idx)) return;
-            const evalState = state.orientationEval;
-            if (!evalState || !evalState.originalGeometry || !evalState.results[idx]) return;
-
-            const candidate = evalState.results[idx];
-            const values = evalState.values;
-            state.sceneManager.clearPieces();
-            state.sceneManager.createBox(values.boxL, values.boxW, values.boxH);
-            const oriented = buildOrientedGeometry(evalState.originalGeometry, candidate.tilt, candidate.yawDeg);
-            const drawn = state.sceneManager.addPackedSTLHeightMap({
-                stlGeometry: oriented,
-                maxDraw: evalState.maxDraw,
-                maxTry: evalState.maxTry || null,
-                packingGap: values.packingGap,
-                colorCount: values.colorCount,
-                boxL: values.boxL,
-                boxW: values.boxW,
-                boxH: values.boxH,
-                dryRun: false
-            });
-
-            const count = typeof drawn === 'number' ? drawn : drawn.count;
-            console.log(`Rendered orientation "${candidate.name}" count=${count}`);
-        }
+        // Orientation alternatives UI removed — unified grid-based evaluation.
     });
 }
 
@@ -1697,6 +1357,7 @@ function getInputValues() {
         placementSideStacking: elements.placementSideStacking?.checked ?? true,
         placementSettleCheck: true,
         placementLayerSeparator: Math.max(0, parseFloat(elements.placementLayerSeparator?.value) || 0),
+        stackingQuality: parseInt(elements.stackingQuality?.value) || 2,
         materialDensity: (() => {
             const val = elements.materialDensity?.value;
             if (!val || val === '0') return 0;
@@ -1720,40 +1381,36 @@ function getInputValues() {
 }
 
 function buildOrientationOverrides(geometry, allowRotation) {
-    // Use the same 6 axis-aligned permutations as cuboid mode.
-    // This is fast, predictable, and gives correct grid results.
-    // For STL heightmap mode, the actual placement tries yaw rotations
-    // on the aligned geometry separately, so random sampling isn't needed here.
     geometry.computeBoundingBox();
     const bbox = geometry.boundingBox;
     const L = bbox.max.x - bbox.min.x;
     const W = bbox.max.z - bbox.min.z;
     const H = bbox.max.y - bbox.min.y;
 
+    // Each entry specifies (dims for calculator) + (appliedXYZ perm for geometry transform)
     const perms = allowRotation
         ? [
-            { dims: [L, W, H], name: 'Original (L×W×H)' },
-            { dims: [L, H, W], name: 'Rotació Y (L×H×W)' },
-            { dims: [W, L, H], name: 'Rotació Z (W×L×H)' },
-            { dims: [W, H, L], name: 'Rotació XY (W×H×L)' },
-            { dims: [H, L, W], name: 'Rotació XZ (H×L×W)' },
-            { dims: [H, W, L], name: 'Rotació YZ (H×W×L)' },
+            { dims: [L, W, H], perm: [0, 1, 2], name: 'Original (LxWxH)' },
+            { dims: [L, H, W], perm: [0, 2, 1], name: 'Rotacio Y (LxHxW)' },
+            { dims: [W, L, H], perm: [1, 0, 2], name: 'Rotacio Z (WxLxH)' },
+            { dims: [W, H, L], perm: [1, 2, 0], name: 'Rotacio XY (WxHxL)' },
+            { dims: [H, L, W], perm: [2, 0, 1], name: 'Rotacio XZ (HxLxW)' },
+            { dims: [H, W, L], perm: [2, 1, 0], name: 'Rotacio YZ (HxWxL)' },
         ]
         : [
-            { dims: [L, W, H], name: 'Sense rotació' }
+            { dims: [L, W, H], perm: [0, 1, 2], name: 'Sense rotacio' }
         ];
 
-    // Deduplicate near-equal bounding boxes
     const seen = new Set();
     const overrides = [];
     for (const p of perms) {
-        const key = p.dims.map(d => d.toFixed(1)).sort().join('_');
+        const key = p.dims.map(d => d.toFixed(1)).join('_');
         if (seen.has(key)) continue;
         seen.add(key);
         overrides.push({
             dims: p.dims,
             name: p.name,
-            permIndex: 0,
+            perm: p.perm,
             rotation: null,
             stable: true
         });
@@ -1788,11 +1445,7 @@ async function handleCalculate() {
         await nextFrame();
         const values = getInputValues();
 
-        // Resolve 'auto' strategy to 'stable-contact' with post-packing gravity
-        const isAutoStrategy = values.placementStrategy === 'auto';
-        if (isAutoStrategy) {
-            values.placementStrategy = 'stable-contact';
-        }
+        const isAutoStrategy = false;
 
         let orientationOverrides = null;
 
@@ -1848,17 +1501,10 @@ async function handleCalculate() {
             labels: getCalculatorLabels()
         });
 
-        // Don't show results yet — wait until placement finishes for accurate count
-        const isHeightmap = state.stlGeometry && values.heightMapNesting;
-        if (!isHeightmap) {
-            // For cuboid/non-heightmap: grid result is correct, show now
-            setCalcProgress(true, 4, 'Mostrant resultats...', calcStartTime);
-            elements.results.innerHTML = result.summary;
-            elements.results.classList.add('fade-in');
-        } else {
-            // For heightmap: show placeholder, real results will be shown after placement
-            elements.results.innerHTML = `<p class="loading-text">${mainText('placingPieces')}</p>`;
-        }
+        // Show results immediately — unified grid-based approach guarantees correct count
+        setCalcProgress(true, 4, 'Mostrant resultats...', calcStartTime);
+        elements.results.innerHTML = result.summary;
+        elements.results.classList.add('fade-in');
 
         // Update 3D visualization
         setCalcProgress(true, 5, 'Preparant geometria 3D...', calcStartTime);
@@ -1872,254 +1518,95 @@ async function handleCalculate() {
             const [pieceL, pieceW, pieceH] = getPieceDimensions(result.data);
             const [nx, ny, nz] = getDistribution(result.data);
 
+            let drawn = { count: 0 };
+            let realDistributionText = null;
+
             if (nx > 0 && ny > 0 && nz > 0) {
-                let drawn;
-                let realDistributionText = null;
 
                 // Decide what geometry to draw
                 setCalcProgress(true, 6, 'Provant orientacions...', calcStartTime);
                 await nextFrame();
                 if (state.stlGeometry) {
                     if (values.heightMapNesting) {
-                        const rawMaxDraw = 500;
-                    const stableBases = state.stlStableOrientations?.length
-                        ? state.stlStableOrientations
-                        : [{ quat: null, geometry: (state.stlAlignedGeometry || state.stlGeometry), stability: null }];
-                    const orientedSourceGeometry = stableBases[0].geometry;
+                        // Height-map path: multi-orientation evaluation + BVH-collision placement
+                        setCalcProgress(true, 8, `Avaluant orientacions...`, calcStartTime);
+                        await nextFrame();
 
-                    // Compute adaptive placement limit from volume ratio
-                    const stlBBox = orientedSourceGeometry.boundingBox || (() => { orientedSourceGeometry.computeBoundingBox(); return orientedSourceGeometry.boundingBox; })();
-                    const stlSize = new THREE.Vector3();
-                    stlBBox.getSize(stlSize);
-                    const pieceBBoxVol = stlSize.x * stlSize.y * stlSize.z;
-                    const boxVol = values.boxL * values.boxW * values.boxH;
-                    const maxByWeight = (values.maxWeight > 0 && values.objWeight > 0)
-                        ? Math.max(0, Math.floor(values.maxWeight / values.objWeight))
-                        : Infinity;
-                    const maxDraw = Number.isFinite(maxByWeight)
-                        ? Math.min(rawMaxDraw, maxByWeight)
-                        : rawMaxDraw;
-                    const maxTry = pieceBBoxVol > 0
-                        ? Math.min(2000, Math.max(maxDraw, Math.ceil(boxVol / pieceBBoxVol * 1.2)))
-                        : maxDraw;
-                    const searchEffortMultiplier = values.placementSearchEffort === 'dense'
-                        ? 1.45
-                        : values.placementSearchEffort === 'fast'
-                        ? 0.75
-                        : 1.0;
-                    const effectiveMaxTry = Math.max(maxDraw, Math.min(3000, Math.ceil(maxTry * searchEffortMultiplier)));
-                    console.log(`[Packing] boxVol=${boxVol.toFixed(0)}, pieceBBoxVol=${pieceBBoxVol.toFixed(1)}, maxTry=${maxTry}, maxDraw=${maxDraw}, weightCap=${Number.isFinite(maxByWeight) ? maxByWeight : 'none'}`);
+                        const baseGeometry = state.stlGeometry.clone();
+                        alignToStableBase(baseGeometry);
 
-                    // --- Step 1: Use precomputed stable orientation (from load/simplify) + generate yaw candidates ---
-                    setCalcProgress(true, 8, `Cercant millor orientació Y (${stableBases.length} bases)...`, calcStartTime);
-                    await nextFrame();
-                    if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
+                        // Try cardinal yaw rotations, pick best by grid capacity
+                        const yawAngles = values.allowRotation ? [0, 90, 180, 270] : [0];
+                        let bestYaw = 0;
+                        let bestCap = 0;
+                        let bestGeom = null;
 
-                    // --- Step 1b: Generate yaw candidates on oriented source ---
-                    const candidates = generateYawCandidates(
-                        state.stlGeometry,
-                        stableBases,
-                        values.boxL,
-                        values.boxW,
-                        values.boxH,
-                        values.allowRotation,
-                        values.placementStrategy
-                    );
+                        for (const yaw of yawAngles) {
+                            if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
+                            const g = baseGeometry.clone();
+                            applyYawToGeometry(g, yaw);
+                            recenterGeometry(g);
+                            g.computeBoundingBox();
+                            const bb = g.boundingBox;
+                            const sx = bb.max.x - bb.min.x;
+                            const sy = bb.max.y - bb.min.y;
+                            const sz = bb.max.z - bb.min.z;
 
-                    if (candidates.length === 0) {
-                        console.warn('Piece does not fit in any yaw orientation.');
-                        drawn = { count: 0 };
-                    } else {
+                            if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1)
+                                continue;
 
-                    // --- Step 2: Evaluate each yaw candidate via dry-run ---
-                    const evalResults = [];
-                    const evalStart = 15;
-                    const evalEnd = 70;
-                    const perCandidate = (evalEnd - evalStart) / Math.max(1, candidates.length);
-
-                    for (let ci = 0; ci < candidates.length; ci++) {
-                        const c = candidates[ci];
-                        if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
-
-                        const footprintArea = computeFootprintArea(c.oriented);
-                        const stability = getSupportStability(c.oriented);
-                        c.oriented.computeBoundingBox();
-                        const candidateBox = c.oriented.boundingBox;
-                        const candidateHeight = candidateBox ? (candidateBox.max.y - candidateBox.min.y) : Infinity;
-                        const gridFit = computeWallAlignedGridCapacity(
-                            c.oriented,
-                            values.boxL,
-                            values.boxW,
-                            values.packingGap
-                        );
-                        const dryRunMaxTry = values.placementSearchEffort === 'dense'
-                            ? Math.min(120, effectiveMaxTry)
-                            : values.placementSearchEffort === 'fast'
-                            ? Math.min(30, effectiveMaxTry)
-                            : Math.min(60, effectiveMaxTry);
-                        const trial = await state.sceneManager.addPackedSTLHeightMapAsync({
-                            stlGeometry: c.oriented,
-                            maxDraw,
-                            maxTry: dryRunMaxTry,
-                            packingGap: values.packingGap,
-                            colorCount: values.colorCount,
-                            boxL: values.boxL,
-                            boxW: values.boxW,
-                            boxH: values.boxH,
-                            placementStrategy: values.placementStrategy,
-                            stabilityMode: values.placementStability,
-                            allowSideStacking: values.placementSideStacking,
-                            useSettleCheck: values.placementSettleCheck,
-                            searchEffort: values.placementSearchEffort,
-                            layerSeparator: values.placementLayerSeparator,
-                            dryRun: true,
-                            abortSignal,
-                            onProgress: ({ placed, maxTry: mt }) => {
-                                const t = mt > 0 ? (placed / mt) : 0;
-                                const base = evalStart + perCandidate * ci;
-                                setCalcProgress(true, base + perCandidate * Math.max(0, Math.min(1, t)), `Avaluant orientació ${ci + 1}/${candidates.length}...`, calcStartTime);
+                            const cap = Math.floor(values.boxL / sx) * Math.floor(values.boxW / sz) * Math.floor(values.boxH / sy);
+                            if (cap > bestCap) {
+                                bestCap = cap;
+                                bestYaw = yaw;
+                                bestGeom = g;
                             }
-                        });
-                        const count = typeof trial === 'number' ? trial : trial.count;
-                        evalResults.push({
-                            candidateIndex: ci,
-                            tilt: c.tilt,
-                            tiltName: c.tiltName,
-                            yawDeg: c.yawDeg,
-                            name: c.name,
-                            count: count || 0,
-                            gridCount: gridFit.count,
-                            gridNX: gridFit.gridNX,
-                            gridNZ: gridFit.gridNZ,
-                            leftoverArea: gridFit.leftoverArea,
-                            stable: !!stability?.stable,
-                            baseArea: footprintArea || 0,
-                            height: candidateHeight
-                        });
-                    }
-
-                    const sortDenseBand = (list, { stableFirst = false, prioritizeDenseBase = true } = {}) => {
-                        list.sort((a, b) => {
-                            if (prioritizeDenseBase && (b.gridCount || 0) !== (a.gridCount || 0)) {
-                                return (b.gridCount || 0) - (a.gridCount || 0);
-                            }
-                            if (stableFirst && b.stable !== a.stable) return b.stable ? 1 : -1;
-                            if (b.count !== a.count) return b.count - a.count;
-                            if ((a.height || Infinity) !== (b.height || Infinity)) {
-                                return (a.height || Infinity) - (b.height || Infinity);
-                            }
-                            if (!stableFirst && b.stable !== a.stable) return b.stable ? 1 : -1;
-                            if ((a.leftoverArea || 0) !== (b.leftoverArea || 0)) return (a.leftoverArea || 0) - (b.leftoverArea || 0);
-                            return (b.baseArea || 0) - (a.baseArea || 0);
-                        });
-                        return list;
-                    };
-
-                    let rankedEvalResults = [...evalResults];
-
-                    // --- Step 3: Pick the orientation.
-                    // Stable-contact must stay within the densest first-layer band, then choose
-                    // the most stable candidate inside that band. Other modes keep looser ranking.
-                    if (values.placementStrategy === 'stable-contact' && rankedEvalResults.length > 0) {
-                        const bestGridCount = Math.max(...rankedEvalResults.map(result => result.gridCount || 0));
-                        const denseBand = rankedEvalResults.filter(result => (result.gridCount || 0) >= Math.max(1, bestGridCount - 1));
-                        rankedEvalResults = sortDenseBand(denseBand, { stableFirst: true, prioritizeDenseBase: true });
-                    } else {
-                        const prioritizeDenseBase = values.placementStrategy !== 'legacy';
-                        rankedEvalResults = sortDenseBand(rankedEvalResults, {
-                            stableFirst: false,
-                            prioritizeDenseBase
-                        });
-                    }
-
-                    let best = rankedEvalResults[0] || { tilt: { quat: state.stlSettledQuat }, yawDeg: 0, name: 'Y 0°', count: 0 };
-
-                    state.orientationEval = {
-                        values: { ...values },
-                        maxDraw,
-                        maxTry,
-                        originalGeometry: state.stlGeometry.clone(),
-                        results: rankedEvalResults
-                    };
-
-                    if (rankedEvalResults[0]) {
-                        console.log(
-                            `[Orientation] Selected ${rankedEvalResults[0].name} ` +
-                            `grid=${rankedEvalResults[0].gridNX}x${rankedEvalResults[0].gridNZ} (${rankedEvalResults[0].gridCount}), ` +
-                            `dryRun=${rankedEvalResults[0].count}, leftoverArea=${(rankedEvalResults[0].leftoverArea || 0).toFixed(1)}`
-                        );
-                    }
-
-                    const bestGeom = buildOrientedGeometry(state.stlGeometry, best.tilt, best.yawDeg);
-
-                    // Auto strategy resolves to stable-contact + gravity refinement
-                    let resolvedStrategy = values.placementStrategy;
-                    if (isAutoStrategy) {
-                        resolvedStrategy = 'stable-contact';
-                        values.placementStrategy = resolvedStrategy;
-                        console.log(`[Auto] resolved to ${resolvedStrategy}`);
-                    }
-
-                    // Build orientation pool for mixed-orientation packing
-                    const orientPool = values.placementStrategy === 'stable-contact'
-                        ? buildOrientationPoolFromCandidates(
-                            sortDenseBand([...evalResults], {
-                                stableFirst: false,
-                                prioritizeDenseBase: true
-                            })
-                                .slice(0, 6)
-                                .map(result => candidates[result.candidateIndex])
-                                .filter(Boolean),
-                            values.boxL,
-                            values.boxW,
-                            values.boxH
-                        )
-                        : buildOrientationPool(
-                            bestGeom,
-                            values.boxL, values.boxW, values.boxH
-                        );
-
-                    drawn = await state.sceneManager.addPackedSTLHeightMapAsync({
-                        stlGeometry: bestGeom,
-                        orientationPool: orientPool,
-                        useMixedOrientations: orientPool.length > 1 && (values.placementSideStacking || values.placementStrategy === 'stable-contact'),
-                        lockPrimaryFirstLayer: values.placementStrategy === 'stable-contact',
-                        maxDraw,
-                        maxTry: effectiveMaxTry,
-                        packingGap: values.packingGap,
-                        colorCount: values.colorCount,
-                        boxL: values.boxL,
-                        boxW: values.boxW,
-                        boxH: values.boxH,
-                        placementStrategy: values.placementStrategy,
-                        stabilityMode: values.placementStability,
-                        allowSideStacking: values.placementSideStacking,
-                        useSettleCheck: values.placementSettleCheck,
-                        searchEffort: values.placementSearchEffort,
-                        layerSeparator: values.placementLayerSeparator,
-                        dryRun: false,
-                        abortSignal,
-                        onProgress: ({ placed, maxTry }) => {
-                            const start = 70;
-                            const end = 95;
-                            const t = maxTry > 0 ? (placed / maxTry) : 0;
-                            setCalcProgress(true, start + (end - start) * t, mainText('placingPiecesProgress', { placed: Math.floor(placed), maxTry }), calcStartTime);
                         }
-                    });
 
-                    // Add a small UI block so you can inspect other orientations
-                    renderOrientationAlternativesUI(state.orientationEval);
-                    } // end else (candidates.length > 0)
-                } else {
-                    // Non-heightmap path: also align to stable base first
+                        if (!bestGeom) {
+                            drawn = { count: 0 };
+                        } else {
+                            console.log(`[HeightMap] Best yaw: ${bestYaw} deg, grid cap=${bestCap}`);
+
+                            drawn = await state.sceneManager.addPackedSTLHeightMapAsync({
+                                stlGeometry: bestGeom,
+                                maxDraw: 500,
+                                maxTry: Math.min(3000, Math.max(500, bestCap * 2)),
+                                packingGap: values.packingGap,
+                                colorCount: values.colorCount,
+                                boxL: values.boxL,
+                                boxW: values.boxW,
+                                boxH: values.boxH,
+                                placementStrategy: values.placementStrategy,
+                                stabilityMode: values.placementStability,
+                                allowSideStacking: values.placementSideStacking,
+                                useSettleCheck: values.placementSettleCheck,
+                                searchEffort: values.placementSearchEffort,
+                                layerSeparator: values.placementLayerSeparator,
+                                stackingQuality: values.stackingQuality,
+                                dryRun: false,
+                                abortSignal,
+                                onProgress: ({ placed, maxTry }) => {
+                                    const t = maxTry > 0 ? (placed / maxTry) : 0;
+                                    setCalcProgress(true, 70 + 25 * t, mainText('placingPiecesProgress', { placed: Math.floor(placed), maxTry }), calcStartTime);
+                                }
+                            });
+                        }
+                    } else {
+                    setCalcProgress(true, 8, `Cercant millor orientacio...`, calcStartTime);
+                    await nextFrame();
+
+                    const best = result.data.bestOrientation || {};
+                    const perm = (best.perm && Array.isArray(best.perm) && best.perm.length === 3)
+                        ? best.perm
+                        : [0, 1, 2];
+
                     const orientedGeometry = state.stlGeometry.clone();
                     alignToStableBase(orientedGeometry);
-                    const best = result.data.bestOrientation || {};
-                    if (best.rotation && Array.isArray(best.rotation)) {
-                        const quat = new THREE.Quaternion(...best.rotation);
-                        const matrix = new THREE.Matrix4().makeRotationFromQuaternion(quat);
-                        orientedGeometry.applyMatrix4(matrix);
-                    }
+                    applyPermutation(orientedGeometry, perm);
+                    recenterGeometry(orientedGeometry);
+
+                    console.log(`[STL] Best orientation: ${best.name}, perm=${perm}, dims=[${pieceL.toFixed(1)}, ${pieceW.toFixed(1)}, ${pieceH.toFixed(1)}], grid=${nx}x${nz}x${ny}`);
 
                     drawn = state.sceneManager.addPackedSTLPieces({
                         stlGeometry: orientedGeometry,
@@ -2132,6 +1619,18 @@ async function handleCalculate() {
                         boxW: values.boxW,
                         boxH: values.boxH,
                         strictGeometryCheck: true
+                    });
+                    }
+                } else {
+                    drawn = state.sceneManager.addPackedPieces({
+                        pieceL, pieceW, pieceH,
+                        nx, ny, nz,
+                        maxDraw: 500,
+                        packingGap: values.packingGap,
+                        colorCount: values.colorCount,
+                        boxL: values.boxL,
+                        boxW: values.boxW,
+                        boxH: values.boxH
                     });
                 }
             } else {
@@ -2167,23 +1666,10 @@ async function handleCalculate() {
             console.log(`Rendered ${drawnCount} items (${displayCount} pieces)`);
 
             stopGravitySimulation();
-            const autoGravity = isAutoStrategy || values.placementStrategy === 'physics-assisted';
-            if (values.mode === 'optimized' && autoGravity && displayCount > 0) {
-                if (elements.simulationStatus) {
-                    elements.simulationStatus.textContent = 'Compactant amb gravetat...';
-                    elements.simulationStatus.style.display = 'block';
-                }
-                setTimeout(() => {
-                    // Auto: moderate damping (allows small rotations, prevents full tipping)
-                    // Physics-assisted: low damping (allows natural rotation)
-                    applyGravityTest({
-                        lockRotations: false,
-                        settleAngularDamping: isAutoStrategy ? 12.0 : 3.0
-                    }).catch(error => {
-                        console.error('[GravityRefine] Automatic settle failed:', error);
-                    });
-                }, 0);
-            }
+            // Auto-gravity disabled: convex hull colliders are inherently larger than
+            // the mesh, causing clearPieces→recreate to push pieces apart and float.
+            // The heightmap InstancedMesh rendering is already optimal and correct.
+            console.log(`[GravityRefine] autoGravity=disabled, strategy=${values.placementStrategy}, count=${displayCount}`);
 
             // Estimated total weight (estPieceWeight computed above, before calcularEmpaquetatge)
             const estTotalWeight = estPieceWeight * displayCount;
@@ -2197,17 +1683,8 @@ async function handleCalculate() {
             };
             const matName = materialNames[String(matDensity)] || (matDensity > 0 ? `${matDensity} kg/m³` : null);
 
-            // Build final summary with ACTUAL count (not grid estimate)
+            // Build final summary (calculator result is the correct count — unified grid-based approach)
             const finalConfig = { ...result.data.bestOrientation };
-            if (isHeightmap) {
-                // Override with real placement data
-                finalConfig.distribution = realDistributionText || `${displayCount} (${mainText('heightmapSuffix')})`;
-                finalConfig.weight = displayCount * values.objWeight;
-                const volObj = meshVolume > 0 ? meshVolume : (values.objL * values.objW * values.objH);
-                const volBox = values.boxL * values.boxW * values.boxH;
-                finalConfig.volEfficiency = volBox > 0 ? (displayCount * volObj / volBox * 100) : 0;
-                finalConfig.weightEfficiency = values.maxWeight > 0 ? (finalConfig.weight / values.maxWeight * 100) : 0;
-            }
 
             const finalSummary = createSummary(displayCount, finalConfig, result.data.allOrientations, {
                 volumeTheoreticalMax: result.data.volumeTheoreticalMax,
@@ -2239,11 +1716,13 @@ async function handleCalculate() {
 
                 // Show report buttons
                 elements.reportButtons.style.display = 'block';
+                // Only show gravity button for physics-assisted (experimental).
+                // Stable-contact uses heightmap rendering which is already optimal.
                 if (elements.applyGravityBtn) {
-                    elements.applyGravityBtn.style.display = 'block';
+                    elements.applyGravityBtn.style.display =
+                        values.placementStrategy === 'physics-assisted' ? 'block' : 'none';
                 }
             }
-        }
 
         const elapsed = ((performance.now() - calcStartTime) / 1000).toFixed(1);
         console.timeEnd('[PackAssist] Càlcul total');
@@ -2274,6 +1753,10 @@ function stopGravitySimulation() {
     if (!state.gravitySimulation) return;
     const sim = state.gravitySimulation;
     sim.running = false;
+    if (sim.jitterInterval) {
+        clearInterval(sim.jitterInterval);
+        sim.jitterInterval = null;
+    }
     if (sim.animationId) {
         cancelAnimationFrame(sim.animationId);
     }
@@ -2309,8 +1792,9 @@ async function initGravitySimulation() {
         ? parseInt(elements.optPieceColors?.value) || 10
         : parseInt(elements.pieceColors?.value) || 10));
 
-    // Slight convex-hull shrink to reduce explosive separation
-    const hullScale = 0.995;
+    // Convex hull shrink: 0.97 prevents explosions from hull-mesh mismatch
+    // while still providing adequate support for stacked pieces.
+    const hullScale = 0.97;
 
     const placementItems = placement.items?.length
         ? placement.items
@@ -2410,66 +1894,92 @@ async function initGravitySimulation() {
 
 
 async function applyGravityTest(options = {}) {
-    const { lockRotations = false, settleAngularDamping = 3.0 } = options;
+    const { lockRotations = false, settleAngularDamping = 3.0, settleLinearDamping = 1.0 } = options;
+    console.log(`[GravityRefine] applyGravityTest — lockRotations=${lockRotations}`);
     if (!state.sceneManager?.lastPlacement) return;
 
     if (!state.gravitySimulation) {
         const sim = await initGravitySimulation();
+        console.log(`[GravityRefine] init: ${sim?.physics?.meshBodies?.length || 0} bodies`);
         if (!sim) return;
         state.gravitySimulation = sim;
     }
 
     const sim = state.gravitySimulation;
     sim.running = true;
-    sim.phase = 'initial';
     sim.frameCount = 0;
+    sim.jitterInterval = null;
     sim.physics.setGravity(-9810);
-    // Rotations stay locked during initial gravity settling
     sim.physics.lockAllRotations(true);
 
     if (elements.simulationStatus) {
-        elements.simulationStatus.textContent = 'Aplicant gravetat (estabilitzant...)';
+        elements.simulationStatus.textContent = 'Aplicant gravetat...';
         elements.simulationStatus.style.display = 'block';
     }
 
-    // Settled callback
+    // ── Invisible warm-up: resolve convex-hull interpenetration ──
+    // Pieces placed by the heightmap algorithm touch tightly. Convex hulls are
+    // inherently larger than the real mesh (they wrap concavities), so even with
+    // hullScale=0.93 there can be small overlaps. Running physics steps WITHOUT
+    // animation lets Rapier push overlapping pieces apart gently before the user
+    // sees anything — no visual explosion.
+    sim.physics.setAllFriction(0.1);
+    for (const { body } of sim.physics.meshBodies) {
+        if (!body || !body.isValid?.()) continue;
+        body.setLinearDamping(5.0);   // high damping suppresses bounce during warm-up
+        body.setAngularDamping(50.0);
+    }
+    sim.physics.warmUp(120); // ~0.5s of physics time, resolves overlaps instantly
+    console.log(`[GravityRefine] Warm-up done — overlaps resolved`);
+
+    // ── Configure for visible settling ──
+    // Stable-contact: just gravity settle — no vibration (pieces are already optimally
+    // placed by the heightmap, vibration only pushes them OUT of position).
+    // Physics-assisted: short vibration then settle.
+    sim.physics.settleVelocityThreshold = lockRotations ? 10.0 : 5.0;
+    sim.physics.settleFramesRequired = lockRotations ? 15 : 30;
+
+    if (lockRotations) {
+        sim.phase = 'settling';
+        sim.physics.setAllFriction(0.3);
+        for (const { body } of sim.physics.meshBodies) {
+            if (!body || !body.isValid?.()) continue;
+            body.setLinearDamping(settleLinearDamping);
+            body.setAngularDamping(settleAngularDamping);
+        }
+    } else {
+        // Physics-assisted: short vibration first
+        sim.phase = 'vibrating';
+        for (const { body } of sim.physics.meshBodies) {
+            if (!body || !body.isValid?.()) continue;
+            body.setLinearDamping(1.0);
+            body.setAngularDamping(3.0);
+        }
+        sim.physics.vibrationAmplitude = 1.0;
+        sim.physics.vibrationFrequency = 8.0;
+        sim.physics.vibrationNoise = 0.2;
+        sim.physics.startVibration(2000);
+    }
+
+    const finalizeGravity = () => {
+        sim.phase = 'done';
+        sim.running = false;
+        if (sim.jitterInterval) { clearInterval(sim.jitterInterval); sim.jitterInterval = null; }
+        if (sim.animationId) cancelAnimationFrame(sim.animationId);
+        sim.physics.settleVelocityThreshold = 5.0;
+        sim.physics.settleFramesRequired = 60;
+        const insideCount = sim.physics.countPiecesInBox();
+        console.log(`[GravityRefine] Settled — ${insideCount} pieces (was ${state.displayCount})`);
+        state.displayCount = insideCount;
+        if (state.lastResults) state.lastResults.pieceCount = insideCount;
+        if (elements.simulationStatus) {
+            elements.simulationStatus.textContent = mainText('gravitySettled', { count: insideCount });
+        }
+    };
+
     sim.physics.onSettled = (count) => {
-        if (sim.phase === 'initial') {
-            // Initial settle complete — start vibration phase  
-            sim.phase = 'vibrating';
-            sim.physics.settledCount = 0;
-            sim.physics.startVibration(4000);
-            if (elements.simulationStatus) {
-                elements.simulationStatus.textContent = 'Vibrant per compactar...';
-            }
-        } else if (sim.phase === 'vibrating') {
-            // Vibration settle — unlock rotations for natural settling (unless locked)
-            sim.phase = 'settling';
-            sim.physics.settledCount = 0;
-            if (!lockRotations) sim.physics.lockAllRotations(false);
-            // Adjust damping for final settling
-            for (const { body } of sim.physics.meshBodies) {
-                if (!body || !body.isValid?.()) continue;
-                body.setLinearDamping(1.0);
-                body.setAngularDamping(settleAngularDamping);
-            }
-            if (elements.simulationStatus) {
-                elements.simulationStatus.textContent = 'Assentament final...';
-            }
-        } else if (sim.phase === 'settling') {
-            // Done!
-            sim.phase = 'done';
-            sim.running = false;
-            if (sim.animationId) cancelAnimationFrame(sim.animationId);
-            const insideCount = sim.physics.countPiecesInBox();
-            // Update single source of truth
-            state.displayCount = insideCount;
-            if (state.lastResults) {
-                state.lastResults.pieceCount = insideCount;
-            }
-            if (elements.simulationStatus) {
-                elements.simulationStatus.textContent = mainText('gravitySettled', { count: insideCount });
-            }
+        if (sim.phase === 'settling') {
+            finalizeGravity();
         }
     };
 
@@ -2478,28 +1988,32 @@ async function applyGravityTest(options = {}) {
         sim.frameCount++;
         sim.physics.step();
 
-        // Safety timeout: stop after 30 seconds (~1800 frames at 60fps)
-        if (sim.frameCount > 1800) {
+        // Safety timeout: 5 seconds (~300 frames)
+        if (sim.frameCount > 300) {
             sim.running = false;
+            if (sim.jitterInterval) { clearInterval(sim.jitterInterval); sim.jitterInterval = null; }
+            sim.physics.settleVelocityThreshold = 5.0;
+            sim.physics.settleFramesRequired = 60;
             const insideCount = sim.physics.countPiecesInBox();
-            // Update single source of truth
             state.displayCount = insideCount;
-            if (state.lastResults) {
-                state.lastResults.pieceCount = insideCount;
-            }
+            if (state.lastResults) state.lastResults.pieceCount = insideCount;
             if (elements.simulationStatus) {
                 elements.simulationStatus.textContent = mainText('gravityTimeout', { count: insideCount });
             }
+            console.log(`[GravityRefine] Timeout — ${insideCount} pieces`);
             return;
         }
 
-        // If vibration finished and we're still in vibrating phase, move to settling
+        // Vibration-end → transition to settling (physics-assisted only)
         if (sim.phase === 'vibrating' && !sim.physics.isVibrating) {
             sim.phase = 'settling';
             sim.physics.settledCount = 0;
             if (!lockRotations) sim.physics.lockAllRotations(false);
-            if (elements.simulationStatus) {
-                elements.simulationStatus.textContent = 'Assentament final...';
+            sim.physics.setAllFriction(0.3);
+            for (const { body } of sim.physics.meshBodies) {
+                if (!body || !body.isValid?.()) continue;
+                body.setLinearDamping(settleLinearDamping);
+                body.setAngularDamping(settleAngularDamping);
             }
         }
 
@@ -2802,7 +2316,6 @@ async function applyLanguage() {
 
     if (elements.placementStrategy) {
         const optionTexts = [
-            t.placementStrategyAuto,
             t.placementStrategyStable,
             t.placementStrategyPhysics,
             t.placementStrategyLegacy

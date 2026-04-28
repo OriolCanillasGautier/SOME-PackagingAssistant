@@ -8,7 +8,8 @@ __pycache__/
 dist/
 build/
 *env/
-
+node_modules/
+OLD-review new features/
 
 # IDE
 .vscode/

@@ -4,11 +4,16 @@
  */
 
 function calculateFit(pieceDim, boxDim, gap) {
-    if (pieceDim > boxDim) return 0;
-    if (Math.abs(gap) < 0.001) return Math.floor(boxDim / pieceDim);
-    const fit = Math.floor((boxDim + gap) / (pieceDim + gap));
+    if (pieceDim > boxDim + 1e-9) return 0;
+    if (Math.abs(gap) < 0.001) {
+        const fit = Math.floor(boxDim / pieceDim + 1e-9);
+        // Validate: fit pieces must actually fit
+        if (fit * pieceDim > boxDim + 1e-9) return fit - 1;
+        return fit;
+    }
+    const fit = Math.floor((boxDim + gap) / (pieceDim + gap) + 1e-9);
     const requiredSpace = fit * pieceDim + Math.max(0, fit - 1) * gap;
-    if (requiredSpace > boxDim) return fit - 1;
+    if (requiredSpace > boxDim + 1e-9) return fit - 1;
     return fit;
 }
 
@@ -379,6 +384,9 @@ export function calcularEmpaquetatge(params) {
         const orientationData = {
             name: orientationNames[i],
             dimensions: [ol, ow, oh],
+            perm: Array.isArray(orientationOverrides) && orientationOverrides[i]?.perm
+                ? orientationOverrides[i].perm
+                : null,
             permIndex: Array.isArray(orientationOverrides) && orientationOverrides[i]?.permIndex !== undefined
                 ? orientationOverrides[i].permIndex
                 : i,
@@ -419,6 +427,9 @@ export function calcularEmpaquetatge(params) {
         const weightConfig = {
             name: `${orientationNames[i]} (${text.weightLimitedSuffix})`,
             dimensions: [ol, ow, oh],
+            perm: Array.isArray(orientationOverrides) && orientationOverrides[i]?.perm
+                ? orientationOverrides[i].perm
+                : null,
             rotation: Array.isArray(orientationOverrides) && orientationOverrides[i]?.rotation
                 ? orientationOverrides[i].rotation
                 : null,

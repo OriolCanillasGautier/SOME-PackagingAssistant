@@ -69,13 +69,20 @@ function _gridSpacingCollides(od, dx, dz) {
     return od.geometry.boundsTree.intersectsGeometry(od.geometry, matrix);
 }
 
-function _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap) {
-    const factors = [1.0, 0.98, 0.96, 0.94, 0.92, 0.90, 0.88, 0.85, 0.82, 0.80];
+function _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort = 'balanced') {
+    const baseFacs = [1.0, 0.98, 0.96, 0.94, 0.92, 0.90, 0.88, 0.85, 0.82, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55];
+    // Dense: try tighter compaction; Fast: skip loosest factors
+    const factors = searchEffort === 'dense'
+        ? [...baseFacs, 0.50, 0.45, 0.40]
+        : searchEffort === 'fast'
+        ? baseFacs.filter(f => f >= 0.70)
+        : baseFacs;
     let best = null;
 
     for (const fx of factors) {
         for (const fz of factors) {
-            // Allow step to go below sizeX so BVH is the real arbiter for concave pieces
+            // Allow step to go well below sizeX — BVH collision is the real arbiter.
+            // Concave/interlocking pieces can nest far tighter than their bounding box.
             const stepX = Math.max(packingGap * 0.5 + 1, (od.sizeX + packingGap) * fx);
             const stepZ = Math.max(packingGap * 0.5 + 1, (od.sizeZ + packingGap) * fz);
 
@@ -83,6 +90,7 @@ function _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap) {
             if (_gridSpacingCollides(od, stepX, 0)) continue;
             if (_gridSpacingCollides(od, 0, stepZ)) continue;
             if (_gridSpacingCollides(od, stepX, stepZ)) continue;
+            if (_gridSpacingCollides(od, -stepX, stepZ)) continue;
 
             const nx = Math.max(1, Math.floor((boxL - od.sizeX + 0.01) / stepX) + 1);
             const nz = Math.max(1, Math.floor((boxW - od.sizeZ + 0.01) / stepZ) + 1);
@@ -282,27 +290,16 @@ async function _buildOrientData(srcGeometry, cellSize, boxL, boxW, boxH, maybeYi
     const vertexCount = positions ? positions.count : 0;
     if (!positions || vertexCount === 0) return null;
 
-    const pieceNX = Math.max(1, Math.ceil(sizeX / cellSize));
-    const pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize));
+    const pieceNX = Math.max(1, Math.ceil(sizeX / cellSize - 0.01));
+    const pieceNZ = Math.max(1, Math.ceil(sizeZ / cellSize - 0.01));
     const pieceHeights = await _rasterizePieceHeights(geometry, sizeX, sizeZ, cellSize, pieceNX, pieceNZ, maybeYield);
+
+    // Build mask from rasterized heights: any cell with a height value > 0
+    // is occupied by the piece (not just base-contact cells).
+    // This ensures the piece's full 3D shape is represented in the height map.
     const pieceMask = new Uint8Array(pieceNX * pieceNZ);
-
-    let minY = Infinity;
-    for (let i = 0; i < vertexCount; i++) {
-        minY = Math.min(minY, positions.getY(i));
-        if ((i & 4095) === 0) await maybeYield();
-    }
-    const baseEps = Math.max(0.5, sizeY * 0.02);
-
-    for (let i = 0; i < vertexCount; i++) {
-        const x = positions.getX(i) + sizeX / 2;
-        const y = positions.getY(i);
-        const z = positions.getZ(i) + sizeZ / 2;
-        const ix = Math.min(pieceNX - 1, Math.max(0, Math.floor(x / cellSize)));
-        const iz = Math.min(pieceNZ - 1, Math.max(0, Math.floor(z / cellSize)));
-        const idx = iz * pieceNX + ix;
-        if (y <= minY + baseEps) pieceMask[idx] = 1;
-        if ((i & 4095) === 0) await maybeYield();
+    for (let i = 0; i < pieceHeights.length; i++) {
+        if (pieceHeights[i] > 0) pieceMask[i] = 1;
     }
 
     const localBbox = new THREE.Box3(
@@ -310,19 +307,18 @@ async function _buildOrientData(srcGeometry, cellSize, boxL, boxW, boxH, maybeYi
         new THREE.Vector3(sizeX / 2, sizeY, sizeZ / 2)
     );
 
-    const expandedMask = _expandBaseFootprintMask(pieceMask, pieceNX, pieceNZ);
-
-    const filledHeights = _fillPieceHeights(pieceHeights, expandedMask, pieceNX, pieceNZ, sizeY);
+    // Mask is already derived from rasterized heights — no expansion/fill needed.
+    // Every cell with pieceHeights > 0 is part of the piece's 3D occupancy.
 
     let baseCellCount = 0;
-    for (let i = 0; i < expandedMask.length; i++) {
-        if (expandedMask[i]) baseCellCount++;
+    for (let i = 0; i < pieceMask.length; i++) {
+        if (pieceMask[i]) baseCellCount++;
     }
     const footprintArea = baseCellCount * cellSize * cellSize;
 
     return {
         geometry, positions, sizeX, sizeY, sizeZ,
-        pieceNX, pieceNZ, pieceHeights: filledHeights, pieceMask: expandedMask, localBbox,
+        pieceNX, pieceNZ, pieceHeights, pieceMask, localBbox,
         footprintArea
     };
 }
@@ -1112,6 +1108,7 @@ export class SceneManager {
         useSettleCheck = true,
         searchEffort = 'balanced',
         layerSeparator = 0,
+        stackingQuality = 2,
         dryRun = false,
         abortSignal = null,
         onProgress = null
@@ -1145,7 +1142,17 @@ export class SceneManager {
         const primBbox = stlGeometry.boundingBox;
         const primSX = primBbox.max.x - primBbox.min.x;
         const primSZ = primBbox.max.z - primBbox.min.z;
-        const cellSize = Math.max(1, Math.min(4, Math.min(primSX, primSZ) / 20));
+        const sq = Math.max(1, Math.min(3, stackingQuality));
+        let cellSize;
+        if (sq === 1) {
+            // Q1 legacy: simple formula, no box cap
+            cellSize = Math.max(1, Math.min(4, Math.min(primSX, primSZ) / 20));
+        } else {
+            const cellDivisor = searchEffort === 'dense' ? 25 : searchEffort === 'fast' ? 15 : 20;
+            const pieceBasedCell = Math.min(primSX, primSZ) / cellDivisor;
+            const minCellFromBox = Math.max(boxL, boxW) / 60;
+            cellSize = Math.max(1, Math.min(4, Math.max(pieceBasedCell, minCellFromBox)));
+        }
 
         // Build orientation data: primary + pool alternates
         const allSrcGeometries = [stlGeometry];
@@ -1165,7 +1172,7 @@ export class SceneManager {
         const multiOrient = orientData.length > 1;
         const heightEps = Math.max(0.1, packingGap * 0.1);
 
-        console.log(`[HeightMapAsync] ${orientData.length} orientation(s) prepared (cell=${cellSize.toFixed(1)}mm)`);
+        console.log(`[HeightMapAsync] ${orientData.length} orientation(s) prepared (cell=${cellSize.toFixed(1)}mm, effort=${searchEffort}, sq=${sq})`);
 
         // Container height map
         const gridNX = Math.max(1, Math.ceil(boxL / cellSize));
@@ -1192,6 +1199,52 @@ export class SceneManager {
         const placedAabbs = [];
         const placedMatrices = [];
         const placedOrientIdxs = [];
+
+        // Spatial hash for fast neighbor lookup: avoids O(n) scan over all placed pieces
+        const spatialCellSize = Math.max(primary.sizeX, primary.sizeY, primary.sizeZ) * 2;
+        const spatialGrid = new Map();
+        const _spatialKey = (x, y, z) => `${Math.floor(x / spatialCellSize)},${Math.floor(y / spatialCellSize)},${Math.floor(z / spatialCellSize)}`;
+        function addToSpatialGrid(idx, aabb) {
+            const minX = Math.floor(aabb.min.x / spatialCellSize);
+            const maxX = Math.floor(aabb.max.x / spatialCellSize);
+            const minY = Math.floor(aabb.min.y / spatialCellSize);
+            const maxY = Math.floor(aabb.max.y / spatialCellSize);
+            const minZ = Math.floor(aabb.min.z / spatialCellSize);
+            const maxZ = Math.floor(aabb.max.z / spatialCellSize);
+            for (let z = minZ; z <= maxZ; z++) {
+                for (let y = minY; y <= maxY; y++) {
+                    for (let x = minX; x <= maxX; x++) {
+                        const key = `${x},${y},${z}`;
+                        let list = spatialGrid.get(key);
+                        if (!list) { list = []; spatialGrid.set(key, list); }
+                        list.push(idx);
+                    }
+                }
+            }
+        }
+        function getSpatialNeighbors(aabb) {
+            const minX = Math.floor(aabb.min.x / spatialCellSize);
+            const maxX = Math.floor(aabb.max.x / spatialCellSize);
+            const minY = Math.floor(aabb.min.y / spatialCellSize);
+            const maxY = Math.floor(aabb.max.y / spatialCellSize);
+            const minZ = Math.floor(aabb.min.z / spatialCellSize);
+            const maxZ = Math.floor(aabb.max.z / spatialCellSize);
+            const seen = new Set();
+            const result = [];
+            for (let z = minZ; z <= maxZ; z++) {
+                for (let y = minY; y <= maxY; y++) {
+                    for (let x = minX; x <= maxX; x++) {
+                        const list = spatialGrid.get(`${x},${y},${z}`);
+                        if (!list) continue;
+                        for (const idx of list) {
+                            if (!seen.has(idx)) { seen.add(idx); result.push(idx); }
+                        }
+                    }
+                }
+            }
+            return result;
+        }
+
         const tmpMatA = new THREE.Matrix4();
         const tmpMatB = new THREE.Matrix4();
         const tmpInv = new THREE.Matrix4();
@@ -1200,9 +1253,13 @@ export class SceneManager {
         const candidateIntersectsAny = (candidateMatrix, candidateAabb, candOrientIdx) => {
             const candGeom = orientData[candOrientIdx].geometry;
             if (!candGeom.boundsTree) return false;
-            const inflate = 0;
+            // Q1 legacy: inflate broadphase by gap*0.5, no touchEps exception
+            // Q2/Q3: tight broadphase + touchEps for vertical stacking
+            const inflate = sq === 1 ? Math.max(0, packingGap * 0.5) : 0;
+            const useTouchEps = sq >= 2;
             const touchEps = Math.max(0.6, cellSize * 0.35);
-            for (let i = 0; i < placedAabbs.length; i++) {
+            const neighbors = getSpatialNeighbors(candidateAabb);
+            for (const i of neighbors) {
                 const otherAabb = placedAabbs[i];
                 if ((candidateAabb.max.x + inflate) < (otherAabb.min.x - inflate) ||
                     (candidateAabb.min.x - inflate) > (otherAabb.max.x + inflate) ||
@@ -1211,11 +1268,13 @@ export class SceneManager {
                     (candidateAabb.max.z + inflate) < (otherAabb.min.z - inflate) ||
                     (candidateAabb.min.z - inflate) > (otherAabb.max.z + inflate)) continue;
 
-                const overlapX = Math.min(candidateAabb.max.x, otherAabb.max.x) - Math.max(candidateAabb.min.x, otherAabb.min.x);
-                const overlapY = Math.min(candidateAabb.max.y, otherAabb.max.y) - Math.max(candidateAabb.min.y, otherAabb.min.y);
-                const overlapZ = Math.min(candidateAabb.max.z, otherAabb.max.z) - Math.max(candidateAabb.min.z, otherAabb.min.z);
-                const verticalTouch = overlapX > heightEps && overlapZ > heightEps && overlapY <= touchEps;
-                if (verticalTouch) continue;
+                if (useTouchEps) {
+                    const overlapX = Math.min(candidateAabb.max.x, otherAabb.max.x) - Math.max(candidateAabb.min.x, otherAabb.min.x);
+                    const overlapY = Math.min(candidateAabb.max.y, otherAabb.max.y) - Math.max(candidateAabb.min.y, otherAabb.min.y);
+                    const overlapZ = Math.min(candidateAabb.max.z, otherAabb.max.z) - Math.max(candidateAabb.min.z, otherAabb.min.z);
+                    const verticalTouch = overlapX > heightEps && overlapZ > heightEps && overlapY <= touchEps;
+                    if (verticalTouch) continue;
+                }
 
                 const placedGeom = orientData[placedOrientIdxs[i]].geometry;
                 if (!placedGeom.boundsTree) continue;
@@ -1241,6 +1300,14 @@ export class SceneManager {
         const replicationProfiles = isLegacyStrategy
             ? [activeStability]
             : [activeStability, stabilityProfiles.medium, stabilityProfiles.loose];
+
+        // ─── Stacking Quality tiers ───
+        // Q1: legacy-faithful — simple grid, legacy collision, no BVH in 1B, no settle
+        // Q2: balanced — compacted grid, skip BVH in Phase 1B, settle + BVH in Phase 2
+        // Q3: safe — compacted grid, BVH for alt orientations in 1B, settle everywhere
+        const skipReplicationBVH = true;           // All tiers skip BVH for same-orient replication
+        const useSettleStep      = sq >= 2;        // Q2, Q3: binary-search settle
+        console.log(`[HeightMapAsync] stackingQuality=${sq} → skipRepBVH=${skipReplicationBVH}, settle=${useSettleStep}`);
 
         const evaluateSupport = (gx, gz, od, baseH, profile, settleCheckEnabled = useSettleCheck) => {
             if (baseH <= heightEps) {
@@ -1340,7 +1407,31 @@ export class SceneManager {
         };
 
         let consecutiveSkips = 0;
-        const maxConsecutiveSkips = Math.max(200, Math.ceil(boxVolume / pieceBBoxVol) * 3);
+        const skipMultiplier = searchEffort === 'dense' ? 4 : searchEffort === 'fast' ? 2 : 3;
+        const maxConsecutiveSkips = Math.max(200, Math.ceil(boxVolume / pieceBBoxVol) * skipMultiplier);
+
+        // BVH-based settle: binary search for the lowest non-colliding Y position.
+        // This fixes "floating" where pieces sit on the heightmap's bounding-box
+        // platform instead of resting on the actual geometry surface below.
+        const settleHeight = (posX, posZ, initialBaseH, oiIdx) => {
+            if (initialBaseH <= heightEps) return initialBaseH;
+            const od = orientData[oiIdx];
+            let lo = 0, hi = initialBaseH;
+            const settleMatB = new THREE.Matrix4();
+            const settleBox = new THREE.Box3();
+            for (let iter = 0; iter < 12 && (hi - lo) > 0.15; iter++) {
+                const mid = (lo + hi) / 2;
+                settleMatB.makeTranslation(posX, mid, posZ);
+                settleBox.copy(od.localBbox).applyMatrix4(settleMatB);
+                if (candidateIntersectsAny(settleMatB, settleBox, oiIdx)) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+            // Return just above the collision boundary
+            return Math.max(lo + 0.1, hi);
+        };
 
         // Instanced rendering — one InstancedMesh per orientation
         const instancedMeshes = [];
@@ -1356,8 +1447,7 @@ export class SceneManager {
         }
 
         // ═══════════════ PHASE 1: FIRST LAYER — deterministic grid ═══════════════
-        // For each orientation, search a slightly compacted regular grid.
-        // This follows the grid, but is not forced to use pure bbox spacing.
+        const _tPhase1Start = performance.now();
         let bestGridOi = 0;
         let bestGridNX = 0, bestGridNZ = 0, bestGridCount = 0;
         let bestStepX = 0, bestStepZ = 0;
@@ -1365,16 +1455,37 @@ export class SceneManager {
         const firstLayerOrientLimit = lockPrimaryFirstLayer ? 1 : orientData.length;
         for (let oi = 0; oi < firstLayerOrientLimit; oi++) {
             const od = orientData[oi];
-            const layout = _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap);
-            const { stepX, stepZ, nx, nz, count, fx, fz } = layout;
-            console.log(`[Grid] orient${oi}: ${nx}×${nz}=${count}  piece ${od.sizeX.toFixed(1)}×${od.sizeZ.toFixed(1)}  step ${stepX.toFixed(1)}×${stepZ.toFixed(1)}  compact=${fx.toFixed(2)}×${fz.toFixed(2)}`);
-            if (count > bestGridCount) {
-                bestGridCount = count;
-                bestGridOi = oi;
-                bestGridNX = nx;
-                bestGridNZ = nz;
-                bestStepX = stepX;
-                bestStepZ = stepZ;
+            if (true) {
+                // Always use simple AABB grid spacing (Q1 legacy).
+                // Compact spacing via BVH can produce false collisions for pieces with overhangs,
+                // resulting in artificially wide grid spacing and fewer pieces.
+                const stepX = od.sizeX + packingGap;
+                const stepZ = od.sizeZ + packingGap;
+                const nx = Math.max(1, Math.floor((boxL + packingGap + 0.01) / stepX));
+                const nz = Math.max(1, Math.floor((boxW + packingGap + 0.01) / stepZ));
+                const count = nx * nz;
+                console.log(`[Grid] orient${oi}: ${nx}×${nz}=${count}  piece ${od.sizeX.toFixed(1)}×${od.sizeZ.toFixed(1)}  step ${stepX.toFixed(1)}×${stepZ.toFixed(1)}  (legacy)`);
+                if (count > bestGridCount) {
+                    bestGridCount = count;
+                    bestGridOi = oi;
+                    bestGridNX = nx;
+                    bestGridNZ = nz;
+                    bestStepX = stepX;
+                    bestStepZ = stepZ;
+                }
+            } else {
+                // Q2/Q3: compacted grid with BVH collision verification
+                const layout = _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort);
+                const { stepX, stepZ, nx, nz, count, fx, fz } = layout;
+                console.log(`[Grid] orient${oi}: ${nx}×${nz}=${count}  piece ${od.sizeX.toFixed(1)}×${od.sizeZ.toFixed(1)}  step ${stepX.toFixed(1)}×${stepZ.toFixed(1)}  compact=${fx.toFixed(2)}×${fz.toFixed(2)}`);
+                if (count > bestGridCount) {
+                    bestGridCount = count;
+                    bestGridOi = oi;
+                    bestGridNX = nx;
+                    bestGridNZ = nz;
+                    bestStepX = stepX;
+                    bestStepZ = stepZ;
+                }
             }
         }
 
@@ -1384,10 +1495,9 @@ export class SceneManager {
                 pieceHeights: gPH, sizeX: gSX, sizeY: gSY, sizeZ: gSZ } = gridOd;
         const firstLayerSlots = [];
 
-        // Collect compatible orientations for per-piece rotation:
-        // any orientation with same bounding box dimensions can share the grid layout
+        // Collect compatible orientations for per-piece rotation (Q2/Q3 only):
         const compatOrients = [bestGridOi];
-        if (multiOrient) {
+        if (sq >= 2 && multiOrient) {
             const dimTol = 0.5; // mm tolerance
             for (let oi = 0; oi < orientData.length; oi++) {
                 if (oi === bestGridOi) continue;
@@ -1407,22 +1517,19 @@ export class SceneManager {
                 if (abortSignal?.aborted) throw abortError();
                 await maybeYield();
 
-                // Piece center — starts flush with corner (0,0)
                 const posX = ix * bestStepX + gSX / 2;
                 const posZ = iz * bestStepZ + gSZ / 2;
                 const baseH = 0;
 
-                // Per-piece rotation: try all compatible orientations, pick the one
-                // with lowest max height contribution (allows pieces to nestle together)
+                // Q1 legacy: always use grid orientation, no per-piece rotation
                 let bestPlaceOi = bestGridOi;
-                if (compatOrients.length > 1 && placed > 0) {
+                if (sq >= 2 && compatOrients.length > 1 && placed > 0) {
                     let bestMaxH = Infinity;
                     for (const tryOi of compatOrients) {
                         const tryOd = orientData[tryOi];
                         tmpMatB.makeTranslation(posX, baseH, posZ);
                         tmpBox.copy(tryOd.localBbox).applyMatrix4(tmpMatB);
                         if (candidateIntersectsAny(tmpMatB, tmpBox, tryOi)) continue;
-                        // Compute max height this orientation would add
                         let maxContrib = 0;
                         for (let pz = 0; pz < tryOd.pieceNZ; pz++) {
                             for (let px = 0; px < tryOd.pieceNX; px++) {
@@ -1444,11 +1551,9 @@ export class SceneManager {
                 tmpMatB.makeTranslation(posX, baseH, posZ);
                 tmpBox.copy(placeOd.localBbox).applyMatrix4(tmpMatB);
 
-                // Verify collision only when using per-piece rotation (mixed orientations)
-                if (bestPlaceOi !== bestGridOi && placed > 0) {
-                    // Already checked in the loop above
-                } else if (compatOrients.length > 1 && placed > 0) {
-                    // Primary orientation in mixed grid: verify no collision
+                // Q1: skip BVH entirely (trust grid math — step >= sizeX).
+                // Q2/Q3: verify collision only when using mixed orientations
+                if (sq >= 2 && compatOrients.length > 1 && placed > 0 && bestPlaceOi === bestGridOi) {
                     if (candidateIntersectsAny(tmpMatB, tmpBox, bestPlaceOi)) continue;
                 }
 
@@ -1469,11 +1574,12 @@ export class SceneManager {
                 placedAabbs.push(tmpBox.clone());
                 placedMatrices.push(tmpMatB.clone());
                 placedOrientIdxs.push(bestPlaceOi);
+                addToSpatialGrid(placedAabbs.length - 1, tmpBox);
 
-                // Update heightmap (floor-based cell mapping)
+                // Update heightmap
                 const hgx = Math.floor((posX - gSX / 2) / cellSize);
                 const hgz = Math.floor((posZ - gSZ / 2) / cellSize);
-                firstLayerSlots.push({ hgx, hgz, posX, posZ, oi: bestPlaceOi });
+                firstLayerSlots.push({ hgx, hgz, posX, posZ, oi: bestPlaceOi, isGrid: true });
                 for (let pz = 0; pz < pNZ; pz++) {
                     for (let px = 0; px < pNX; px++) {
                         const pIdx = pz * pNX + px;
@@ -1481,7 +1587,11 @@ export class SceneManager {
                         const hx = hgx + px, hz = hgz + pz;
                         if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
                         const hIdx = hz * gridNX + hx;
-                        const top = baseH + pPH[pIdx];
+                        // Q1: raster profile heights (legacy) — Phase 2 sees valleys
+                        // Q2/Q3: flat sizeY — conservative
+                        const top = sq === 1
+                            ? baseH + pPH[pIdx] + packingGap
+                            : baseH + placeOd.sizeY;
                         if (top > heightMap[hIdx]) heightMap[hIdx] = top;
                     }
                 }
@@ -1493,7 +1603,8 @@ export class SceneManager {
             }
         }
 
-        if (runStableContact && orientData.length > 1 && placed < effectiveMaxTry) {
+        // Q1 legacy skips floor fill entirely
+        if (sq >= 2 && runStableContact && orientData.length > 1 && placed < effectiveMaxTry) {
             let floorFilled = 0;
 
             while (placed < effectiveMaxTry) {
@@ -1579,18 +1690,19 @@ export class SceneManager {
                 placedAabbs.push(tmpBox.clone());
                 placedMatrices.push(tmpMatB.clone());
                 placedOrientIdxs.push(bestFloorOi);
+                addToSpatialGrid(placedAabbs.length - 1, tmpBox);
 
                 // Record slot for Phase 1B replication
                 const floorHgx = Math.floor((posX - sx / 2) / cellSize);
                 const floorHgz = Math.floor((posZ - sz / 2) / cellSize);
-                firstLayerSlots.push({ hgx: floorHgx, hgz: floorHgz, posX, posZ, oi: bestFloorOi });
+                firstLayerSlots.push({ hgx: floorHgx, hgz: floorHgz, posX, posZ, oi: bestFloorOi, isGrid: false });
 
                 for (let pz = 0; pz < pieceNZ; pz++) {
                     for (let px = 0; px < pieceNX; px++) {
                         const pIdx = pz * pieceNX + px;
                         if (!mask[pIdx]) continue;
                         const hIdx = (bestFloorGZ + pz) * gridNX + (bestFloorGX + px);
-                        const top = pH[pIdx];
+                        const top = od.sizeY;
                         if (top > heightMap[hIdx]) heightMap[hIdx] = top;
                     }
                 }
@@ -1610,6 +1722,26 @@ export class SceneManager {
         // Track separator heights for visual rendering
         const separatorHeights = [];
 
+        // Patch rasterization holes: raise footprint cells that are below the
+        // piece's sizeY to prevent next-layer pieces from sinking through.
+        // Skip for Q1 — legacy kept raster valleys to allow Phase 2 nesting.
+        if (sq >= 2) {
+            for (const slot of firstLayerSlots) {
+                const od = orientData[slot.oi ?? bestGridOi];
+                const top = od.sizeY;
+                for (let pz = 0; pz < od.pieceNZ; pz++) {
+                    for (let px = 0; px < od.pieceNX; px++) {
+                        const pIdx = pz * od.pieceNX + px;
+                        if (!od.pieceMask[pIdx]) continue;
+                        const hx = slot.hgx + px, hz = slot.hgz + pz;
+                        if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
+                        const hIdx = hz * gridNX + hx;
+                        if (heightMap[hIdx] > 0 && heightMap[hIdx] < top) heightMap[hIdx] = top;
+                    }
+                }
+            }
+        }
+
         // Add separator after the first layer before Phase 1B stacking
         if (layerSeparator > 0 && firstLayerCount > 0) {
             // Use the actual piece bounding box height (sizeY) of the primary orientation
@@ -1626,128 +1758,294 @@ export class SceneManager {
         }
 
         // ═══════════════ PHASE 1B: REPLICATE FIRST-LAYER LAYOUT UPWARD ═══════════════
-        // Reuse first-layer slots for all strategies because they are the most obvious,
-        // dense upper placements. Non-legacy modes still require support and collision
-        // checks before accepting each repeated slot.
-        while (placed < effectiveMaxTry) {
-            if (abortSignal?.aborted) throw abortError();
-            let replicatedThisLayer = 0;
-            let layerVisualTop = 0; // Track actual visual top for separator placement
+        const _tPhase1End = performance.now();
+        console.log(`[Timing] Phase 1 (grid+fill): ${((_tPhase1End - _tPhase1Start) / 1000).toFixed(2)}s, placed=${placed}`);
+        const _tPhase1BStart = performance.now();
 
-            for (const slot of firstLayerSlots) {
-                if (placed >= effectiveMaxTry) break;
-                await maybeYield();
+        if (sq === 1) {
+            // ── Q1 LEGACY REPLICATION ──
+            // Exact match of commit 10c26cb: same slots, same orientation, no BVH,
+            // no alternatives, no settle, raster heightmap writes.
+            while (placed < effectiveMaxTry) {
+                if (abortSignal?.aborted) throw abortError();
+                let replicatedThisPass = 0;
 
-                const slotOi = slot.oi ?? bestGridOi;
-                const slotOd = orientData[slotOi];
-                const {
-                    pieceNX: slotPNX,
-                    pieceNZ: slotPNZ,
-                    pieceMask: slotMask,
-                    pieceHeights: slotPH
-                } = slotOd;
+                for (const slot of firstLayerSlots) {
+                    if (placed >= effectiveMaxTry) break;
+                    await maybeYield();
 
-                const slotPosX = slot.posX;
-                const slotPosZ = slot.posZ;
-                const slotHgx = slot.hgx;
-                const slotHgz = slot.hgz;
-
-                let baseH = 0;
-                for (let pz = 0; pz < slotPNZ; pz++) {
-                    for (let px = 0; px < slotPNX; px++) {
-                        const pIdx = pz * slotPNX + px;
-                        if (!slotMask[pIdx]) continue;
-                        const hx1b = slotHgx + px, hz1b = slotHgz + pz;
-                        if (hx1b < 0 || hx1b >= gridNX || hz1b < 0 || hz1b >= gridNZ) continue;
-                        const hIdx = hz1b * gridNX + hx1b;
-                        if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
-                    }
-                }
-
-                let fits = true;
-                for (let pz = 0; pz < slotPNZ && fits; pz++) {
-                    for (let px = 0; px < slotPNX; px++) {
-                        const pIdx = pz * slotPNX + px;
-                        if (!slotMask[pIdx]) continue;
-                        if (baseH + slotPH[pIdx] + heightEps > boxH) {
-                            fits = false;
-                            break;
+                    let baseH = 0;
+                    for (let pz = 0; pz < gPNZ; pz++) {
+                        for (let px = 0; px < gPNX; px++) {
+                            const pIdx = pz * gPNX + px;
+                            if (!gMask[pIdx]) continue;
+                            const hIdx = (slot.hgz + pz) * gridNX + (slot.hgx + px);
+                            if (hIdx >= 0 && hIdx < heightMap.length && heightMap[hIdx] > baseH) {
+                                baseH = heightMap[hIdx];
+                            }
                         }
                     }
-                }
-                if (!fits) continue;
 
-                tmpMatB.makeTranslation(slotPosX, baseH, slotPosZ);
-                tmpBox.copy(slotOd.localBbox).applyMatrix4(tmpMatB);
+                    let fits = true;
+                    for (let pz = 0; pz < gPNZ && fits; pz++) {
+                        for (let px = 0; px < gPNX; px++) {
+                            const pIdx = pz * gPNX + px;
+                            if (!gMask[pIdx]) continue;
+                            if (baseH + gPH[pIdx] + heightEps > boxH) {
+                                fits = false;
+                                break;
+                            }
+                        }
+                    }
+                    if (!fits) continue;
 
-                if (!isLegacyStrategy && baseH > heightEps) {
-                    if (candidateIntersectsAny(tmpMatB, tmpBox, slotOi)) continue;
-                }
+                    tmpMatB.makeTranslation(slot.posX, baseH, slot.posZ);
+                    tmpBox.copy(gridOd.localBbox).applyMatrix4(tmpMatB);
 
-                if (!dryRun) {
-                    const im = instancedMeshes[slotOi];
-                    const idx = orientCounts[slotOi];
-                    tmpObj.position.set(slotPosX, baseH, slotPosZ);
-                    tmpObj.rotation.set(0, 0, 0);
-                    tmpObj.updateMatrix();
-                    im.setMatrixAt(idx, tmpObj.matrix);
-                    im.setColorAt(idx, new THREE.Color(this.pieceColors[placed % numColors]));
-                    positionsOut.push(new THREE.Vector3(slotPosX, baseH, slotPosZ));
-                    placementItemsOut.push({ position: new THREE.Vector3(slotPosX, baseH, slotPosZ), orientIdx: slotOi });
-                }
+                    // Legacy: NO BVH check for replication — heightmap gap ensures separation
 
-                orientCounts[slotOi]++;
-                placedAabbs.push(tmpBox.clone());
-                placedMatrices.push(tmpMatB.clone());
-                placedOrientIdxs.push(slotOi);
+                    if (!dryRun) {
+                        const im = instancedMeshes[bestGridOi];
+                        const idx = orientCounts[bestGridOi];
+                        tmpObj.position.set(slot.posX, baseH, slot.posZ);
+                        tmpObj.rotation.set(0, 0, 0);
+                        tmpObj.updateMatrix();
+                        im.setMatrixAt(idx, tmpObj.matrix);
+                        im.setColorAt(idx, new THREE.Color(this.pieceColors[placed % numColors]));
+                        positionsOut.push(new THREE.Vector3(slot.posX, baseH, slot.posZ));
+                        placementItemsOut.push({ position: new THREE.Vector3(slot.posX, baseH, slot.posZ), orientIdx: bestGridOi });
+                    }
 
-                for (let pz = 0; pz < slotPNZ; pz++) {
-                    for (let px = 0; px < slotPNX; px++) {
-                        const pIdx = pz * slotPNX + px;
-                        if (!slotMask[pIdx]) continue;
-                        const hxW = slotHgx + px, hzW = slotHgz + pz;
-                        if (hxW < 0 || hxW >= gridNX || hzW < 0 || hzW >= gridNZ) continue;
-                        const hIdx = hzW * gridNX + hxW;
-                        const top = baseH + slotPH[pIdx];
-                        if (top > heightMap[hIdx]) heightMap[hIdx] = top;
+                    orientCounts[bestGridOi]++;
+                    placedAabbs.push(tmpBox.clone());
+                    placedMatrices.push(tmpMatB.clone());
+                    placedOrientIdxs.push(bestGridOi);
+                    addToSpatialGrid(placedAabbs.length - 1, tmpBox);
+
+                    for (let pz = 0; pz < gPNZ; pz++) {
+                        for (let px = 0; px < gPNX; px++) {
+                            const pIdx = pz * gPNX + px;
+                            if (!gMask[pIdx]) continue;
+                            const hIdx = (slot.hgz + pz) * gridNX + (slot.hgx + px);
+                            if (hIdx < 0 || hIdx >= heightMap.length) continue;
+                            const top = baseH + gPH[pIdx] + packingGap;
+                            if (top > heightMap[hIdx]) heightMap[hIdx] = top;
+                        }
+                    }
+
+                    placed++;
+                    replicatedThisPass++;
+                    if (onProgress && (placed % 5) === 0) {
+                        onProgress({ placed, maxTry: effectiveMaxTry });
                     }
                 }
 
-                placed++;
-                replicatedThisLayer++;
-                const pieceVisualTop = baseH + slotOd.sizeY;
-                if (pieceVisualTop > layerVisualTop) layerVisualTop = pieceVisualTop;
-                if (onProgress && (placed % 5) === 0) {
-                    onProgress({ placed, maxTry: effectiveMaxTry });
-                }
+                if (replicatedThisPass === 0) break;
+                console.log(`[HeightMapAsync] Replicated stable layer: +${replicatedThisPass} pieces`);
             }
+        } else {
+            // ── Q2/Q3 REPLICATION with alternatives and settle ──
+            while (placed < effectiveMaxTry) {
+                if (abortSignal?.aborted) throw abortError();
+                let replicatedThisLayer = 0;
+                let layerVisualTop = 0;
 
-            if (replicatedThisLayer === 0) break;
-            console.log(`[HeightMapAsync] Replicated stable layer: +${replicatedThisLayer} pieces`);
+                for (const slot of firstLayerSlots) {
+                    if (placed >= effectiveMaxTry) break;
+                    await maybeYield();
 
-            // Layer separator: add cardboard divider thickness to heightmap between layers
-            if (layerSeparator > 0) {
-                separatorHeights.push(layerVisualTop);
-                for (let i = 0; i < heightMap.length; i++) {
-                    if (heightMap[i] > 0) {
-                        if (heightMap[i] < layerVisualTop) heightMap[i] = layerVisualTop;
-                        heightMap[i] += layerSeparator;
+                    const slotHgx = slot.hgx;
+                    const slotHgz = slot.hgz;
+                    const defaultOi = slot.oi ?? bestGridOi;
+
+                    let bestPlaceOi = -1;
+                    let bestPlaceBaseH = Infinity;
+                    let bestPlaceVisualTop = Infinity;
+
+                    // --- 1) Try the default orientation (NO BVH — same reasoning as legacy) ---
+                    {
+                        const od = orientData[defaultOi];
+                        const { pieceNX: dPNX, pieceNZ: dPNZ, pieceMask: dMask, pieceHeights: dPH } = od;
+
+                        let baseH = 0;
+                        for (let pz = 0; pz < dPNZ; pz++) {
+                            for (let px = 0; px < dPNX; px++) {
+                                const pIdx = pz * dPNX + px;
+                                if (!dMask[pIdx]) continue;
+                                const hx = slotHgx + px, hz = slotHgz + pz;
+                                if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
+                                const hIdx = hz * gridNX + hx;
+                                if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
+                            }
+                        }
+
+                        if (baseH + od.sizeY + heightEps <= boxH) {
+                            let fits = true;
+                            for (let pz = 0; pz < dPNZ && fits; pz++) {
+                                for (let px = 0; px < dPNX; px++) {
+                                    const pIdx = pz * dPNX + px;
+                                    if (!dMask[pIdx]) continue;
+                                    if (baseH + dPH[pIdx] + heightEps > boxH) { fits = false; break; }
+                                }
+                            }
+                            if (fits) {
+                                bestPlaceOi = defaultOi;
+                                bestPlaceBaseH = baseH;
+                                bestPlaceVisualTop = baseH + od.sizeY;
+                            }
+                        }
+                    }
+
+                    // --- 2) Try alternative orientations (BVH checked) ---
+                    if (orientData.length > 1) {
+                        for (let oi = 0; oi < orientData.length; oi++) {
+                            if (oi === defaultOi) continue;
+                            const tryOd = orientData[oi];
+                            const { pieceNX: tPNX, pieceNZ: tPNZ, pieceMask: tMask, pieceHeights: tPH,
+                                    sizeX: tSX, sizeY: tSY, sizeZ: tSZ } = tryOd;
+
+                            const altPosX = slotHgx * cellSize + tSX / 2;
+                            const altPosZ = slotHgz * cellSize + tSZ / 2;
+
+                            if (altPosX + tSX / 2 > boxL + heightEps || altPosZ + tSZ / 2 > boxW + heightEps) continue;
+                            if (slotHgx + tPNX > gridNX || slotHgz + tPNZ > gridNZ) continue;
+
+                            let baseH = 0;
+                            for (let pz = 0; pz < tPNZ; pz++) {
+                                for (let px = 0; px < tPNX; px++) {
+                                    const pIdx = pz * tPNX + px;
+                                    if (!tMask[pIdx]) continue;
+                                    const hx = slotHgx + px, hz = slotHgz + pz;
+                                    if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
+                                    const hIdx = hz * gridNX + hx;
+                                    if (heightMap[hIdx] > baseH) baseH = heightMap[hIdx];
+                                }
+                            }
+
+                            if (baseH + tSY + heightEps > boxH) continue;
+
+                            let fits = true;
+                            for (let pz = 0; pz < tPNZ && fits; pz++) {
+                                for (let px = 0; px < tPNX; px++) {
+                                    const pIdx = pz * tPNX + px;
+                                    if (!tMask[pIdx]) continue;
+                                    if (baseH + tPH[pIdx] + heightEps > boxH) { fits = false; break; }
+                                }
+                            }
+                            if (!fits) continue;
+
+                            tmpMatB.makeTranslation(altPosX, baseH, altPosZ);
+                            tmpBox.copy(tryOd.localBbox).applyMatrix4(tmpMatB);
+
+                            // BVH collision for alternative orientations
+                            if (candidateIntersectsAny(tmpMatB, tmpBox, oi)) continue;
+
+                            const visualTop = baseH + tSY;
+                            if (visualTop < bestPlaceVisualTop) {
+                                bestPlaceOi = oi;
+                                bestPlaceBaseH = baseH;
+                                bestPlaceVisualTop = visualTop;
+                            }
+                        }
+                    }
+
+                    if (bestPlaceOi < 0) continue;
+
+                    // Settle piece to lowest non-colliding height
+                    const placePosX = bestPlaceOi === (slot.oi ?? bestGridOi) ? slot.posX : slotHgx * cellSize + orientData[bestPlaceOi].sizeX / 2;
+                    const placePosZ = bestPlaceOi === (slot.oi ?? bestGridOi) ? slot.posZ : slotHgz * cellSize + orientData[bestPlaceOi].sizeZ / 2;
+                    if (useSettleStep && bestPlaceBaseH > heightEps) {
+                        const settled = settleHeight(placePosX, placePosZ, bestPlaceBaseH, bestPlaceOi);
+                        if (settled < bestPlaceBaseH) {
+                            bestPlaceBaseH = settled;
+                            bestPlaceVisualTop = settled + orientData[bestPlaceOi].sizeY;
+                        }
+                    }
+
+                    const chosenOd = orientData[bestPlaceOi];
+                    const { pieceNX: cPNX, pieceNZ: cPNZ, pieceMask: cMask } = chosenOd;
+
+                    tmpMatB.makeTranslation(placePosX, bestPlaceBaseH, placePosZ);
+                    tmpBox.copy(chosenOd.localBbox).applyMatrix4(tmpMatB);
+
+                    if (!dryRun) {
+                        const im = instancedMeshes[bestPlaceOi];
+                        const idx = orientCounts[bestPlaceOi];
+                        tmpObj.position.set(placePosX, bestPlaceBaseH, placePosZ);
+                        tmpObj.rotation.set(0, 0, 0);
+                        tmpObj.updateMatrix();
+                        im.setMatrixAt(idx, tmpObj.matrix);
+                        im.setColorAt(idx, new THREE.Color(this.pieceColors[placed % numColors]));
+                        positionsOut.push(new THREE.Vector3(placePosX, bestPlaceBaseH, placePosZ));
+                        placementItemsOut.push({ position: new THREE.Vector3(placePosX, bestPlaceBaseH, placePosZ), orientIdx: bestPlaceOi });
+                    }
+
+                    orientCounts[bestPlaceOi]++;
+                    placedAabbs.push(tmpBox.clone());
+                    placedMatrices.push(tmpMatB.clone());
+                    placedOrientIdxs.push(bestPlaceOi);
+                    addToSpatialGrid(placedAabbs.length - 1, tmpBox);
+
+                    // Q2/Q3: flat sizeY heightmap
+                    for (let pz = 0; pz < cPNZ; pz++) {
+                        for (let px = 0; px < cPNX; px++) {
+                            const pIdx = pz * cPNX + px;
+                            if (!cMask[pIdx]) continue;
+                            const hx = slotHgx + px, hz = slotHgz + pz;
+                            if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
+                            const hIdx = hz * gridNX + hx;
+                            const top = bestPlaceBaseH + chosenOd.sizeY;
+                            if (top > heightMap[hIdx]) heightMap[hIdx] = top;
+                        }
+                    }
+
+                    placed++;
+                    replicatedThisLayer++;
+                    if (bestPlaceVisualTop > layerVisualTop) layerVisualTop = bestPlaceVisualTop;
+                    if (onProgress && (placed % 5) === 0) {
+                        onProgress({ placed, maxTry: effectiveMaxTry });
+                    }
+                }
+
+                if (replicatedThisLayer === 0) break;
+                console.log(`[HeightMapAsync] Replicated layer: +${replicatedThisLayer} pieces (layerTop=${layerVisualTop.toFixed(1)})`);
+
+                // Layer separator
+                if (layerSeparator > 0) {
+                    separatorHeights.push(layerVisualTop);
+                    for (const slot of firstLayerSlots) {
+                        const od = orientData[slot.oi ?? bestGridOi];
+                        for (let pz = 0; pz < od.pieceNZ; pz++) {
+                            for (let px = 0; px < od.pieceNX; px++) {
+                                const hx = slot.hgx + px, hz = slot.hgz + pz;
+                                if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
+                                const hIdx = hz * gridNX + hx;
+                                if (heightMap[hIdx] > 0) heightMap[hIdx] += layerSeparator;
+                            }
+                        }
                     }
                 }
             }
         }
 
         // ═══════════════ PHASE 2: UPPER LAYERS — greedy heightmap scan ═══════════════
+        const _tPhase1BEnd = performance.now();
+        console.log(`[Timing] Phase 1B (replicate): ${((_tPhase1BEnd - _tPhase1BStart) / 1000).toFixed(2)}s, placed=${placed}`);
+        const _tPhase2Start = performance.now();
+        // Q1: integer stepping (legacy). Q2/Q3: sub-cell stepping.
+        const subStep = sq === 1 ? 1 : (searchEffort === 'dense' ? 0.25 : searchEffort === 'fast' ? 1.0 : 0.5);
+        let p2YieldCounter = 0;
+
         while (placed < effectiveMaxTry) {
             if (abortSignal?.aborted) throw abortError();
             await maybeYield();
 
-            // Scan every (orientation × grid position) and pick the single best
             let bestScore = Infinity;
             let bestOi = -1, bestGX = -1, bestGZ = -1, bestBaseH = Infinity;
+            let bestPosX = 0, bestPosZ = 0;
             let bestSupport = null;
 
-            const supportProfilesToTry = (!runStableContact || isLegacyStrategy)
+            const supportProfilesToTry = (sq === 1 || !runStableContact || isLegacyStrategy)
                 ? [activeStability]
                 : [activeStability, stabilityProfiles.medium, stabilityProfiles.loose];
 
@@ -1760,14 +2058,26 @@ export class SceneManager {
                     continue;
                 }
 
-                for (let gz = 0; gz <= gridNZ - pieceNZ; gz++) {
-                    for (let gx = 0; gx <= gridNX - pieceNX; gx++) {
-                        if (((gx + gz) & 255) === 0) {
+                for (let gzf = 0; gzf <= gridNZ - pieceNZ; gzf += subStep) {
+                    const gz = Math.max(0, Math.min(gridNZ - pieceNZ, Math.floor(gzf)));
+                    for (let gxf = 0; gxf <= gridNX - pieceNX; gxf += subStep) {
+                        if ((++p2YieldCounter & 511) === 0) {
                             await maybeYield();
                             if (onProgress) onProgress({ placed, maxTry: effectiveMaxTry });
                         }
 
-                        if (gx * cellSize + sx > boxL || gz * cellSize + sz > boxW) continue;
+                        const gx = Math.max(0, Math.min(gridNX - pieceNX, Math.floor(gxf)));
+
+                        // Q1 legacy: position from integer grid cell
+                        // Q2/Q3: float grid coord for sub-cell precision
+                        const worldPosX = sq === 1 ? gx * cellSize + sx / 2 : gxf * cellSize + sx / 2;
+                        const worldPosZ = sq === 1 ? gz * cellSize + sz / 2 : gzf * cellSize + sz / 2;
+
+                        if (sq === 1) {
+                            if (gx * cellSize + sx > boxL || gz * cellSize + sz > boxW) continue;
+                        } else {
+                            if (worldPosX + sx / 2 > boxL + heightEps || worldPosZ + sz / 2 > boxW + heightEps) continue;
+                        }
 
                         // Mask-filtered heightmap read
                         let baseH = 0;
@@ -1780,20 +2090,22 @@ export class SceneManager {
                             }
                         }
 
-                        // Height check
+                        if (baseH + sy + heightEps > boxH) continue;
+
                         let fits = true;
                         for (let pz = 0; pz < pieceNZ && fits; pz++) {
                             for (let px = 0; px < pieceNX; px++) {
                                 const pIdx = pz * pieceNX + px;
                                 if (!mask[pIdx]) continue;
-                                const extraClearance = baseH > heightEps ? stackedClearance : 0;
+                                const extraClearance = (sq >= 2 && baseH > heightEps) ? stackedClearance : 0;
                                 if (baseH + pH[pIdx] + extraClearance + heightEps > boxH) { fits = false; break; }
                             }
                         }
                         if (!fits) continue;
 
+                        // Q2/Q3 stability check (Q1 skips entirely)
                         let supportInfo = null;
-                        if (runStableContact && !isLegacyStrategy && baseH > heightEps) {
+                        if (sq >= 2 && runStableContact && !isLegacyStrategy && baseH > heightEps) {
                             for (const supportProfile of supportProfilesToTry) {
                                 const evaluated = evaluateSupport(gx, gz, od, baseH, supportProfile, useSettleCheck);
                                 if (evaluated.supported) {
@@ -1803,8 +2115,10 @@ export class SceneManager {
                             }
                             if (!supportInfo) continue;
                             if (placementStrategy === 'stable-contact') {
-                                if (supportInfo.supportRatio < 0.88) continue;
-                                if (supportInfo.drift > 0.24) continue;
+                                const minSup = searchEffort === 'dense' ? 0.78 : searchEffort === 'fast' ? 0.92 : 0.88;
+                                const maxDrift = searchEffort === 'dense' ? 0.32 : searchEffort === 'fast' ? 0.20 : 0.24;
+                                if (supportInfo.supportRatio < minSup) continue;
+                                if (supportInfo.drift > maxDrift) continue;
                             }
                         }
 
@@ -1816,6 +2130,8 @@ export class SceneManager {
                         bestOi = oi;
                         bestGX = gx;
                         bestGZ = gz;
+                        bestPosX = worldPosX;
+                        bestPosZ = worldPosZ;
                         bestBaseH = baseH;
                         bestSupport = supportInfo;
                     }
@@ -1828,19 +2144,32 @@ export class SceneManager {
             const { pieceNX, pieceNZ, pieceMask: mask, pieceHeights: pH,
                     sizeX: sx, sizeY: sy, sizeZ: sz } = od;
 
-            // BVH collision check
-            const posX = bestGX * cellSize + sx / 2;
-            const posZ = bestGZ * cellSize + sz / 2;
+            const posX = bestPosX;
+            const posZ = bestPosZ;
+
+            // Q1: no settle. Q2/Q3: binary-search settle.
+            if (useSettleStep && bestBaseH > heightEps) {
+                const settled = settleHeight(posX, posZ, bestBaseH, bestOi);
+                if (settled < bestBaseH) bestBaseH = settled;
+            }
+
+            // Q1 legacy: full bounding box height guard
+            if (sq === 1 && bestBaseH + sy > boxH + 0.01) break;
+
             tmpMatB.makeTranslation(posX, bestBaseH, posZ);
             tmpBox.copy(od.localBbox).applyMatrix4(tmpMatB);
 
-            if (candidateIntersectsAny(tmpMatB, tmpBox, bestOi)) {
+            let p2Collides = candidateIntersectsAny(tmpMatB, tmpBox, bestOi);
+
+            if (p2Collides) {
+                // Q1 legacy: bump by cellSize. Q2/Q3: bump by max(cellSize, sizeY*0.2).
+                const bump = sq === 1 ? cellSize : Math.max(cellSize, od.sizeY * 0.2);
                 for (let pz = 0; pz < pieceNZ; pz++) {
                     for (let px = 0; px < pieceNX; px++) {
                         const pIdx = pz * pieceNX + px;
                         if (!mask[pIdx]) continue;
                         const hIdx = (bestGZ + pz) * gridNX + (bestGX + px);
-                        const newH = bestBaseH + Math.max(cellSize, od.sizeY * 0.2);
+                        const newH = bestBaseH + bump;
                         if (newH > heightMap[hIdx]) heightMap[hIdx] = newH;
                     }
                 }
@@ -1849,7 +2178,7 @@ export class SceneManager {
                 continue;
             }
 
-            if (runStableContact && !isLegacyStrategy && bestBaseH > heightEps && bestSupport && !bestSupport.supported) {
+            if (sq >= 2 && runStableContact && !isLegacyStrategy && bestBaseH > heightEps && bestSupport && !bestSupport.supported) {
                 consecutiveSkips++;
                 if (consecutiveSkips > maxConsecutiveSkips) break;
                 continue;
@@ -1873,14 +2202,54 @@ export class SceneManager {
             placedAabbs.push(tmpBox.clone());
             placedMatrices.push(tmpMatB.clone());
             placedOrientIdxs.push(bestOi);
+            addToSpatialGrid(placedAabbs.length - 1, tmpBox);
 
-            for (let pz = 0; pz < pieceNZ; pz++) {
-                for (let px = 0; px < pieceNX; px++) {
-                    const pIdx = pz * pieceNX + px;
-                    if (!mask[pIdx]) continue;
-                    const hIdx = (bestGZ + pz) * gridNX + (bestGX + px);
-                    const top = bestBaseH + pH[pIdx];
-                    if (top > heightMap[hIdx]) heightMap[hIdx] = top;
+            // Q1 legacy: raster heightmap with profile heights + gap
+            // Q2/Q3: flat sizeY heightmap with sub-cell accuracy
+            if (sq === 1) {
+                for (let pz = 0; pz < pieceNZ; pz++) {
+                    for (let px = 0; px < pieceNX; px++) {
+                        const pIdx = pz * pieceNX + px;
+                        if (!mask[pIdx]) continue;
+                        const hIdx = (bestGZ + pz) * gridNX + (bestGX + px);
+                        const top = bestBaseH + pH[pIdx] + packingGap;
+                        if (top > heightMap[hIdx]) heightMap[hIdx] = top;
+                    }
+                }
+            } else {
+                const hmLeftX = Math.max(0, Math.floor((posX - sx / 2) / cellSize));
+                const hmLeftZ = Math.max(0, Math.floor((posZ - sz / 2) / cellSize));
+                const hmRightX = Math.min(gridNX - 1, Math.floor((posX + sx / 2 - 1e-4) / cellSize));
+                const hmRightZ = Math.min(gridNZ - 1, Math.floor((posZ + sz / 2 - 1e-4) / cellSize));
+                for (let pz = 0; pz < pieceNZ; pz++) {
+                    for (let px = 0; px < pieceNX; px++) {
+                        const pIdx = pz * pieceNX + px;
+                        if (!mask[pIdx]) continue;
+                        const hx = hmLeftX + px, hz = hmLeftZ + pz;
+                        if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
+                        const top = bestBaseH + sy;
+                        if (top > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = top;
+                    }
+                }
+                // Also update trailing edge cells for sub-cell placement
+                {
+                    const top = bestBaseH + sy;
+                    for (let pz = 0; pz < pieceNZ; pz++) {
+                        if (hmRightX > hmLeftX + pieceNX - 1) {
+                            const hx = hmRightX, hz = hmLeftZ + pz;
+                            if (hx >= 0 && hx < gridNX && hz >= 0 && hz < gridNZ) {
+                                if (top > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = top;
+                            }
+                        }
+                    }
+                    for (let px = 0; px < pieceNX; px++) {
+                        if (hmRightZ > hmLeftZ + pieceNZ - 1) {
+                            const hx = hmLeftX + px, hz = hmRightZ;
+                            if (hx >= 0 && hx < gridNX && hz >= 0 && hz < gridNZ) {
+                                if (top > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = top;
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1891,11 +2260,17 @@ export class SceneManager {
         }
 
         // ── Debug stats ──
+        const _tPhase2End = performance.now();
+        console.log(`[Timing] Phase 2 (greedy): ${((_tPhase2End - _tPhase2Start) / 1000).toFixed(2)}s, placed=${placed}`);
+        console.log(`[Timing] TOTAL: ${((_tPhase2End - _tPhase1Start) / 1000).toFixed(2)}s`);
+        const phase2Count = placed - firstLayerCount - (placed - firstLayerCount >= 0 ? 0 : 0);
         const hmMin = Math.min(...heightMap);
         const hmMax = Math.max(...heightMap);
         const orientBreakdown = orientCounts.map((c, i) => `orient${i}=${c}`).join(', ');
-        console.log(`[HeightMapAsync] placed=${placed} (${orientBreakdown}), maxTry=${effectiveMaxTry}, skips=${consecutiveSkips}`);
-        console.log(`[HeightMapAsync] heightMap range: [${hmMin.toFixed(1)}, ${hmMax.toFixed(1)}], utilization: ${(hmMax / boxH * 100).toFixed(1)}%`);
+        console.log(`[HeightMapAsync] TOTAL placed=${placed} (${orientBreakdown})`);
+        console.log(`[HeightMapAsync]   Phase1(grid+ff)=${firstLayerCount}, Phase1B+Phase2=${placed - firstLayerCount}`);
+        console.log(`[HeightMapAsync]   maxTry=${effectiveMaxTry}, skips=${consecutiveSkips}, subStep=${subStep}, sq=${sq}`);
+        console.log(`[HeightMapAsync]   heightMap range: [${hmMin.toFixed(1)}, ${hmMax.toFixed(1)}], utilization: ${(hmMax / boxH * 100).toFixed(1)}%`);
 
         if (!dryRun) {
             for (let oi = 0; oi < instancedMeshes.length; oi++) {
