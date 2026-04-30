@@ -1,7 +1,7 @@
 """
 packer_gpu.py — CUDA-accelerated 3D bin packer.
 Uses Numba CUDA for parallel SAT collision testing.
-Requires: NVIDIA GPU, CUDA toolkit, numba
+Requires: NVIDIA GPU, CUDA toolkit, numba.
 
 Usage:
     python packer_gpu.py [stl_file] [box_l] [box_w] [box_h] [scan_mm]
