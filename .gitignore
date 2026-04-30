@@ -39,27 +39,30 @@ web/library.csv
 research/
 *.pdf
 *.png
-test.stl
-test1.stl
+*.stl
+!test.stl
 
 # Python tools
 packer_final.py
 __pycache__/
 
-# .NET / C# build artifacts
-[Dd]ebug/
-[Rr]elease/
-[Bb]in/
-[Oo]bj/
-*.user
-*.suo
-*.sln.docstates
+# C# / .NET Build
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+*.nupkg
+*.snupkg
 .vs/
-
-# CUDA / GPU packer
-physics-engine/stl/*.stl
-packed_gpu.png
-
-# Python / CUDA cache
-*.nbc
-*.nvcc-*
+*.csproj.user
+*.sln.user
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+project.assets.json
+project.nuget.cache
+*.cache
