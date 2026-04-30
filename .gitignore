@@ -44,3 +44,24 @@ test1.stl
 # Python tools
 packer_final.py
 __pycache__/
+
+# C# / .NET Build
+bin/
+obj/
+*.dll
+*.exe
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+*.nupkg
+*.snupkg
+.vs/
+*.csproj.user
+*.sln.user
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+project.assets.json
+project.nuget.cache
+*.cache
