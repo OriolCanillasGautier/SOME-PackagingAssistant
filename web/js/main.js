@@ -7,7 +7,7 @@ import * as THREE from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_42';
 import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=force_update_42';
-import { SceneManager } from './visualization/scene.js?v=grid_fix_v1';
+import { SceneManager } from './visualization/scene.js?v=organic_v1';
 import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-world.js?v=force_update_42';
 import { ReportGenerator } from './report/report-generator.js?v=force_update_42';
 import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_42';
@@ -1535,11 +1535,12 @@ async function handleCalculate() {
                         const baseGeometry = state.stlGeometry.clone();
                         alignToStableBase(baseGeometry);
 
-                        // Try cardinal yaw rotations, pick best by grid capacity
+                        // Generate all valid yaw rotations as orientation pool
                         const yawAngles = values.allowRotation ? [0, 90, 180, 270] : [0];
-                        let bestYaw = 0;
-                        let bestCap = 0;
+                        const orientationPool = [];
                         let bestGeom = null;
+                        let bestCap = 0;
+                        let bestYaw = 0;
 
                         for (const yaw of yawAngles) {
                             if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -1561,15 +1562,20 @@ async function handleCalculate() {
                                 bestYaw = yaw;
                                 bestGeom = g;
                             }
+
+                            // Add to orientation pool for multi-orientation packing
+                            orientationPool.push({ geometry: g, yaw, name: `${yaw} deg` });
                         }
 
                         if (!bestGeom) {
                             drawn = { count: 0 };
                         } else {
-                            console.log(`[HeightMap] Best yaw: ${bestYaw} deg, grid cap=${bestCap}`);
+                            console.log(`[HeightMap] Best yaw: ${bestYaw} deg, grid cap=${bestCap}, pool=${orientationPool.length} orients`);
 
                             drawn = await state.sceneManager.addPackedSTLHeightMapAsync({
                                 stlGeometry: bestGeom,
+                                orientationPool: orientationPool.length > 1 ? orientationPool : null,
+                                useMixedOrientations: orientationPool.length > 1,
                                 maxDraw: 500,
                                 maxTry: Math.min(3000, Math.max(500, bestCap * 2)),
                                 packingGap: values.packingGap,

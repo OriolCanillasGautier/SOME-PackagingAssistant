@@ -40,3 +40,7 @@ research/
 *.pdf
 *.png
 *.stl
+
+# Python tools
+packer_final.py
+__pycache__/

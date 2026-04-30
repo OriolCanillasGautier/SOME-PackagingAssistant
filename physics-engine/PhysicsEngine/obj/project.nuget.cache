@@ -1,0 +1,32 @@
+{
+  "version": 2,
+  "dgSpecHash": "NYpn9zQRKgEZW5c8af7U4X/ax88fGllUnOQRUrxLw7mo//DcHMG+k5a3RYXXsd2dRmD1Cn5mISZ1dU95z+5gDA==",
+  "success": true,
+  "projectFilePath": "C:\\xampp\\htdocs\\GitHub\\SOME-PackagingAssistant\\physics-engine\\PhysicsEngine\\PhysicsEngine.csproj",
+  "expectedPackageFiles": [
+    "C:\\Users\\ocanillas\\.nuget\\packages\\microsoft.csharp\\4.7.0\\microsoft.csharp.4.7.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\microsoft.dotnet.platformabstractions\\3.1.6\\microsoft.dotnet.platformabstractions.3.1.6.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\microsoft.extensions.dependencymodel\\8.0.0\\microsoft.extensions.dependencymodel.8.0.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.core\\2.21.0\\silk.net.core.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.glfw\\2.21.0\\silk.net.glfw.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.input\\2.21.0\\silk.net.input.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.input.common\\2.21.0\\silk.net.input.common.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.input.glfw\\2.21.0\\silk.net.input.glfw.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.input.sdl\\2.21.0\\silk.net.input.sdl.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.maths\\2.21.0\\silk.net.maths.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.opengl\\2.21.0\\silk.net.opengl.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.sdl\\2.21.0\\silk.net.sdl.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.windowing\\2.21.0\\silk.net.windowing.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.windowing.common\\2.21.0\\silk.net.windowing.common.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.windowing.glfw\\2.21.0\\silk.net.windowing.glfw.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\silk.net.windowing.sdl\\2.21.0\\silk.net.windowing.sdl.2.21.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\system.memory\\4.5.5\\system.memory.4.5.5.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\system.numerics.vectors\\4.5.0\\system.numerics.vectors.4.5.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\system.runtime.compilerservices.unsafe\\6.0.0\\system.runtime.compilerservices.unsafe.6.0.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\system.text.encodings.web\\8.0.0\\system.text.encodings.web.8.0.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\system.text.json\\8.0.0\\system.text.json.8.0.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\ultz.native.glfw\\3.4.0\\ultz.native.glfw.3.4.0.nupkg.sha512",
+    "C:\\Users\\ocanillas\\.nuget\\packages\\ultz.native.sdl\\2.30.1\\ultz.native.sdl.2.30.1.nupkg.sha512"
+  ],
+  "logs": []
+}
