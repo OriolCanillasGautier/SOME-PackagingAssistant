@@ -39,7 +39,8 @@ web/library.csv
 research/
 *.pdf
 *.png
-test1.stl
+*.stl
+!test.stl
 
 # Python tools
 packer_final.py
