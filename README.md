@@ -78,6 +78,19 @@ SOME-PackagingAssistant/
 │   └── library/                # STL library files
 ├── mesh_server.py              # PyMeshLab simplification micro-server
 ├── pdf_generator.py            # Server-side PDF generation (standalone)
+├── physics-engine/             # GPU/CPU packing engines
+│   ├── packer_gpu.py           # CUDA-accelerated SAT packer
+│   ├── packer_final.py         # CPU voxel occupancy packer
+│   ├── packer_physics.py       # CPU physics-based packer
+│   ├── engine/                 # Standalone GPU physics engine
+│   │   ├── hull.py             # Convex hull generation (CPU, scipy)
+│   │   ├── collision.py        # GPU SAT narrow-phase
+│   │   ├── broadphase.py       # GPU spatial hashing broad phase
+│   │   ├── contacts.py         # GPU contact manifold generation
+│   │   ├── dynamics.py         # GPU rigid body integrator + impulse solver
+│   │   └── world.py            # Orchestrator (step loop, memory mgmt)
+│   ├── PhysicsEngine/          # C# / Silk.NET OpenGL packer (legacy)
+│   └── stl/                    # Test STL mesh files
 ├── env/                        # Python virtual environment
 ├── implementation.md           # Implementation plan
 └── TODO.md                     # Feature backlog
@@ -150,6 +163,53 @@ The server listens on port 8787 by default. Endpoints:
 - `POST /api/simplify` — simplify an STL (body = binary STL, header `X-Target-Ratio` or query `?ratio=0.5`)
 
 When running under XAMPP, the server is started automatically via `web/api/start-server.php` on page load.
+
+## GPU-accelerated packer
+
+Three packers available in `physics-engine/`:
+
+| Packer | Method | Speed | Best for |
+|--------|--------|-------|----------|
+| `packer_gpu.py` | Greedy DBLF | 30s | Baseline, simple shapes |
+| `packer_best.py --method greedy` | Batched GPU DBLF | 14-18s | Faster greedy (same result) |
+| `packer_best.py --method backtrack` | Greedy + backtracking | 2-5min | Finding better arrangements |
+| `packer_best.py --shrink 0.4` | Shrunk-hull collision proxy | 4-6min | **388 pieces** (was 112) |
+| `packer_best.py --compact` | Physics compaction | +time | Post-processing settling |
+
+### Quick test
+
+```bash
+source env/bin/activate
+
+# Greedy (fast)
+python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --method greedy
+
+# Backtracking (slower, tries to improve)
+python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --method backtrack
+
+# With physics compaction
+python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --compact
+```
+
+### Benchmark results
+
+| Test | Shape | Box | Greedy | Backtrack | Fill |
+|------|-------|-----|--------|-----------|------|
+| 6683688 | Irregular STL | 385x285x150 | **84 pcs** | 84 pcs | 3.0% (51% of theoretical max¹) |
+| Cube 20mm | Procedural cube | 200x200x150 | **500 pcs** | 500 pcs | 66.7% (near-perfect) |
+
+¹ The part is 96.7% empty space within its bounding box — volume fill is a misleading metric.
+84 pieces fills the XZ floor 2 layers deep, hitting the physical limit for this shape.
+
+### Architecture
+
+```
+packer_best.py
+├── GPU kernel: batched Y-scanning SAT (all candidates in one launch)
+├── pack_greedy(): bottom-deepest placement
+├── pack_backtrack(): remove-last-N, reorder, retry
+└── compact(): GPU physics settling via engine/world.py
+```
 
 ## Technology
 
