@@ -91,6 +91,10 @@ def _packer_kernel(
     max_e,
     temp_pool,           # per-thread scratch
     pool_stride,
+    d_height_map,        # [nx_cells, nz_cells] float64
+    cell_size,           # float64
+    nx_cells,            # int32
+    nz_cells,            # int32
 ):
     idx = cuda.grid(1)
     if idx >= candidates.shape[0]:
@@ -149,7 +153,33 @@ def _packer_kernel(
             if p_max_y > max_placed_y:
                 max_placed_y = p_max_y
 
+    # Height-map-based surface detection (more accurate than AABB top)
+    height_map_max = 0.0
+    ix0 = int(min_x_c / cell_size)
+    if ix0 < 0:
+        ix0 = 0
+    ix1 = int((max_x_c - 1e-9) / cell_size)
+    if ix1 >= nx_cells:
+        ix1 = nx_cells - 1
+    iz0 = int(min_z_c / cell_size)
+    if iz0 < 0:
+        iz0 = 0
+    iz1 = int((max_z_c - 1e-9) / cell_size)
+    if iz1 >= nz_cells:
+        iz1 = nz_cells - 1
+    if ix0 <= ix1 and iz0 <= iz1:
+        for ix in range(ix0, ix1 + 1):
+            for iz in range(iz0, iz1 + 1):
+                h = d_height_map[ix, iz]
+                if h > height_map_max:
+                    height_map_max = h
+
     base_y = max_placed_y
+    if height_map_max > 0 and height_map_max < base_y:
+        base_y = height_map_max
+    # Try a few cells below too (cavities can be up to piece height below AABB top)
+    if base_y > min_y_c + y_scan_res:
+        base_y = max(0.0, base_y - min_y_c)
     found_y = -1.0
     max_scan = max_y_scans
     if max_scan > int((box_dims[1] - cand_h - base_y) / y_scan_res) + 2:
@@ -296,36 +326,140 @@ def meshes_collide(mesh_a, mesh_b, eps=0.01):
         return False
 
 
-def generate_orientations(mesh, n_yaw, box_dims):
-    hull_data = compute_hull(mesh)
+def _face_is_stable_base(hull, face_idx):
+    """Check if a convex hull face can serve as a stable resting base."""
+    f = hull.faces[face_idx]
+    v0, v1, v2 = hull.vertices[f[0]], hull.vertices[f[1]], hull.vertices[f[2]]
+    n = np.cross(v1 - v0, v2 - v0)
+    nl = np.linalg.norm(n)
+    if nl < 1e-12: return False, None
+    n /= nl
+    # Must point upward (normal ~ +Y for base face)
+    if n[1] < 0.7: return False, None
+    # Face area
+    area = nl * 0.5
+    # Total hull surface area
+    total_area = sum(np.linalg.norm(np.cross(
+        hull.vertices[f[1]] - hull.vertices[f[0]],
+        hull.vertices[f[2]] - hull.vertices[f[0]])) * 0.5
+        for f in hull.faces)
+    if area < total_area * 0.02: return False, None
+    # Center of mass (average of vertices for convex hull)
+    com = hull.vertices.mean(axis=0)
+    # Project COM onto face plane
+    d = np.dot(com - v0, n)
+    proj = com - d * n
+    # Barycentric check
+    v0p = v1 - v0; v1p = v2 - v0; v2p = proj - v0
+    d00 = np.dot(v0p, v0p); d01 = np.dot(v0p, v1p); d11 = np.dot(v1p, v1p)
+    d20 = np.dot(v2p, v0p); d21 = np.dot(v2p, v1p)
+    denom = d00 * d11 - d01 * d01
+    if abs(denom) < 1e-12: return False, None
+    u = (d11 * d20 - d01 * d21) / denom
+    v = (d00 * d21 - d01 * d20) / denom
+    if u < -0.01 or v < -0.01 or u + v > 1.01: return False, None
+    return True, n
+
+
+def _align_to_stable_base(mesh, hull):
+    """Rotate mesh so the largest stable face sits flat on the floor (y=0)."""
+    best_area = 0; best_n = None
+    for fi in range(len(hull.faces)):
+        ok, n = _face_is_stable_base(hull, fi)
+        if not ok: continue
+        f = hull.faces[fi]
+        area = np.linalg.norm(np.cross(
+            hull.vertices[f[1]] - hull.vertices[f[0]],
+            hull.vertices[f[2]] - hull.vertices[f[0]])) * 0.5
+        if area > best_area:
+            best_area = area; best_n = n
+    if best_n is None:
+        return mesh, hull  # no stable face
+    
+    # Rotate so normal points to +Y
+    target = np.array([0.0, 1.0, 0.0])
+    axis = np.cross(best_n, target)
+    al = np.linalg.norm(axis)
+    if al < 1e-12:
+        if np.dot(best_n, target) > 0: return mesh, hull
+        axis = np.array([1.0, 0.0, 0.0])
+    axis /= al
+    angle = np.arccos(np.clip(np.dot(best_n, target), -1, 1))
+    
+    rot = Rotation.from_rotvec(axis * angle).as_matrix()
+    t = mesh.copy()
+    t.apply_transform(np.vstack([np.hstack([rot, np.zeros((3, 1))]), [0, 0, 0, 1]]))
+    bmin = t.bounds[0]
+    t.apply_translation([-bmin[0], -bmin[1], -bmin[2]])
+    
+    new_hull = compute_hull(t)
+    return t, new_hull
+
+
+def generate_orientations(mesh, n_yaw, n_roll, n_pitch, box_dims):
     results = []
     seen = set()
-
-    for yaw in np.linspace(0, 360, n_yaw, endpoint=False):
-        rot = Rotation.from_euler('y', yaw, degrees=True).as_matrix()
-        t = mesh.copy()
-        t.apply_transform(np.vstack([np.hstack([rot, np.zeros((3, 1))]), [0, 0, 0, 1]]))
-        bmin = t.bounds[0]
-        t.apply_translation([-bmin[0], -bmin[1], -bmin[2]])
-        sz = t.extents
-        if sz[0] > box_dims[0] + 0.5 or sz[2] > box_dims[1] + 0.5 or sz[1] > box_dims[2] + 0.5:
-            continue
-
-        hull = compute_hull(t)
-        key = tuple(np.round(sz).astype(int))
-        if key in seen:
-            continue
-        seen.add(key)
-
-        results.append({
-            'mesh': t,
-            'hull': hull,
-            'verts': hull.vertices,
-            'faces': hull.faces,
-            'norms': hull.normals,
-            'size': sz,
-            'name': f'Y{yaw:.0f}',
-        })
+    
+    # First: find the stable base alignment (pitch/roll to put a flat face down)
+    # Then: apply yaw rotations on top
+    
+    # Generate pitch+roll combos for finding stable bases
+    base_orientations = []
+    for pitch in np.linspace(0, 360, n_pitch, endpoint=False):
+        for roll in np.linspace(0, 360, n_roll, endpoint=False):
+            rot = Rotation.from_euler('xz', [pitch, roll], degrees=True).as_matrix()
+            t = mesh.copy()
+            t.apply_transform(np.vstack([np.hstack([rot, np.zeros((3, 1))]), [0, 0, 0, 1]]))
+            hull = compute_hull(t)
+            ok, _ = _face_is_stable_base(hull, 0)  # check first face as proxy
+            if ok:
+                bmin = t.bounds[0]
+                t.apply_translation([-bmin[0], -bmin[1], -bmin[2]])
+                hull = compute_hull(t)
+                base_orientations.append((t, hull, f'P{pitch:.0f}R{roll:.0f}'))
+    
+    # If no stable base found, try the auto-align function
+    if not base_orientations:
+        hull0 = compute_hull(mesh)
+        t_aligned, hull_aligned = _align_to_stable_base(mesh, hull0)
+        base_orientations = [(t_aligned, hull_aligned, 'stable')]
+    
+    # Deduplicate base orientations by size
+    unique_bases = []
+    seen_base = set()
+    for t, hull, name in base_orientations:
+        key = tuple(t.extents.round(1))
+        if key not in seen_base:
+            seen_base.add(key)
+            unique_bases.append((t, hull, name))
+    
+    # For each base orientation, apply yaw rotations
+    for base_mesh, base_hull, base_name in unique_bases:
+        for yaw in np.linspace(0, 360, n_yaw, endpoint=False):
+            rot = Rotation.from_euler('y', yaw, degrees=True).as_matrix()
+            t = base_mesh.copy()
+            t.apply_transform(np.vstack([np.hstack([rot, np.zeros((3, 1))]), [0, 0, 0, 1]]))
+            bmin = t.bounds[0]
+            t.apply_translation([-bmin[0], -bmin[1], -bmin[2]])
+            sz = t.extents
+            if sz[0] > box_dims[0] + 0.5 or sz[2] > box_dims[1] + 0.5 or sz[1] > box_dims[2] + 0.5:
+                continue
+            
+            hull = compute_hull(t)
+            key = tuple(np.round(sz).astype(int))
+            if key in seen:
+                continue
+            seen.add(key)
+            
+            results.append({
+                'mesh': t,
+                'hull': hull,
+                'verts': hull.vertices,
+                'faces': hull.faces,
+                'norms': hull.normals,
+                'size': sz,
+                'name': f'{base_name}_Y{yaw:.0f}',
+            })
     return results
 
 
@@ -367,6 +501,12 @@ def pack(orientations, box_dims, scan_step=5.0, y_scan_res=2.0, max_pieces=5000,
     d_hull_edges = cuda.to_device(hull_edges)
     d_hull_edge_counts = cuda.to_device(hull_edge_counts)
     d_box_dims = cuda.to_device(np.array([box_l, box_h, box_w], dtype=np.float64))
+
+    cell_size = 3.0
+    nx_cells = int(np.ceil(box_l / cell_size))
+    nz_cells = int(np.ceil(box_w / cell_size))
+    height_map = np.zeros((nx_cells, nz_cells), dtype=np.float64)
+    d_height_map = cuda.to_device(height_map)
 
     max_placed = max_pieces
     d_placed_verts = cuda.to_device(np.zeros((max_placed, max_verts, 3), dtype=np.float64))
@@ -426,6 +566,7 @@ def pack(orientations, box_dims, scan_step=5.0, y_scan_res=2.0, max_pieces=5000,
             n_hulls, 100,
             max_verts, max_faces, max_edges,
             temp_pool, temp_stride,
+            d_height_map, cell_size, nx_cells, nz_cells,
         )
         cuda.synchronize()
 
@@ -482,6 +623,15 @@ def pack(orientations, box_dims, scan_step=5.0, y_scan_res=2.0, max_pieces=5000,
             for d in range(3):
                 d_placed_edges[pi, ei, d] = edges_arr[ei, d]
         d_placed_edge_cts[pi] = np.int32(ne)
+
+        for vi in range(nv):
+            wx, wy, wz = wv[vi][0], wv[vi][1], wv[vi][2]
+            ix = int(wx / cell_size)
+            iz = int(wz / cell_size)
+            if 0 <= ix < nx_cells and 0 <= iz < nz_cells:
+                if wy > height_map[ix, iz]:
+                    height_map[ix, iz] = wy
+        d_height_map.copy_to_device(height_map)
 
         if verbose and len(placed) % 25 == 0:
             elapsed = time.time() - start
@@ -576,6 +726,8 @@ def main():
     p.add_argument("box_h", nargs="?", type=float, default=150)
     p.add_argument("scan", nargs="?", type=float, default=5.0)
     p.add_argument("--yaw", type=int, default=8)
+    p.add_argument("--roll", type=int, default=4)
+    p.add_argument("--pitch", type=int, default=4)
     p.add_argument("--yres", type=float, default=2.0, help="Y scan resolution mm")
     p.add_argument("--output", type=str, default="packed_gpu.png")
     args = p.parse_args()
@@ -607,7 +759,7 @@ def main():
 
     print(f"Generating orientations ({args.yaw} yaw)...")
     t0 = time.time()
-    orients = generate_orientations(mesh, args.yaw, box_dims)
+    orients = generate_orientations(mesh, args.yaw, args.roll, args.pitch, box_dims)
     print(f"  {len(orients)} orientations ({time.time() - t0:.1f}s)")
 
     print(f"\nPacking (GPU)...")
