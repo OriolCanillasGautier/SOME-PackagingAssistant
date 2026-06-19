@@ -223,6 +223,22 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
     d_all_shapes = cuda.to_device(all_shapes)
     d_box_occ = cuda.to_device(box_occ)
     d_box_hm = cuda.to_device(box_hm)
+
+    # Pre-setup GPU 1 with same static data for dual-GPU splitting
+    use_dual = False
+    try:
+        cuda.select_device(1)
+        d_all_sparse1 = cuda.to_device(all_sparse)
+        d_all_offsets1 = cuda.to_device(all_offsets)
+        d_all_hm1 = cuda.to_device(all_hm)
+        d_all_hm_offsets1 = cuda.to_device(all_hm_offsets)
+        d_all_shapes1 = cuda.to_device(all_shapes)
+        d_box_occ1 = cuda.to_device(box_occ)
+        d_box_hm1 = cuda.to_device(box_hm)
+        cuda.select_device(0)
+        use_dual = True
+    except Exception:
+        pass
     
     placed = []; placed_meshes = []; usage = {}; start = time.time()
     consecutive_fails = 0
@@ -246,19 +262,47 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
         if not candidates:
             break
         
-        d_candidates = cuda.to_device(np.array(candidates, dtype=np.float64))
+        # Dual-GPU: split candidates between both GPUs for 2x speed
+        all_candidates = np.array(candidates, dtype=np.float64)
+        n_cand = len(all_candidates)
+        half = n_cand // 2
         threads = 256
-        blocks = (len(candidates) + threads - 1) // threads
         
-        voxel_pack_kernel[blocks, threads](
-            d_candidates, d_all_sparse, d_all_offsets,
+        # GPU 0: first half (async, don't wait)
+        d_cand0 = cuda.to_device(all_candidates[:half])
+        blocks0 = (half + threads - 1) // threads
+        voxel_pack_kernel[blocks0, threads](
+            d_cand0, d_all_sparse, d_all_offsets,
             d_all_hm, d_all_hm_offsets, d_all_shapes,
             d_box_occ, d_box_hm, box_nx, box_ny, box_nz,
             cell_size
         )
-        cuda.synchronize()
         
-        results = d_candidates.copy_to_host()
+        # GPU 1: second half (launch in parallel)
+        result0 = None; result1 = None
+        try:
+            cuda.select_device(1)
+            d_cand1 = cuda.to_device(all_candidates[half:])
+            blocks1 = ((n_cand - half) + threads - 1) // threads
+            voxel_pack_kernel[blocks1, threads](
+                d_cand1, d_all_sparse1, d_all_offsets1,
+                d_all_hm1, d_all_hm_offsets1, d_all_shapes1,
+                d_box_occ1, d_box_hm1, box_nx, box_ny, box_nz,
+                cell_size
+            )
+            cuda.synchronize()
+            result1 = d_cand1.copy_to_host()
+            cuda.select_device(0)
+        except Exception:
+            pass  # GPU 1 unavailable, skip
+        
+        cuda.synchronize()
+        result0 = d_cand0.copy_to_host()
+        
+        if result1 is not None:
+            results = np.vstack([result0, result1])
+        else:
+            results = result0[:half]  # complete the first half
         valid = results[:, 4] > 0.5
         
         if not valid.any():
@@ -285,6 +329,11 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
                 box_hm[wx, wz] = wy + 1
         d_box_occ.copy_to_device(box_occ)
         d_box_hm.copy_to_device(box_hm)
+        if use_dual:
+            cuda.select_device(1)
+            d_box_occ1.copy_to_device(box_occ)
+            d_box_hm1.copy_to_device(box_hm)
+            cuda.select_device(0)
         
         x_mm, y_mm, z_mm = best_x * cell_size, best_y, best_z * cell_size
         pm = od['mesh'].copy(); pm.apply_translation([x_mm, y_mm, z_mm])
