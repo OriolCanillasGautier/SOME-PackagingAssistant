@@ -1,6 +1,6 @@
 # SOME-PackAssist
 
-Version 0.0.4
+Version 0.0.5
 
 SOME-PackAssist is a web-based packing calculator with 3D visualization (Three.js) and physics simulation (Rapier.js). It estimates how many parts fit in a box and renders the result interactively.
 
