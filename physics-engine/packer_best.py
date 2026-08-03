@@ -664,11 +664,11 @@ class BestPacker:
 
     # ── Full pipeline ──
 
-    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True):
+    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5):
         t0 = time.time()
 
         if method == 'greedy':
-            placed, meshes = self.pack_greedy(max_pieces, verbose)
+            placed, meshes = self.pack_greedy(max_pieces, verbose, beam_width=beam_width)
         elif method == 'layers':
             placed, meshes = self.pack_layers(max_pieces, verbose)
         else:
@@ -850,6 +850,7 @@ def main():
     p.add_argument("--shrink", type=float, default=0.4, help="Hull shrink factor (0.4=aggressive, 1.0=full hull)")
     p.add_argument("--method", type=str, default="backtrack", choices=["greedy", "backtrack", "layers"])
     p.add_argument("--compact", action="store_true")
+    p.add_argument("--beam-width", type=int, default=5, help="Top-K candidates for random selection (1=lowest-Y, 5=explore)")
     p.add_argument("--output", type=str, default="packed_best.png")
     args = p.parse_args()
 
@@ -880,7 +881,7 @@ def main():
         print("Built-in triangle")
 
     print(f"\nPacking ({args.method})...")
-    placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True)
+    placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width)
 
     if meshes:
         print("\nVerifying...")
