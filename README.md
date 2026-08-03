@@ -170,45 +170,51 @@ Three packers available in `physics-engine/`:
 
 | Packer | Method | Speed | Best for |
 |--------|--------|-------|----------|
-| `packer_gpu.py` | Greedy DBLF | 30s | Baseline, simple shapes |
-| `packer_best.py --method greedy` | Batched GPU DBLF | 14-18s | Faster greedy (same result) |
-| `packer_best.py --method backtrack` | Greedy + backtracking | 2-5min | Finding better arrangements |
-| `packer_best.py --shrink 0.4` | Shrunk-hull collision proxy | 4-6min | **388 pieces** (was 112) |
-| `packer_best.py --compact` | Physics compaction | +time | Post-processing settling |
+| `packer_best.py --method greedy` | Batched GPU SAT (top-K beam search) | ~100s | Baseline, simple shapes |
+| `packer_best.py --method backtrack` | Greedy + backtracking + beam search | 2-5min | Finding better arrangements |
+| `packer_best.py --shrink 0.4` | Shrunk-hull collision proxy | 4-6min | **~388 pieces** (was 112) |
+| `packer_best.py --compact` | Physics compaction + ground vibration | +time | Post-processing settling |
+
+Key options:
+- `--beam-width N` — top-K candidates for random selection (1=lowest-Y, 5=explore)
+- `--shrink F` — hull shrink factor (0.4=aggressive, 1.0=full hull)
+- `--compact` — GPU physics settling with 0.8mm/120Hz ground vibration
 
 ### Quick test
 
 ```bash
 source env/bin/activate
 
-# Greedy (fast)
+# Greedy with beam search (fast)
 python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --method greedy
+
+# Beam width comparison
+python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --method greedy --beam-width 1
+python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --method greedy --beam-width 8
 
 # Backtracking (slower, tries to improve)
 python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --method backtrack
 
-# With physics compaction
-python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --compact
+# With physics compaction + vibration
+python physics-engine/packer_best.py physics-engine/stl/6683688_simp0.1pct.stl --method backtrack --compact
 ```
 
 ### Benchmark results
 
-| Test | Shape | Box | Greedy | Backtrack | Fill |
-|------|-------|-----|--------|-----------|------|
-| 6683688 | Irregular STL | 385x285x150 | **84 pcs** | 84 pcs | 3.0% (51% of theoretical max¹) |
-| Cube 20mm | Procedural cube | 200x200x150 | **500 pcs** | 500 pcs | 66.7% (near-perfect) |
-
-¹ The part is 96.7% empty space within its bounding box — volume fill is a misleading metric.
-84 pieces fills the XZ floor 2 layers deep, hitting the physical limit for this shape.
+| Test | Shape | Box | Method | Pieces | Fill |
+|------|-------|-----|--------|--------|------|
+| 6683688 | Irregular STL | 385x285x150 | Greedy (beam=1) | 218 | 7.9% |
+| 6683688 | Irregular STL | 385x285x150 | Greedy (beam=5) | 212 | 7.7% |
+| Cube 20mm | Procedural cube | 200x200x150 | Greedy | 500 | 66.7% |
 
 ### Architecture
 
 ```
 packer_best.py
 ├── GPU kernel: batched Y-scanning SAT (all candidates in one launch)
-├── pack_greedy(): bottom-deepest placement
-├── pack_backtrack(): remove-last-N, reorder, retry
-└── compact(): GPU physics settling via engine/world.py
+├── pack_greedy(): bottom-deepest + random top-K beam selection
+├── pack_backtrack(): remove-last-N, random top-5 reorder, retry
+└── compact(): GPU physics settling with high-freq ground vibration
 ```
 
 ## Technology
