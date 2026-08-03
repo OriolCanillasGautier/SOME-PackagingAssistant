@@ -123,6 +123,52 @@ function _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap, searchEff
     };
 }
 
+function _findBestBrickLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort = 'balanced') {
+    const baseFacs = [1.0, 0.98, 0.96, 0.94, 0.92, 0.90, 0.88, 0.85, 0.82, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55];
+    const factors = searchEffort === 'dense'
+        ? [...baseFacs, 0.50, 0.45, 0.40]
+        : searchEffort === 'fast'
+        ? baseFacs.filter(f => f >= 0.70)
+        : baseFacs;
+    let best = null;
+
+    for (const fx of factors) {
+        for (const fz of factors) {
+            const stepX = Math.max(packingGap * 0.5 + 1, (od.sizeX + packingGap) * fx);
+            const stepZ = Math.max(packingGap * 0.5 + 1, (od.sizeZ + packingGap) * fz);
+
+            if (_gridSpacingCollides(od, stepX, 0)) continue;
+            if (_gridSpacingCollides(od, 0, stepZ)) continue;
+            if (_gridSpacingCollides(od, stepX / 2, stepZ)) continue;
+            if (_gridSpacingCollides(od, -stepX / 2, stepZ)) continue;
+
+            const nxEven = Math.max(1, Math.floor((boxL - od.sizeX + 0.01) / stepX) + 1);
+            const offsetX = stepX / 2;
+            const nxOdd = (od.sizeX + offsetX <= boxL + 0.01)
+                ? Math.max(1, Math.floor((boxL - od.sizeX - offsetX + 0.01) / stepX) + 1)
+                : 0;
+
+            const nz = Math.max(1, Math.floor((boxW - od.sizeZ + 0.01) / stepZ) + 1);
+            const nEvenRows = Math.ceil(nz / 2);
+            const nOddRows = Math.floor(nz / 2);
+            const count = nEvenRows * nxEven + nOddRows * nxOdd;
+
+            const usedL = Math.max(
+                od.sizeX + Math.max(0, nxEven - 1) * stepX,
+                nxOdd > 0 ? offsetX + od.sizeX + Math.max(0, nxOdd - 1) * stepX : 0
+            );
+            const usedW = od.sizeZ + Math.max(0, nz - 1) * stepZ;
+            const leftoverArea = Math.max(0, boxL - usedL) * boxW + Math.max(0, boxW - usedW) * boxL;
+
+            if (!best || count > best.count || (count === best.count && leftoverArea < best.leftoverArea)) {
+                best = { stepX, stepZ, nxEven, nxOdd, nz, nEvenRows, nOddRows, count, leftoverArea, fx, fz, offsetX, isBrick: true };
+            }
+        }
+    }
+
+    return best;
+}
+
 function _expandBaseFootprintMask(mask, pieceNX, pieceNZ) {
     const expanded = mask.slice();
 
@@ -1193,7 +1239,7 @@ export class SceneManager {
         const boxVolume = boxL * boxW * boxH;
         const effectiveMaxTry = maxTry != null
             ? maxTry
-            : Math.min(2000, Math.max(maxDraw, Math.ceil(boxVolume / pieceBBoxVol * 1.2)));
+            : Math.min(20000, Math.max(maxDraw, Math.ceil(boxVolume / pieceBBoxVol * 5.0)));
 
         // BVH collision infrastructure (proven accurate for complex meshes)
         const placedAabbs = [];
@@ -1407,8 +1453,8 @@ export class SceneManager {
         };
 
         let consecutiveSkips = 0;
-        const skipMultiplier = searchEffort === 'dense' ? 4 : searchEffort === 'fast' ? 2 : 3;
-        const maxConsecutiveSkips = Math.max(200, Math.ceil(boxVolume / pieceBBoxVol) * skipMultiplier);
+        const skipMultiplier = searchEffort === 'dense' ? 40 : searchEffort === 'fast' ? 10 : 25;
+        const maxConsecutiveSkips = Math.max(2000, Math.ceil(boxVolume / pieceBBoxVol) * skipMultiplier);
 
         // BVH-based settle: binary search for the lowest non-colliding Y position.
         // This fixes "floating" where pieces sit on the heightmap's bounding-box
@@ -1446,15 +1492,143 @@ export class SceneManager {
             }
         }
 
-        // ═══════════════ ORGANIC PLACEMENT — no forced grid ═══════════════
-        // Pieces are placed purely by the greedy height-map algorithm.
-        // Each iteration: scan all XZ positions for the best cavity,
-        // try all orientations, place at the lowest stable position.
-        // No grid assumptions — naturally adapts to any piece shape.
-        const bestGridOi = 0;
-        const firstLayerCount = 0;
+        // ═══════════════ PHASE 1: FIRST LAYER — grid-optimized ═══════════════
+        // Find the densest grid layout using BVH collision testing,
+        // then place the entire first layer in that grid.
+        let bestGridLayout = null;
+        let bestGridOi = 0;
+        let bestGridTotal = 0;
+
+        for (let oi = 0; oi < orientData.length; oi++) {
+            if (abortSignal?.aborted) throw abortError();
+            const od = orientData[oi];
+            const nLayers = Math.max(1, Math.floor((boxH - od.sizeY + 0.01) / (od.sizeY + packingGap)) + 1);
+
+            const aligned = _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort);
+            if (aligned) {
+                const total = aligned.count * nLayers;
+                if (total > bestGridTotal) {
+                    bestGridTotal = total;
+                    bestGridLayout = { ...aligned, isBrick: false };
+                    bestGridOi = oi;
+                }
+            }
+            const brick = _findBestBrickLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort);
+            if (brick && brick.count > 0) {
+                const total = brick.count * nLayers;
+                if (total > bestGridTotal) {
+                    bestGridTotal = total;
+                    bestGridLayout = brick;
+                    bestGridOi = oi;
+                }
+            }
+        }
+
         const separatorHeights = [];
-        const firstLayerSlots = [];
+        let firstLayerCount = 0;
+
+        if (bestGridLayout) {
+            const od = orientData[bestGridOi];
+            const grid = bestGridLayout;
+            const isBrick = !!grid.isBrick;
+            const { sizeX: sx, sizeY: sy, sizeZ: sz, pieceNX, pieceNZ, pieceMask: mask, pieceHeights: pH } = od;
+
+            const layerStep = sy + packingGap + (layerSeparator > 0 ? layerSeparator : 0);
+            const nLayers = bestGridTotal > 0 && grid.count > 0 ? Math.ceil(bestGridTotal / grid.count) : 1;
+
+            console.log(`[HeightMapAsync] Phase 1: ${isBrick ? 'brick' : 'aligned'} grid, `
+                + `step=(${grid.stepX.toFixed(1)}, ${grid.stepZ.toFixed(1)}), `
+                + `${isBrick ? `nxE=${grid.nxEven} nxO=${grid.nxOdd}` : `nx=${grid.nx}`} nz=${grid.nz || grid.nx && '?'}, `
+                + `orient=${bestGridOi}, perLayer=${grid.count}, nLayers=${nLayers}, total=${bestGridTotal}`);
+
+            for (let layer = 0; layer < nLayers; layer++) {
+                const layerBaseY = layer * layerStep;
+                if (layerBaseY + sy > boxH + 0.1) break;
+
+                // Record separator height between layers
+                if (layer > 0 && layerSeparator > 0) {
+                    const sepY = layerBaseY - layerSeparator / 2;
+                    separatorHeights.push(sepY);
+                }
+
+                const gridPositions = [];
+                if (isBrick) {
+                    for (let iz = 0; iz < grid.nz; iz++) {
+                        const isOddRow = iz % 2 === 1;
+                        const nx = isOddRow ? grid.nxOdd : grid.nxEven;
+                        const xOff = isOddRow ? grid.offsetX : 0;
+                        for (let ix = 0; ix < nx; ix++) {
+                            gridPositions.push({ x: xOff + ix * grid.stepX + sx / 2, z: iz * grid.stepZ + sz / 2 });
+                        }
+                    }
+                } else {
+                    for (let iz = 0; iz < grid.nz; iz++) {
+                        for (let ix = 0; ix < grid.nx; ix++) {
+                            gridPositions.push({ x: ix * grid.stepX + sx / 2, z: iz * grid.stepZ + sz / 2 });
+                        }
+                    }
+                }
+
+                for (const gp of gridPositions) {
+                    if (placed >= effectiveMaxTry) break;
+                    if (abortSignal?.aborted) throw abortError();
+
+                    const posX = gp.x;
+                    const posZ = gp.z;
+                    if (posX + sx / 2 > boxL + 0.1 || posZ + sz / 2 > boxW + 0.1) continue;
+                    if (layerBaseY + sy > boxH + 0.1) continue;
+
+                    tmpMatB.makeTranslation(posX, layerBaseY, posZ);
+                    tmpBox.copy(od.localBbox).applyMatrix4(tmpMatB);
+
+                    if (candidateIntersectsAny(tmpMatB, tmpBox, bestGridOi)) continue;
+
+                    if (!dryRun) {
+                        const im = instancedMeshes[bestGridOi];
+                        const idx = orientCounts[bestGridOi];
+                        tmpObj.position.set(posX, layerBaseY, posZ);
+                        tmpObj.rotation.set(0, 0, 0);
+                        tmpObj.updateMatrix();
+                        im.setMatrixAt(idx, tmpObj.matrix);
+                        im.setColorAt(idx, new THREE.Color(this.pieceColors[placed % numColors]));
+                        positionsOut.push(new THREE.Vector3(posX, layerBaseY, posZ));
+                        placementItemsOut.push({ position: new THREE.Vector3(posX, layerBaseY, posZ), orientIdx: bestGridOi });
+                    }
+
+                    orientCounts[bestGridOi]++;
+                    placedAabbs.push(tmpBox.clone());
+                    placedMatrices.push(tmpMatB.clone());
+                    placedOrientIdxs.push(bestGridOi);
+                    addToSpatialGrid(placedAabbs.length - 1, tmpBox);
+
+                    const hmLeftX = Math.max(0, Math.floor((posX - sx / 2) / cellSize));
+                    const hmLeftZ = Math.max(0, Math.floor((posZ - sz / 2) / cellSize));
+                    for (let pz = 0; pz < pieceNZ; pz++) {
+                        for (let px = 0; px < pieceNX; px++) {
+                            const pIdx = pz * pieceNX + px;
+                            if (!mask[pIdx]) continue;
+                            const hx = hmLeftX + px, hz = hmLeftZ + pz;
+                            if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
+                            const top = layerBaseY + pH[pIdx] + packingGap;
+                            if (top > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = top;
+                        }
+                    }
+
+                    placed++;
+                    firstLayerCount++;
+                }
+            }
+
+            // Record the top of the last layer as a separator reference
+            if (firstLayerCount > 0 && nLayers > 1 && layerSeparator > 0) {
+                const lastLayerTop = (nLayers - 1) * layerStep + sy;
+                separatorHeights.push(lastLayerTop);
+            }
+
+            console.log(`[HeightMapAsync] Phase 1 placed ${firstLayerCount} pieces across ${nLayers} layers`);
+            if (onProgress) onProgress({ placed, maxTry: effectiveMaxTry });
+            await maybeYield(true);
+        }
 
         // ═══════════════ PHASE 2: UPPER LAYERS — greedy heightmap scan ═══════════════
         const _tPhase2Start = performance.now();
@@ -1653,18 +1827,17 @@ export class SceneManager {
                         if (!mask[pIdx]) continue;
                         const hx = hmLeftX + px, hz = hmLeftZ + pz;
                         if (hx < 0 || hx >= gridNX || hz < 0 || hz >= gridNZ) continue;
-                        const top = bestBaseH + sy;
+                        const top = bestBaseH + pH[pIdx] + packingGap;
                         if (top > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = top;
                     }
                 }
-                // Also update trailing edge cells for sub-cell placement
                 {
-                    const top = bestBaseH + sy;
+                    const edgeTop = bestBaseH + sy + packingGap;
                     for (let pz = 0; pz < pieceNZ; pz++) {
                         if (hmRightX > hmLeftX + pieceNX - 1) {
                             const hx = hmRightX, hz = hmLeftZ + pz;
                             if (hx >= 0 && hx < gridNX && hz >= 0 && hz < gridNZ) {
-                                if (top > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = top;
+                                if (edgeTop > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = edgeTop;
                             }
                         }
                     }
@@ -1672,7 +1845,7 @@ export class SceneManager {
                         if (hmRightZ > hmLeftZ + pieceNZ - 1) {
                             const hx = hmLeftX + px, hz = hmRightZ;
                             if (hx >= 0 && hx < gridNX && hz >= 0 && hz < gridNZ) {
-                                if (top > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = top;
+                                if (edgeTop > heightMap[hx + hz * gridNX]) heightMap[hx + hz * gridNX] = edgeTop;
                             }
                         }
                     }
@@ -1747,6 +1920,177 @@ export class SceneManager {
         }
 
         return { count: placed };
+    }
+
+    async addPackedSTLOptimalGrid({
+        stlGeometry,
+        orientationPool = null,
+        maxDraw = 500,
+        packingGap = 0,
+        colorCount = null,
+        boxL = null, boxW = null, boxH = null,
+        searchEffort = 'balanced',
+        dryRun = false,
+        abortSignal = null,
+        onProgress = null
+    }) {
+        if (!dryRun) this.clearPieces();
+        if (boxL == null || boxW == null || boxH == null) return { count: 0 };
+
+        const numColors = colorCount || this.colorCount;
+        const allSrc = [stlGeometry];
+        if (orientationPool) {
+            for (const p of orientationPool) {
+                if (p.geometry) allSrc.push(p.geometry);
+            }
+        }
+
+        const candidates = [];
+
+        for (let si = 0; si < allSrc.length; si++) {
+            if (abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
+
+            const geometry = allSrc[si].clone();
+            geometry.computeVertexNormals();
+            geometry.computeBoundingBox();
+            const bbox = geometry.boundingBox;
+            const center = new THREE.Vector3();
+            bbox.getCenter(center);
+            const sizeX = bbox.max.x - bbox.min.x;
+            const sizeY = bbox.max.y - bbox.min.y;
+            const sizeZ = bbox.max.z - bbox.min.z;
+
+            if (sizeX > boxL + 0.01 || sizeZ > boxW + 0.01 || sizeY > boxH + 0.01) continue;
+
+            geometry.translate(-center.x, -bbox.min.y, -center.z);
+            if (typeof geometry.computeBoundsTree === 'function') geometry.computeBoundsTree();
+
+            const od = { geometry, sizeX, sizeY, sizeZ };
+            const nLayers = Math.max(1, Math.floor((boxH - sizeY + 0.01) / (sizeY + packingGap)) + 1);
+
+            const alignedGrid = _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort);
+            if (alignedGrid) {
+                candidates.push({
+                    geometry, sizeX, sizeY, sizeZ, od,
+                    grid: alignedGrid, nLayers,
+                    total: alignedGrid.count * nLayers,
+                    isBrick: false, srcIdx: si
+                });
+            }
+
+            const brickGrid = _findBestBrickLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort);
+            if (brickGrid && brickGrid.count > 0) {
+                candidates.push({
+                    geometry, sizeX, sizeY, sizeZ, od,
+                    grid: brickGrid, nLayers,
+                    total: brickGrid.count * nLayers,
+                    isBrick: true, srcIdx: si
+                });
+            }
+
+            if (onProgress) onProgress({ placed: 0, maxTry: 1, phase: `orient ${si + 1}/${allSrc.length}` });
+        }
+
+        if (candidates.length === 0) return { count: 0 };
+
+        candidates.sort((a, b) => {
+            if (b.total !== a.total) return b.total - a.total;
+            return (a.grid.leftoverArea || Infinity) - (b.grid.leftoverArea || Infinity);
+        });
+        const best = candidates[0];
+        const { geometry, sizeX, sizeY, sizeZ, grid, nLayers, isBrick } = best;
+
+        console.log(`[OptimalGrid] Best: ${isBrick ? 'brick' : 'aligned'}, `
+            + `step=(${grid.stepX.toFixed(1)}, ${grid.stepZ.toFixed(1)}), `
+            + `${isBrick ? `nxE=${grid.nxEven} nxO=${grid.nxOdd} nz=${grid.nz}` : `nx=${grid.nx} nz=${grid.nz}`}, `
+            + `layers=${nLayers}, total=${best.total}, fx=${grid.fx} fz=${grid.fz}`);
+
+        if (dryRun) return { count: best.total, grid: { isBrick, stepX: grid.stepX, stepZ: grid.stepZ, nLayers } };
+
+        const piecesToDraw = Math.min(best.total, maxDraw);
+        const material = new THREE.MeshPhongMaterial({
+            color: 0xffffff, opacity: 0.92, transparent: true,
+            flatShading: false, shininess: 60, specular: 0x444444
+        });
+        const instancedMesh = new THREE.InstancedMesh(geometry, material, piecesToDraw);
+        instancedMesh.castShadow = true;
+        instancedMesh.receiveShadow = true;
+
+        const dummy = new THREE.Object3D();
+        const positionsOut = [];
+        let placed = 0;
+
+        for (let layer = 0; layer < nLayers && placed < piecesToDraw; layer++) {
+            const posY = layer * (sizeY + packingGap);
+            if (posY + sizeY > boxH + 0.1) break;
+
+            if (isBrick) {
+                for (let iz = 0; iz < grid.nz && placed < piecesToDraw; iz++) {
+                    const isOddRow = iz % 2 === 1;
+                    const nx = isOddRow ? grid.nxOdd : grid.nxEven;
+                    const xOff = isOddRow ? grid.offsetX : 0;
+                    for (let ix = 0; ix < nx && placed < piecesToDraw; ix++) {
+                        const posX = xOff + ix * grid.stepX + sizeX / 2;
+                        const posZ = iz * grid.stepZ + sizeZ / 2;
+                        if (posX + sizeX / 2 > boxL + 0.1) continue;
+                        if (posZ + sizeZ / 2 > boxW + 0.1) continue;
+
+                        dummy.position.set(posX, posY, posZ);
+                        dummy.updateMatrix();
+                        instancedMesh.setMatrixAt(placed, dummy.matrix);
+                        instancedMesh.setColorAt(placed, new THREE.Color(this.pieceColors[placed % numColors]));
+                        positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+                        placed++;
+                    }
+                }
+            } else {
+                for (let iz = 0; iz < grid.nz && placed < piecesToDraw; iz++) {
+                    for (let ix = 0; ix < grid.nx && placed < piecesToDraw; ix++) {
+                        const posX = ix * grid.stepX + sizeX / 2;
+                        const posZ = iz * grid.stepZ + sizeZ / 2;
+                        if (posX + sizeX / 2 > boxL + 0.1) continue;
+                        if (posZ + sizeZ / 2 > boxW + 0.1) continue;
+
+                        dummy.position.set(posX, posY, posZ);
+                        dummy.updateMatrix();
+                        instancedMesh.setMatrixAt(placed, dummy.matrix);
+                        instancedMesh.setColorAt(placed, new THREE.Color(this.pieceColors[placed % numColors]));
+                        positionsOut.push(new THREE.Vector3(posX, posY, posZ));
+                        placed++;
+                    }
+                }
+            }
+        }
+
+        instancedMesh.count = placed;
+        instancedMesh.instanceMatrix.needsUpdate = true;
+        if (instancedMesh.instanceColor) instancedMesh.instanceColor.needsUpdate = true;
+
+        this.scene.add(instancedMesh);
+        this.pieces.push(instancedMesh);
+
+        const positions = geometry.getAttribute('position');
+        this.lastPlacement = {
+            type: 'stl',
+            dims: { l: sizeX, w: sizeZ, h: sizeY },
+            geometry,
+            vertices: positions ? new Float32Array(positions.array) : null,
+            positions: positionsOut,
+            boxDims: { l: boxL, w: boxW, h: boxH }
+        };
+
+        return {
+            count: placed,
+            gridInfo: {
+                isBrick,
+                stepX: grid.stepX,
+                stepZ: grid.stepZ,
+                nLayers,
+                ...(isBrick
+                    ? { nxEven: grid.nxEven, nxOdd: grid.nxOdd, nz: grid.nz }
+                    : { nx: grid.nx, nz: grid.nz })
+            }
+        };
     }
 
     /**

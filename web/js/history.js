@@ -190,8 +190,9 @@ function applyFilters() {
     const dayMs = 24 * 60 * 60 * 1000;
     
     state.filteredHistory = state.history.filter(item => {
-        // Mode filter
-        if (modeFilter !== 'all' && item.mode !== modeFilter) return false;
+        // Mode filter ('optimized' matches both 'optimized' and 'fast' modes)
+        if (modeFilter === 'optimized' && item.mode === 'bulk') return false;
+        if (modeFilter === 'bulk' && item.mode !== 'bulk') return false;
         
         // Date filter
         if (dateFilter !== 'all') {
@@ -238,9 +239,9 @@ function renderTable() {
             minute: '2-digit'
         });
         
-        const modeClass = item.mode === 'optimized' ? 'optimized' : 'bulk';
-        const modeIcon = item.mode === 'optimized' ? '' : '';
-        const modeName = item.mode === 'optimized' ? historyText('modeOptimized') : historyText('modeBulk');
+        const modeClass = item.mode === 'bulk' ? 'bulk' : 'optimized';
+        const modeIcon = item.mode === 'bulk' ? '' : '';
+        const modeName = item.mode === 'bulk' ? historyText('modeBulk') : historyText('modeOptimized');
         
         const pieceDims = item.pieceDims ? 
             `${item.pieceDims.l?.toFixed(1) || '?'}×${item.pieceDims.w?.toFixed(1) || '?'}×${item.pieceDims.h?.toFixed(1) || '?'}` : 
@@ -306,7 +307,7 @@ function renderTable() {
  */
 function updateStats() {
     const total = state.history.length;
-    const optimized = state.history.filter(h => h.mode === 'optimized').length;
+    const optimized = state.history.filter(h => h.mode !== 'bulk').length;
     const bulk = state.history.filter(h => h.mode === 'bulk').length;
     
     elements.historyStats.innerHTML = `
@@ -336,8 +337,8 @@ function showDetailModal(id) {
         minute: '2-digit'
     });
     
-    const modeIcon = item.mode === 'optimized' ? '' : '';
-    const modeName = item.mode === 'optimized' ? historyText('modeOptimizedLong') : historyText('modeBulkLong');
+    const modeIcon = item.mode === 'bulk' ? '' : '';
+    const modeName = item.mode === 'bulk' ? historyText('modeBulkLong') : historyText('modeOptimizedLong');
     
     elements.modalBody.innerHTML = `
         <div class="detail-header">

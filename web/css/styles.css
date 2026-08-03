@@ -184,7 +184,7 @@ body {
     flex-direction: column;
     align-items: center;
     gap: 4px;
-    padding: 16px 32px;
+    padding: 14px 20px;
     background: var(--bg-card);
     border: 2px solid var(--border-color);
     border-radius: var(--radius-md);
@@ -193,6 +193,8 @@ body {
     font-weight: 600;
     color: var(--text-primary);
     transition: all 0.2s ease;
+    flex: 1;
+    min-width: 0;
 }
 
 .mode-btn:hover {

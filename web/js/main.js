@@ -36,7 +36,7 @@ function updateMaxPiecesLimit() {
 
 // Application state
 const state = {
-    mode: 'optimized', // 'optimized' or 'bulk'
+    mode: 'optimized', // 'optimized', 'fast', or 'bulk'
     language: getStoredLanguage(), // 'ca' or 'en'
     locale: null,
     stlGeometry: null,
@@ -185,7 +185,9 @@ const uiTranslations = {
         headerSubtitle: 'Càlcul optimitzat + Mode a Granel amb Física Real',
         historyLink: 'Historial de Càlculs',
         modeOptimized: 'Mode Optimitzat',
-        modeOptimizedDesc: 'Càlcul matemàtic precís',
+        modeOptimizedDesc: 'Nidificació amb heightmap BVH',
+        modeFast: 'Optimitzador Ràpid',
+        modeFastDesc: 'Graella regular amb densitat màxima',
         modeBulk: 'Mode a Granel',
         modeBulkDesc: 'Simulació amb gravetat',
         objectTitle: "Dimensions de l'Objecte",
@@ -231,7 +233,9 @@ const uiTranslations = {
         headerSubtitle: 'Optimized calculation + Bulk Mode with Real Physics',
         historyLink: 'Calculation History',
         modeOptimized: 'Optimized Mode',
-        modeOptimizedDesc: 'Precise math calculation',
+        modeOptimizedDesc: 'Heightmap BVH nesting',
+        modeFast: 'Fast Optimizer',
+        modeFastDesc: 'Regular grid with max density',
         modeBulk: 'Bulk Mode',
         modeBulkDesc: 'Gravity simulation',
         objectTitle: 'Object Dimensions',
@@ -899,11 +903,11 @@ function switchMode(mode) {
     });
     
     // Show/hide mode-specific elements
-    const isOptimized = mode === 'optimized';
+    const isBulk = mode === 'bulk';
     
-    elements.bulkOptions.style.display = isOptimized ? 'none' : 'block';
-    elements.calculateBtn.style.display = isOptimized ? 'block' : 'none';
-    elements.startSimBtn.style.display = isOptimized ? 'none' : 'block';
+    elements.bulkOptions.style.display = isBulk ? 'block' : 'none';
+    elements.calculateBtn.style.display = isBulk ? 'none' : 'block';
+    elements.startSimBtn.style.display = isBulk ? 'block' : 'none';
     if (elements.applyGravityBtn) {
         elements.applyGravityBtn.style.display = 'none';
     }
@@ -913,7 +917,7 @@ function switchMode(mode) {
     elements.resetSimBtn.style.display = 'none'; // User requested to remove it
     
     // Reset results
-    if (!isOptimized) {
+    if (isBulk) {
         elements.results.innerHTML = `<p class="placeholder-text">${mainText('bulkPlaceholder')}</p>`;
         state.sceneManager.clearPieces();
     }
@@ -1336,7 +1340,7 @@ function updateWeightFromMaterial() {
  */
 function getInputValues() {
     // Use mode-specific color count slider
-    const colorCount = state.mode === 'optimized' 
+    const colorCount = state.mode !== 'bulk' 
         ? parseInt(elements.optPieceColors?.value) || 10
         : parseInt(elements.pieceColors?.value) || 10;
     
@@ -1527,20 +1531,15 @@ async function handleCalculate() {
                 setCalcProgress(true, 6, 'Provant orientacions...', calcStartTime);
                 await nextFrame();
                 if (state.stlGeometry) {
-                    if (values.heightMapNesting) {
-                        // Height-map path: multi-orientation evaluation + BVH-collision placement
-                        setCalcProgress(true, 8, `Avaluant orientacions...`, calcStartTime);
+                    if (state.mode === 'fast') {
+                        setCalcProgress(true, 8, 'Avaluant orientacions (Graella Optima)...', calcStartTime);
                         await nextFrame();
 
                         const baseGeometry = state.stlGeometry.clone();
                         alignToStableBase(baseGeometry);
 
-                        // Generate all valid yaw rotations as orientation pool
-                        const yawAngles = values.allowRotation ? [0, 90, 180, 270] : [0];
+                        const yawAngles = values.allowRotation ? [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330] : [0];
                         const orientationPool = [];
-                        let bestGeom = null;
-                        let bestCap = 0;
-                        let bestYaw = 0;
 
                         for (const yaw of yawAngles) {
                             if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -1552,32 +1551,166 @@ async function handleCalculate() {
                             const sx = bb.max.x - bb.min.x;
                             const sy = bb.max.y - bb.min.y;
                             const sz = bb.max.z - bb.min.z;
+                            if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
+                            orientationPool.push({ geometry: g, yaw, name: `${yaw} deg` });
+                        }
 
-                            if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1)
-                                continue;
+                        for (const stableBase of (state.stlStableOrientations || [])) {
+                            if (!stableBase.geometry) continue;
+                            for (const yaw of yawAngles) {
+                                if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
+                                const g = stableBase.geometry.clone();
+                                if (yaw !== 0) {
+                                    applyYawToGeometry(g, yaw);
+                                    recenterGeometry(g);
+                                }
+                                g.computeBoundingBox();
+                                const bb = g.boundingBox;
+                                const sx = bb.max.x - bb.min.x;
+                                const sy = bb.max.y - bb.min.y;
+                                const sz = bb.max.z - bb.min.z;
+                                if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
+                                const isDup = orientationPool.some(p => {
+                                    p.geometry.computeBoundingBox();
+                                    const pb = p.geometry.boundingBox;
+                                    return Math.abs((pb.max.x - pb.min.x) - sx) < 0.5 &&
+                                           Math.abs((pb.max.y - pb.min.y) - sy) < 0.5 &&
+                                           Math.abs((pb.max.z - pb.min.z) - sz) < 0.5;
+                                });
+                                if (!isDup) orientationPool.push({ geometry: g, yaw, name: `base+${yaw} deg` });
+                            }
+                        }
 
+                        console.log(`[OptimalGrid] ${orientationPool.length} orientation candidates`);
+
+                        if (orientationPool.length === 0) {
+                            drawn = { count: 0 };
+                        } else {
+                            const primaryGeom = orientationPool[0].geometry;
+                            const altPool = orientationPool.slice(1);
+
+                            setCalcProgress(true, 20, 'Cercant graella optima BVH...', calcStartTime);
+                            await nextFrame();
+
+                            drawn = await state.sceneManager.addPackedSTLOptimalGrid({
+                                stlGeometry: primaryGeom,
+                                orientationPool: altPool.length > 0 ? altPool : null,
+                                maxDraw: 500,
+                                packingGap: values.packingGap,
+                                colorCount: values.colorCount,
+                                boxL: values.boxL,
+                                boxW: values.boxW,
+                                boxH: values.boxH,
+                                searchEffort: values.placementSearchEffort,
+                                dryRun: false,
+                                abortSignal,
+                                onProgress: ({ placed, maxTry, phase }) => {
+                                    setCalcProgress(true, 20 + 70 * 0.5, `Graella Optima: ${phase || 'avaluant...'}`, calcStartTime);
+                                }
+                            });
+
+                            if (drawn.gridInfo) {
+                                const gi = drawn.gridInfo;
+                                const gridDesc = gi.isBrick
+                                    ? `brick(${gi.nxEven}/${gi.nxOdd}x${gi.nz})`
+                                    : `${gi.nx}x${gi.nz}`;
+                                realDistributionText = `${gridDesc}x${gi.nLayers}`;
+                            }
+                        }
+                    } else if (values.heightMapNesting) {
+                        setCalcProgress(true, 8, `Avaluant orientacions...`, calcStartTime);
+                        await nextFrame();
+
+                        const yawAngles = values.allowRotation ? Array.from({ length: 36 }, (_, i) => i * 10) : [0];
+                        const orientationPool = [];
+
+                        const baseSources = [];
+                        if (state.stlStableOrientations && state.stlStableOrientations.length > 0) {
+                            for (const sb of state.stlStableOrientations) {
+                                if (sb.geometry) baseSources.push(sb.geometry);
+                            }
+                        }
+                        if (baseSources.length === 0) {
+                            const fallback = state.stlGeometry.clone();
+                            alignToStableBase(fallback);
+                            recenterGeometry(fallback);
+                            baseSources.push(fallback);
+                        }
+
+                        const perms = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+                        for (const perm of perms) {
+                            const g = state.stlGeometry.clone();
+                            applyPermutation(g, perm);
+                            recenterGeometry(g);
+                            g.computeBoundingBox();
+                            const bb = g.boundingBox;
+                            const sx = bb.max.x - bb.min.x;
+                            const sy = bb.max.y - bb.min.y;
+                            const sz = bb.max.z - bb.min.z;
+                            if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
+                            const isDup = baseSources.some(bs => {
+                                bs.computeBoundingBox();
+                                const pb = bs.boundingBox;
+                                const psx = pb.max.x - pb.min.x;
+                                const psy = pb.max.y - pb.min.y;
+                                const psz = pb.max.z - pb.min.z;
+                                return Math.abs(psx - sx) < 0.5 && Math.abs(psy - sy) < 0.5 && Math.abs(psz - sz) < 0.5;
+                            });
+                            if (!isDup) baseSources.push(g);
+                        }
+
+                        for (const baseGeom of baseSources) {
+                            for (const yaw of yawAngles) {
+                                if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
+                                const g = baseGeom.clone();
+                                if (yaw !== 0) {
+                                    applyYawToGeometry(g, yaw);
+                                    recenterGeometry(g);
+                                }
+                                g.computeBoundingBox();
+                                const bb = g.boundingBox;
+                                const sx = bb.max.x - bb.min.x;
+                                const sy = bb.max.y - bb.min.y;
+                                const sz = bb.max.z - bb.min.z;
+                                if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
+                                const isDup = orientationPool.some(p => {
+                                    p.geometry.computeBoundingBox();
+                                    const pb = p.geometry.boundingBox;
+                                    return Math.abs((pb.max.x - pb.min.x) - sx) < 0.5 &&
+                                           Math.abs((pb.max.y - pb.min.y) - sy) < 0.5 &&
+                                           Math.abs((pb.max.z - pb.min.z) - sz) < 0.5;
+                                });
+                                if (!isDup) orientationPool.push({ geometry: g, yaw, name: `base${baseSources.indexOf(baseGeom)}+${yaw}` });
+                            }
+                        }
+
+                        let bestGeom = null;
+                        let bestCap = 0;
+
+                        for (const o of orientationPool) {
+                            o.geometry.computeBoundingBox();
+                            const bb = o.geometry.boundingBox;
+                            const sx = bb.max.x - bb.min.x;
+                            const sy = bb.max.y - bb.min.y;
+                            const sz = bb.max.z - bb.min.z;
                             const cap = Math.floor(values.boxL / sx) * Math.floor(values.boxW / sz) * Math.floor(values.boxH / sy);
                             if (cap > bestCap) {
                                 bestCap = cap;
-                                bestYaw = yaw;
-                                bestGeom = g;
+                                bestGeom = o.geometry;
                             }
-
-                            // Add to orientation pool for multi-orientation packing
-                            orientationPool.push({ geometry: g, yaw, name: `${yaw} deg` });
                         }
+
+                        console.log(`[HeightMap] ${orientationPool.length} orientations, best grid cap=${bestCap}`);
 
                         if (!bestGeom) {
                             drawn = { count: 0 };
                         } else {
-                            console.log(`[HeightMap] Best yaw: ${bestYaw} deg, grid cap=${bestCap}, pool=${orientationPool.length} orients`);
-
                             drawn = await state.sceneManager.addPackedSTLHeightMapAsync({
                                 stlGeometry: bestGeom,
                                 orientationPool: orientationPool.length > 1 ? orientationPool : null,
                                 useMixedOrientations: orientationPool.length > 1,
-                                maxDraw: 500,
-                                maxTry: Math.min(3000, Math.max(500, bestCap * 2)),
+                                maxDraw: 2000,
+                                maxTry: Math.min(10000, Math.max(1000, bestCap * 5)),
                                 packingGap: values.packingGap,
                                 colorCount: values.colorCount,
                                 boxL: values.boxL,
@@ -1691,6 +1824,9 @@ async function handleCalculate() {
 
             // Build final summary (calculator result is the correct count — unified grid-based approach)
             const finalConfig = { ...result.data.bestOrientation };
+            if (realDistributionText) {
+                finalConfig.distribution = realDistributionText;
+            }
 
             const finalSummary = createSummary(displayCount, finalConfig, result.data.allOrientations, {
                 volumeTheoreticalMax: result.data.volumeTheoreticalMax,
@@ -1709,7 +1845,7 @@ async function handleCalculate() {
                 pieceCount: displayCount,
                 pieceWeight: values.objWeight,
                 maxWeight: values.maxWeight,
-                mode: 'optimized',
+                mode: state.mode,
                 stlFileName: state.stlFileName || null,
                 meshVolume: meshVolume || 0,
                 materialDensity: matDensity,
@@ -1794,7 +1930,7 @@ async function initGravitySimulation() {
     state.sceneManager.clearPieces();
 
     const pieceColors = state.sceneManager.pieceColors || [];
-    const colorCount = Math.min(pieceColors.length || 1, (state.mode === 'optimized'
+    const colorCount = Math.min(pieceColors.length || 1, (state.mode !== 'bulk'
         ? parseInt(elements.optPieceColors?.value) || 10
         : parseInt(elements.pieceColors?.value) || 10));
 
@@ -2261,6 +2397,9 @@ async function applyLanguage() {
         if (mode === 'optimized') {
             btn.childNodes[0].textContent = t.modeOptimized + '\n';
             if (desc) desc.textContent = t.modeOptimizedDesc;
+        } else if (mode === 'fast') {
+            btn.childNodes[0].textContent = t.modeFast + '\n';
+            if (desc) desc.textContent = t.modeFastDesc;
         } else if (mode === 'bulk') {
             btn.childNodes[0].textContent = t.modeBulk + '\n';
             if (desc) desc.textContent = t.modeBulkDesc;
@@ -2414,7 +2553,7 @@ async function applyLanguage() {
     
     // Placeholder
     const placeholder = document.querySelector('.placeholder-text');
-    if (placeholder) placeholder.textContent = state.mode === 'optimized' ? t.placeholder : t.bulkPlaceholder;
+    if (placeholder) placeholder.textContent = state.mode === 'bulk' ? t.bulkPlaceholder : t.placeholder;
     
     // Also sync the report language radio
     const radioToCheck = document.querySelector(`input[name="report-lang"][value="${state.language}"]`);
