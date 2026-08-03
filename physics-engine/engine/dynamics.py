@@ -6,6 +6,7 @@ Jacobi-style parallel impulse solver with Baumgarte stabilization,
 ground-plane constraint, and velocity clamping.
 """
 import numpy as np
+import math
 from numba import cuda
 
 
@@ -116,7 +117,7 @@ def _update_aabbs_kernel(
 @cuda.jit
 def _ground_constraint_kernel(
     positions, velocities, inv_mass, aabb_min,
-    ground_y, n_bodies,
+    ground_y, vibration_amplitude, vibration_frequency, time, n_bodies,
 ):
     idx = cuda.grid(1)
     if idx >= n_bodies:
@@ -125,8 +126,9 @@ def _ground_constraint_kernel(
     if im <= 0.0:
         return
     min_y = aabb_min[idx, 1]
-    if min_y < ground_y:
-        penetration = ground_y - min_y
+    effective_ground = ground_y + vibration_amplitude * math.sin(time * vibration_frequency)
+    if min_y < effective_ground:
+        penetration = effective_ground - min_y
         positions[idx, 1] += penetration
         if velocities[idx, 1] < 0.0:
             velocities[idx, 1] = 0.0
@@ -239,6 +241,8 @@ class DynamicsSolver:
         self.max_contacts = max_contacts
         self._max_linear = 5000.0   # mm/s
         self._max_angular = 50.0    # rad/s
+        self._vibration_amplitude = 0.0
+        self._vibration_frequency = 0.0
 
         # Keep CPU mirrors for efficient set_body
         self._pos = np.zeros((n_bodies, 3), dtype=np.float64)
@@ -325,12 +329,13 @@ class DynamicsSolver:
         )
         cuda.synchronize()
 
-    def apply_ground(self, ground_y=0.0):
+    def apply_ground(self, ground_y=0.0, time=0.0):
         threads = 256
         blocks = (self.n_bodies + threads - 1) // threads
         _ground_constraint_kernel[blocks, threads](
             self.d_pos, self.d_vel, self.d_inv_mass, self.d_aabb_min,
-            ground_y, self.n_bodies,
+            ground_y, self._vibration_amplitude, self._vibration_frequency,
+            time, self.n_bodies,
         )
         cuda.synchronize()
 

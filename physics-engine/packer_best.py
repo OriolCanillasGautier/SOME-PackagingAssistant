@@ -376,7 +376,7 @@ class BestPacker:
 
     # ── Greedy baseline ──
 
-    def pack_greedy(self, max_pieces=500, verbose=True):
+    def pack_greedy(self, max_pieces=500, verbose=True, beam_width=5):
         placed, meshes = [], []
         consecutive = 0
         t0 = time.time()
@@ -387,7 +387,9 @@ class BestPacker:
                 consecutive += 1
                 continue
 
-            best = valid[np.argmin(valid[:, 3])]
+            top_n = min(beam_width, len(valid))
+            top = valid[np.argsort(valid[:, 3])[:top_n]]
+            best = top[random.randint(0, len(top) - 1)]
             x, z, oi, y = best[0], best[1], int(best[2]), best[3]
             o = self.orientations[oi]
 
@@ -508,8 +510,9 @@ class BestPacker:
         if verbose:
             print(f"[Compact] {len(placed)} pieces, {n_steps} steps")
 
-        # Use the engine World for physics
-        w = World(cell_size=self.scan_step * 4, gravity=(0, -9810, 0))
+        # Use the engine World for physics (with vibration to break arching)
+        w = World(cell_size=self.scan_step * 4, gravity=(0, -9810, 0),
+                  vibration_amplitude=0.8, vibration_frequency=120.0)
 
         stl_path = str(Path(__file__).resolve().parent / "stl" / "6683688_simp0.1pct.stl")
         for pi, (x, y, z, oi, name) in enumerate(placed):
@@ -629,7 +632,9 @@ class BestPacker:
                 consecutive += 1
                 continue
 
-            best = valid[np.argmin(valid[:, 3])]
+            top_n = min(5, len(valid))
+            top = valid[np.argsort(valid[:, 3])[:top_n]]
+            best = top[random.randint(0, len(top) - 1)]
             x, z, y = best[0], best[1], best[3]
             cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
             collides = False

@@ -17,9 +17,12 @@ from .dynamics import DynamicsSolver
 class World:
     """GPU-accelerated physics world."""
 
-    def __init__(self, cell_size=50.0, gravity=(0, -9810, 0)):
+    def __init__(self, cell_size=50.0, gravity=(0, -9810, 0),
+                 vibration_amplitude=0.0, vibration_frequency=0.0):
         self.gravity = tuple(gravity)
         self.cell_size = cell_size
+        self.vibration_amplitude = vibration_amplitude
+        self.vibration_frequency = vibration_frequency
         self.bodies: list[dict] = []
         self.hulls: list[HullData] = []
         self._collision_detector = None
@@ -76,6 +79,8 @@ class World:
         self._broadphase = BroadPhase(cell_size=self.cell_size)
         n = len(self.bodies)
         self._dynamics = DynamicsSolver(n)
+        self._dynamics._vibration_amplitude = self.vibration_amplitude
+        self._dynamics._vibration_frequency = self.vibration_frequency
         for i, b in enumerate(self.bodies):
             self._dynamics.set_body(
                 i, b["position"], b["quaternion"],
@@ -95,8 +100,9 @@ class World:
         self._dynamics.integrate(gravity=self.gravity, dt=dt,
                                  damping_linear=0.05, damping_angular=0.05)
 
-        # 2. Ground constraint
-        self._dynamics.apply_ground(ground_y=0.0)
+        # 2. Ground constraint (with vibration for granular compaction)
+        self._dynamics.apply_ground(ground_y=0.0,
+                                    time=self._step_count * dt)
 
         # 3. Update AABBs
         self._dynamics.update_aabbs(
