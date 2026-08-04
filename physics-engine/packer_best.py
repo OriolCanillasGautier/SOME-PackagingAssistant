@@ -296,6 +296,13 @@ class BestPacker:
         self._d_box_dims = None
         self._d_placed_verts = self._d_placed_counts = self._d_placed_norms = self._d_placed_face_cts = None
         self._max_placed = 2000
+        self._rng = None
+        # Hierarchical search defaults
+        self.coarse_step = 10.0
+        self.fine_step = 2.0
+        self.coarse_top = 40
+        self.coarse_per_orientation = 8
+        self.coarse_min_distance = 15.0
 
     def load_mesh(self, stl_path, n_yaw=8, shrink=0.4):
         fp = Path(stl_path)
@@ -326,18 +333,19 @@ class BestPacker:
         self._d_placed_norms = cuda.to_device(np.zeros((self._max_placed, mf, 3), dtype=np.float64))
         self._d_placed_face_cts = cuda.to_device(np.zeros(self._max_placed, dtype=np.int32))
 
-    def _generate_candidates(self):
+    def _generate_candidates(self, step=None):
+        s = step if step is not None else self.scan_step
         cands = []
         for oi, o in enumerate(self.orientations):
             sx, _, sz = o['size']
-            for x in np.arange(0, self.box_l - sx + 0.01, self.scan_step):
-                for z in np.arange(0, self.box_w - sz + 0.01, self.scan_step):
+            for x in np.arange(0, self.box_l - sx + 0.01, s):
+                for z in np.arange(0, self.box_w - sz + 0.01, s):
                     cands.append([float(x), float(z), float(oi), 99999.0, 0.0])
         return np.array(cands, dtype=np.float64) if cands else np.zeros((0, 5), dtype=np.float64)
 
-    def _gpu_scan(self, n_placed, verbose=False):
+    def _gpu_scan(self, n_placed, candidates=None, verbose=False):
         """One GPU launch: find min Y for all candidates. Returns valid candidates with Y."""
-        cand_array = self._generate_candidates()
+        cand_array = candidates if candidates is not None else self._generate_candidates()
         n_cand = len(cand_array)
         if n_cand == 0:
             return np.zeros((0, 5))
@@ -361,6 +369,81 @@ class BestPacker:
         results = d_cand.copy_to_host()
         return results[results[:, 4] > 0.5]
 
+    # ── Hierarchical coarse-to-fine candidate search ──
+
+    def _select_diverse_candidates(self, valid, top_global=40, top_per_orientation=8, min_distance=15.0):
+        if len(valid) == 0:
+            return np.zeros((0, 5))
+
+        valid = valid[np.argsort(valid[:, 3])]
+        if self._rng is None:
+            self._rng = np.random.RandomState(42)
+
+        selected = []
+        orient_counts = defaultdict(int)
+
+        for row in valid:
+            x, z, oi, y = float(row[0]), float(row[1]), int(row[2]), float(row[3])
+
+            if len(selected) >= top_global:
+                break
+            if orient_counts[oi] >= top_per_orientation:
+                continue
+
+            too_close = False
+            for sx, sz, _, _ in selected:
+                if (x - sx) ** 2 + (z - sz) ** 2 < min_distance ** 2:
+                    too_close = True
+                    break
+            if too_close:
+                continue
+
+            selected.append((x, z, oi, y))
+            orient_counts[oi] += 1
+
+        return np.array([[x, z, oi, y, 1.0] for x, z, oi, y in selected], dtype=np.float64)
+
+    def _refine_candidates(self, selected, fine_step=2.0, radius=10.0):
+        refined = []
+        seen = set()
+
+        for row in selected:
+            cx, cz, oi = float(row[0]), float(row[1]), int(row[2])
+            o = self.orientations[oi]
+            sx, _, sz = o['size']
+
+            for dx in np.arange(-radius, radius + 0.01, fine_step):
+                for dz in np.arange(-radius, radius + 0.01, fine_step):
+                    x = cx + dx
+                    z = cz + dz
+                    if x < 0 or x > self.box_l - sx + 0.01:
+                        continue
+                    if z < 0 or z > self.box_w - sz + 0.01:
+                        continue
+
+                    key = (round(x, 3), round(z, 3), oi)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    refined.append([float(x), float(z), float(oi), 99999.0, 0.0])
+
+        return np.array(refined, dtype=np.float64) if refined else np.zeros((0, 5), dtype=np.float64)
+
+    def _choose_best(self, valid, placed_count=0):
+        if len(valid) == 0:
+            return None
+
+        y_min = valid[:, 3].min()
+        scores = valid[:, 3].copy()
+        if placed_count > 0:
+            vertical_range = self.box_h
+            if vertical_range > 0:
+                norm_heights = valid[:, 3] / max(1.0, vertical_range)
+                scores = scores + 0.02 * self.box_h * norm_heights
+
+        best_idx = np.argmin(scores)
+        return valid[best_idx]
+
     def _place_piece_gpu(self, pi, x, y, z, oi):
         o = self.orientations[oi]
         wv = o['verts'] + np.array([x, y, z])
@@ -376,21 +459,51 @@ class BestPacker:
 
     # ── Greedy baseline ──
 
-    def pack_greedy(self, max_pieces=500, verbose=True, beam_width=5):
+    def pack_greedy(self, max_pieces=500, verbose=True, beam_width=5, hierarchical=False):
         placed, meshes = [], []
         consecutive = 0
         t0 = time.time()
 
-        while len(placed) < max_pieces and consecutive < 20:
-            valid = self._gpu_scan(len(placed))
-            if len(valid) == 0:
-                consecutive += 1
-                continue
+        if hierarchical and verbose:
+            print(f"[Hierarchical] coarse_step={self.coarse_step}, fine_step={self.fine_step}, "
+                  f"top={self.coarse_top}, per_orient={self.coarse_per_orientation}, "
+                  f"min_dist={self.coarse_min_distance}")
 
-            top_n = min(beam_width, len(valid))
-            top = valid[np.argsort(valid[:, 3])[:top_n]]
-            best = top[random.randint(0, len(top) - 1)]
-            x, z, oi, y = best[0], best[1], int(best[2]), best[3]
+        while len(placed) < max_pieces and consecutive < 20:
+            if hierarchical:
+                coarse = self._generate_candidates(step=self.coarse_step)
+                valid = self._gpu_scan(len(placed), candidates=coarse)
+                if len(valid) == 0:
+                    consecutive += 1
+                    continue
+                selected = self._select_diverse_candidates(
+                    valid,
+                    top_global=self.coarse_top,
+                    top_per_orientation=self.coarse_per_orientation,
+                    min_distance=self.coarse_min_distance,
+                )
+                refined = self._refine_candidates(selected, fine_step=self.fine_step, radius=self.coarse_step)
+                valid = self._gpu_scan(len(placed), candidates=refined)
+                if len(valid) == 0:
+                    consecutive += 1
+                    continue
+                best_row = self._choose_best(valid, len(placed))
+                if best_row is None:
+                    consecutive += 1
+                    continue
+                x, z, oi, y = best_row[0], best_row[1], int(best_row[2]), best_row[3]
+                if verbose and len(placed) == 0:
+                    print(f"  [coarse] {len(coarse):,} candidates → {len(valid)} valid, "
+                          f"selected {len(selected)}, refined {len(refined):,}")
+            else:
+                valid = self._gpu_scan(len(placed))
+                if len(valid) == 0:
+                    consecutive += 1
+                    continue
+                top_n = min(beam_width, len(valid))
+                top = valid[np.argsort(valid[:, 3])[:top_n]]
+                best = top[random.randint(0, len(top) - 1)]
+                x, z, oi, y = best[0], best[1], int(best[2]), best[3]
             o = self.orientations[oi]
 
             cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
@@ -664,11 +777,11 @@ class BestPacker:
 
     # ── Full pipeline ──
 
-    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5):
+    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False):
         t0 = time.time()
 
         if method == 'greedy':
-            placed, meshes = self.pack_greedy(max_pieces, verbose, beam_width=beam_width)
+            placed, meshes = self.pack_greedy(max_pieces, verbose, beam_width=beam_width, hierarchical=hierarchical)
         elif method == 'layers':
             placed, meshes = self.pack_layers(max_pieces, verbose)
         else:
@@ -851,6 +964,13 @@ def main():
     p.add_argument("--method", type=str, default="backtrack", choices=["greedy", "backtrack", "layers"])
     p.add_argument("--compact", action="store_true")
     p.add_argument("--beam-width", type=int, default=5, help="Top-K candidates for random selection (1=lowest-Y, 5=explore)")
+    p.add_argument("--hierarchical", action="store_true", help="Coarse-to-fine candidate search")
+    p.add_argument("--coarse-step", type=float, default=10.0, help="Coarse grid step (mm)")
+    p.add_argument("--fine-step", type=float, default=2.0, help="Fine refinement step (mm)")
+    p.add_argument("--coarse-top", type=int, default=40, help="Max global candidates to keep from coarse pass")
+    p.add_argument("--coarse-per-orientation", type=int, default=8, help="Max candidates per orientation")
+    p.add_argument("--coarse-min-distance", type=float, default=15.0, help="Min XZ distance between kept candidates (mm)")
+    p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     p.add_argument("--output", type=str, default="packed_best.png")
     args = p.parse_args()
 
@@ -880,8 +1000,19 @@ def main():
         packer._init_gpu_buffers()
         print("Built-in triangle")
 
+    if args.seed is not None:
+        random.seed(args.seed)
+        packer._rng = np.random.RandomState(args.seed)
+
+    # Configure hierarchical search
+    packer.coarse_step = args.coarse_step
+    packer.fine_step = args.fine_step
+    packer.coarse_top = args.coarse_top
+    packer.coarse_per_orientation = args.coarse_per_orientation
+    packer.coarse_min_distance = args.coarse_min_distance
+
     print(f"\nPacking ({args.method})...")
-    placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width)
+    placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width, hierarchical=args.hierarchical)
 
     if meshes:
         print("\nVerifying...")
