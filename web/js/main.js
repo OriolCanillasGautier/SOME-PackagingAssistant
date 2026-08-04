@@ -1464,13 +1464,7 @@ async function handleGPUCalculate(calcStartTime) {
     await nextFrame();
 
     try {
-        const stlBlob = state.stlFile
-            || await new Promise((resolve, reject) => {
-                try {
-                    const buf = new THREE.STLExporter().parse(state.stlGeometry);
-                    resolve(new Blob([buf], { type: 'application/octet-stream' }));
-                } catch (e) { reject(e); }
-            });
+        const stlBlob = new Blob([state.stlFileData], { type: 'application/octet-stream' });
 
         const formData = new FormData();
         formData.append('stl', stlBlob, state.stlFileName || 'piece.stl');
@@ -1505,16 +1499,12 @@ async function handleGPUCalculate(calcStartTime) {
         // Download and display merged STL
         const stlResp = await fetch(`http://127.0.0.1:8787/api/pack/${job_id}/stl`);
         const stlBuf = await stlResp.arrayBuffer();
-        const mergedGeom = await loadSTLGeometry(new Uint8Array(stlBuf));
+        const mergedGeom = await loadSTL(new Uint8Array(stlBuf));
         if (!mergedGeom) throw new Error('No s\'ha pogut carregar el STL');
 
         state.sceneManager.clearPieces();
         mergedGeom.computeVertexNormals();
-        const piece = state.sceneManager.addSinglePieceMesh(mergedGeom, 0x3b82f6);
-        if (piece) {
-            piece.position.set(0, 0, 0);
-            state.sceneManager.fitCameraToBox();
-        }
+        state.sceneManager.addSTLPiece(mergedGeom, new THREE.Vector3(0, 0, 0));
 
         const stlUrl = `http://127.0.0.1:8787/api/pack/${job_id}/stl`;
         elements.results.innerHTML = `
