@@ -1,5 +1,5 @@
 """
-packer_gpu_voxel.py ΓÇö GPU-accelerated sparse-voxel 3D bin packer.
+packer_gpu_voxel.py — GPU-accelerated sparse-voxel 3D bin packer.
 Voxelizes each piece orientation at 1mm resolution, uploads sparse occupancy to GPU,
 tests thousands of (x,z,ori) candidates in parallel via CUDA.
 
@@ -8,6 +8,7 @@ Usage:
 """
 import sys, time, math, argparse
 from pathlib import Path
+from datetime import datetime
 import numpy as np
 from scipy.spatial.transform import Rotation
 from scipy.ndimage import binary_fill_holes
@@ -533,6 +534,7 @@ def main():
     p.add_argument("--scan-vox", type=int, default=1, help="XZ scan step in voxels (1=every voxel, 2=skip 1)")
     p.add_argument("--yaw", type=int, default=8); p.add_argument("--roll", type=int, default=4)
     p.add_argument("--pitch", type=int, default=4)
+    p.add_argument("--export-stl", action="store_true", help="Export merged STL")
     p.add_argument("--output", type=str, default="packed_gpu_voxel.png")
     args = p.parse_args()
     box_dims = (args.box_l, args.box_w, args.box_h)
@@ -561,14 +563,51 @@ def main():
     print(f"  {len(orients)} orientations ({time.time()-t0:.1f}s)")
     for o in orients[:6]: print(f"    {o['name']:>16s}  size={o['size'].round(1)}  occ={o['n_occ']}cells")
 
-    print(f"\nPacking (GPU voxel)...")
+    # Create timestamped output directory
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    run_name = f"{ts}_gpu_voxel_cell{cell:.1f}"
+    if args.scan_vox != 1:
+        run_name += f"_scan{args.scan_vox}"
+    out_dir = Path(__file__).resolve().parent.parent / "output" / run_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_prefix = str(out_dir / "packed")
+
+    print(f"\nPacking (GPU voxel, cell={cell}mm)...")
     t0 = time.time()
     placed_meshes = pack(orients, box_dims, cell, scan_step_vox=args.scan_vox, verbose=True)
+    elapsed = time.time() - t0
+
     print(f"\nVerifying...")
     ok = verify(placed_meshes)
     print(f"\nVisualizing...")
-    visualize(placed_meshes, box_dims, args.output)
-    print(f"\nTotal: {time.time()-t0:.0f}s, {len(placed_meshes)} pieces, {'PASS' if ok else 'FAIL'}")
+    visualize(placed_meshes, box_dims, out_prefix)
+    print(f"\nTotal: {elapsed:.0f}s, {len(placed_meshes)} pieces, {'PASS' if ok else 'FAIL'}")
+
+    if args.export_stl:
+        merged = trimesh.util.concatenate(placed_meshes)
+        stl_path = str(out_dir / "merged.stl")
+        merged.export(stl_path)
+        print(f"[STL] {stl_path} ({len(merged.vertices):,} verts, {len(merged.faces):,} faces)")
+
+    # Write run info
+    box_dims_local = box_dims
+    info = [
+        f"Run: {run_name}",
+        f"Date: {datetime.now().isoformat()}",
+        f"STL: {args.stl}",
+        f"Box: {box_dims_local[0]}x{box_dims_local[1]}x{box_dims_local[2]}mm",
+        f"Method: GPU voxel",
+        f"Cell size: {cell}mm",
+        f"Scan vox step: {args.scan_vox}",
+        f"Yaw: {args.yaw}, Roll: {args.roll}, Pitch: {args.pitch}",
+        f"Orientations: {len(orients)}",
+        f"",
+        f"Result: {len(placed_meshes)} pieces",
+        f"Fill: {sum(m.volume for m in placed_meshes)/(box_dims_local[0]*box_dims_local[1]*box_dims_local[2])*100:.1f}%",
+        f"Time: {elapsed:.0f}s",
+    ]
+    (out_dir / "info.txt").write_text("\n".join(info))
+    print(f"[Info] {out_dir}/info.txt")
 
 if __name__ == "__main__":
     main()

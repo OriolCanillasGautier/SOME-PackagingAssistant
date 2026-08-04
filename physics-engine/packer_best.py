@@ -1035,7 +1035,9 @@ def main():
     out_prefix = str(out_dir / "packed")
 
     print(f"\nPacking ({args.method})...")
+    t_start = time.time()
     placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width, hierarchical=args.hierarchical)
+    elapsed = time.time() - t_start
 
     if meshes:
         print("\nVerifying...")
@@ -1048,8 +1050,26 @@ def main():
             merged.export(stl_path)
             print(f"[STL] {stl_path} ({len(merged.vertices):,} verts, {len(merged.faces):,} faces)")
 
-        print(f"[Output] {out_dir}")
-
-
+        # Write run info
+        info = [
+            f"Run: {run_name}",
+            f"Date: {datetime.now().isoformat()}",
+            f"STL: {args.stl}",
+            f"Box: {args.box_l}x{args.box_w}x{args.box_h}mm",
+            f"Method: {args.method}",
+            f"Scan step: {args.scan}mm, Y-res: {args.yres}mm",
+            f"Yaw: {args.yaw}, Shrink: {args.shrink}",
+            f"Beam width: {args.beam_width}",
+            f"Hierarchical: {args.hierarchical}",
+            f"  Coarse step: {args.coarse_step}, Fine step: {args.fine_step}",
+            f"  Top: {args.coarse_top}, Per orient: {args.coarse_per_orientation}, Min dist: {args.coarse_min_distance}",
+            f"Compact: {args.compact}",
+            f"Seed: {args.seed}",
+            f"",
+            f"Result: {len(placed)} pieces, {sum(m.volume for m in meshes)/(box_dims[0]*box_dims[1]*box_dims[2])*100:.1f}% fill",
+            f"Time: {elapsed:.0f}s",
+        ]
+        (out_dir / "info.txt").write_text("\n".join(info))
+        print(f"[Info] {out_dir}/info.txt")
 if __name__ == "__main__":
     main()
