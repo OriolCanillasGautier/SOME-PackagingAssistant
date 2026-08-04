@@ -65,4 +65,4 @@ obj/
 *.sln.docstates
 project.assets.json
 project.nuget.cache
-*.cache
+*.cacheoutput/

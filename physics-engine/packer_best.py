@@ -13,6 +13,7 @@ Usage:
 import sys, time, math, argparse, heapq, random
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime
 import numpy as np
 
 import numba.cuda.cudadrv.driver as _ptx_drv
@@ -971,6 +972,7 @@ def main():
     p.add_argument("--coarse-per-orientation", type=int, default=8, help="Max candidates per orientation")
     p.add_argument("--coarse-min-distance", type=float, default=15.0, help="Min XZ distance between kept candidates (mm)")
     p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+    p.add_argument("--export-stl", action="store_true", help="Export merged STL of all placed pieces")
     p.add_argument("--output", type=str, default="packed_best.png")
     args = p.parse_args()
 
@@ -1011,6 +1013,19 @@ def main():
     packer.coarse_per_orientation = args.coarse_per_orientation
     packer.coarse_min_distance = args.coarse_min_distance
 
+    # Create timestamped output directory
+    ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    run_name = f"{ts}_{args.method}"
+    if args.hierarchical:
+        run_name += f"_hier{args.coarse_step:.0f}-{args.fine_step:.0f}"
+    if args.beam_width != 5:
+        run_name += f"_beam{args.beam_width}"
+    if args.compact:
+        run_name += "_compact"
+    out_dir = Path(__file__).resolve().parent.parent / "output" / run_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_prefix = str(out_dir / "packed")
+
     print(f"\nPacking ({args.method})...")
     placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width, hierarchical=args.hierarchical)
 
@@ -1018,7 +1033,14 @@ def main():
         print("\nVerifying...")
         verify(meshes)
         print("\nVisualizing...")
-        visualize(meshes, box_dims, args.output.replace('.png', ''))
+        visualize(meshes, box_dims, out_prefix)
+        if args.export_stl or args.output.endswith('.stl'):
+            merged = trimesh.util.concatenate(meshes)
+            stl_path = str(out_dir / "merged.stl")
+            merged.export(stl_path)
+            print(f"[STL] {stl_path}")
+
+        print(f"[Output] {out_dir}")
 
 
 if __name__ == "__main__":
