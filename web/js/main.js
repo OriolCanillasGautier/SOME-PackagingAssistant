@@ -190,6 +190,15 @@ const uiTranslations = {
         modeFastDesc: 'Graella regular amb densitat màxima',
         modeBulk: 'Mode a Granel',
         modeBulkDesc: 'Simulació amb gravetat',
+        modeGPU: 'GPU Voxel',
+        modeGPUDesc: 'Servidor CUDA — màxima precisió',
+        modeGPURequiresSTL: 'El mode GPU requereix un fitxer STL',
+        modeGPUSubmitting: 'Enviant al servidor GPU...',
+        modeGPUPacking: 'Processant al servidor...',
+        modeGPUError: 'Error del servidor',
+        modeGPUPlacements: 'col·locacions individuals',
+        modeGPUStlUrl: 'Descarregar STL',
+        fillPct: 'd\'ocupació',
         objectTitle: "Dimensions de l'Objecte",
         objLength: 'Llargada (mm)',
         objWidth: 'Amplada (mm)',
@@ -238,6 +247,15 @@ const uiTranslations = {
         modeFastDesc: 'Regular grid with max density',
         modeBulk: 'Bulk Mode',
         modeBulkDesc: 'Gravity simulation',
+        modeGPU: 'GPU Voxel',
+        modeGPUDesc: 'CUDA server — maximum precision',
+        modeGPURequiresSTL: 'GPU mode requires an STL file',
+        modeGPUSubmitting: 'Sending to GPU server...',
+        modeGPUPacking: 'Processing on server...',
+        modeGPUError: 'Server error',
+        modeGPUPlacements: 'individual placements',
+        modeGPUStlUrl: 'Download STL',
+        fillPct: 'fill',
         objectTitle: 'Object Dimensions',
         objLength: 'Length (mm)',
         objWidth: 'Width (mm)',
@@ -897,28 +915,36 @@ function setupEventListeners() {
 function switchMode(mode) {
     state.mode = mode;
     
-    // Update button states
     elements.modeButtons.forEach(btn => {
         btn.classList.toggle('active', btn.dataset.mode === mode);
     });
     
-    // Show/hide mode-specific elements
     const isBulk = mode === 'bulk';
+    const isGPU = mode === 'gpu';
     
     elements.bulkOptions.style.display = isBulk ? 'block' : 'none';
-    elements.calculateBtn.style.display = isBulk ? 'none' : 'block';
+    elements.calculateBtn.style.display = (isBulk || isGPU) ? 'none' : 'block';
     elements.startSimBtn.style.display = isBulk ? 'block' : 'none';
+    
+    // GPU mode: show calculate button
+    if (isGPU) {
+        elements.calculateBtn.style.display = 'block';
+        elements.calculateBtn.textContent = mainText('calculate');
+    }
+    
     if (elements.applyGravityBtn) {
         elements.applyGravityBtn.style.display = 'none';
     }
     
-    // Reset button is now redundant as Start handles reset, but we can keep it hidden
     elements.stopSimBtn.style.display = 'none';
-    elements.resetSimBtn.style.display = 'none'; // User requested to remove it
+    elements.resetSimBtn.style.display = 'none';
     
-    // Reset results
     if (isBulk) {
         elements.results.innerHTML = `<p class="placeholder-text">${mainText('bulkPlaceholder')}</p>`;
+        state.sceneManager.clearPieces();
+    }
+    if (isGPU) {
+        elements.results.innerHTML = `<p class="placeholder-text">${mainText('gpuPlaceholder')}</p>`;
         state.sceneManager.clearPieces();
     }
 }
@@ -1424,6 +1450,89 @@ function buildOrientationOverrides(geometry, allowRotation) {
 }
 
 /**
+ * GPU Voxel Packer — submits STL to the backend server at port 8787,
+ * polls for completion, and loads the merged STL result.
+ */
+async function handleGPUCalculate(calcStartTime) {
+    if (!state.stlGeometry) {
+        elements.results.innerHTML = `<p class="error-text">${mainText('modeGPURequiresSTL')}</p>`;
+        return;
+    }
+
+    const values = getInputValues();
+    setCalcProgress(true, 5, mainText('modeGPUSubmitting'), calcStartTime);
+    await nextFrame();
+
+    try {
+        const stlBlob = state.stlFile
+            || await new Promise((resolve, reject) => {
+                try {
+                    const buf = new THREE.STLExporter().parse(state.stlGeometry);
+                    resolve(new Blob([buf], { type: 'application/octet-stream' }));
+                } catch (e) { reject(e); }
+            });
+
+        const formData = new FormData();
+        formData.append('stl', stlBlob, state.stlFileName || 'piece.stl');
+        formData.append('box_l', values.boxL);
+        formData.append('box_w', values.boxW);
+        formData.append('box_h', values.boxH);
+        formData.append('cell', '1.0');
+
+        const resp = await fetch('http://127.0.0.1:8787/api/pack', {
+            method: 'POST',
+            body: formData,
+            signal: AbortSignal.timeout(10000)
+        });
+        if (!resp.ok) throw new Error(`Servidor: ${resp.status}`);
+        const { job_id } = await resp.json();
+
+        let job;
+        do {
+            setCalcProgress(true, 10, mainText('modeGPUPacking'), calcStartTime);
+            await new Promise(r => setTimeout(r, 2000));
+            const r = await fetch(`http://127.0.0.1:8787/api/pack/${job_id}`);
+            job = await r.json();
+        } while (job.status === 'queued' || job.status === 'running');
+
+        if (job.status === 'error') {
+            throw new Error(job.error || mainText('modeGPUError'));
+        }
+
+        setCalcProgress(true, 85, 'Carregant resultats...', calcStartTime);
+        await nextFrame();
+
+        // Download and display merged STL
+        const stlResp = await fetch(`http://127.0.0.1:8787/api/pack/${job_id}/stl`);
+        const stlBuf = await stlResp.arrayBuffer();
+        const mergedGeom = await loadSTLGeometry(new Uint8Array(stlBuf));
+        if (!mergedGeom) throw new Error('No s\'ha pogut carregar el STL');
+
+        state.sceneManager.clearPieces();
+        mergedGeom.computeVertexNormals();
+        const piece = state.sceneManager.addSinglePieceMesh(mergedGeom, 0x3b82f6);
+        if (piece) {
+            piece.position.set(0, 0, 0);
+            state.sceneManager.fitCameraToBox();
+        }
+
+        const stlUrl = `http://127.0.0.1:8787/api/pack/${job_id}/stl`;
+        elements.results.innerHTML = `
+            <p class="calc-result"><strong>${job.pieces}</strong> ${mainText('pieces')}</p>
+            <p class="fill-result">${job.fill_pct}% ${mainText('fillPct')}</p>
+            <p class="time-result">${job.time_s}s</p>
+            <p class="meta-result"><a href="${stlUrl}" target="_blank">${mainText('modeGPUStlUrl')}</a></p>
+        `;
+
+        setCalcProgress(false, 0, '', 0);
+    } catch (err) {
+        console.error('[GPU]', err);
+        elements.results.innerHTML = `<p class="error-text">${mainText('modeGPUError')}: ${err.message}</p>`;
+        setCalcProgress(false, 0, '', 0);
+    }
+}
+
+/**
  * Handle calculate button click (optimized mode)
  */
 async function handleCalculate() {
@@ -1434,6 +1543,13 @@ async function handleCalculate() {
     const abortSignal = state.calcAbortController.signal;
 
     const calcStartTime = performance.now();
+
+    // ── GPU Voxel Mode ──
+    if (state.mode === 'gpu') {
+        await handleGPUCalculate(calcStartTime);
+        return;
+    }
+
     console.time('[PackAssist] Càlcul total');
     setCalcProgress(true, 1, 'Iniciant càlcul...', calcStartTime);
     await nextFrame();
@@ -2403,6 +2519,9 @@ async function applyLanguage() {
         } else if (mode === 'bulk') {
             btn.childNodes[0].textContent = t.modeBulk + '\n';
             if (desc) desc.textContent = t.modeBulkDesc;
+        } else if (mode === 'gpu') {
+            btn.childNodes[0].textContent = t.modeGPU + '\n';
+            if (desc) desc.textContent = t.modeGPUDesc;
         }
     });
     
