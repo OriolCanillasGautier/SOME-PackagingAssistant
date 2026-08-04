@@ -876,7 +876,7 @@ def visualize(placed_meshes, box_dims, output_prefix="packed"):
     plt.close()
     print(f"[Viz] {f2d}")
 
-    # ── 2. 3D wireframe view ──
+    # ── 2. 3D view with mesh faces ──
     fig = plt.figure(figsize=(14, 10))
     ax = fig.add_subplot(111, projection='3d')
     ax.set_title(f"3D View — {n} pieces", fontsize=14, fontweight='bold')
@@ -889,13 +889,21 @@ def visualize(placed_meshes, box_dims, output_prefix="packed"):
     for e in edges:
         ax.plot3D(*zip(corners[e[0]], corners[e[1]]), color='gray', alpha=0.5, lw=0.5)
 
-    # Plot each piece as a scatter of its vertices
+    # Render each piece as semi-transparent mesh faces (downsampled for performance)
     for i, m in enumerate(placed_meshes):
-        v = m.vertices
-        if len(v) > 200:
-            idx = np.random.choice(len(v), 200, replace=False)
-            v = v[idx]
-        ax.scatter(v[:, 0], v[:, 1], v[:, 2], s=1, color=colors[i % 20], alpha=0.5)
+        color_rgba = list(colors[i % 20][:3]) + [0.25]
+        if m.faces is not None and len(m.faces) > 0:
+            face_idx = np.arange(len(m.faces))
+            if len(face_idx) > 500:
+                face_idx = np.random.choice(face_idx, 500, replace=False)
+            polys = Poly3DCollection(m.vertices[m.faces[face_idx]], alpha=0.2,
+                                     facecolor=colors[i % 20], edgecolor='none', linewidth=0)
+            ax.add_collection3d(polys)
+        else:
+            v = m.vertices
+            if len(v) > 200:
+                v = v[np.random.choice(len(v), 200, replace=False)]
+            ax.scatter(v[:, 0], v[:, 1], v[:, 2], s=1, color=colors[i % 20], alpha=0.5)
 
     ax.set_xlabel('X mm'); ax.set_ylabel('Y mm'); ax.set_zlabel('Z mm')
     ax.set_xlim(0, box_l); ax.set_ylim(0, box_h); ax.set_zlim(0, box_w)
@@ -1038,7 +1046,7 @@ def main():
             merged = trimesh.util.concatenate(meshes)
             stl_path = str(out_dir / "merged.stl")
             merged.export(stl_path)
-            print(f"[STL] {stl_path}")
+            print(f"[STL] {stl_path} ({len(merged.vertices):,} verts, {len(merged.faces):,} faces)")
 
         print(f"[Output] {out_dir}")
 
