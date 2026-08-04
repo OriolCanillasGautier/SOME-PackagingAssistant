@@ -743,20 +743,20 @@ function ensureMeshServer() {
         .then(r => r.json())
         .then(data => {
             if (data?.status === 'ok') {
-                console.log('[mesh_server] Already running', data.pymeshlab ? '(PyMeshLab ✓)' : '(no PyMeshLab)');
+                const extras = [];
+                if (data.pymeshlab) extras.push('PyMeshLab ✓');
+                if (data.cuda) extras.push('CUDA ✓');
+                console.log('[server.py] Running on :8787', extras.length ? `(${extras.join(', ')})` : '');
             }
         })
         .catch(() => {
-            // Not running — try to start via PHP
-            console.log('[mesh_server] Not running, trying auto-start via PHP...');
-            fetch('api/start-server.php', { signal: AbortSignal.timeout(10000) })
-                .then(r => r.json())
-                .then(data => {
-                    console.log('[mesh_server]', data.status, data.message);
-                })
-                .catch(err => {
-                    console.log('[mesh_server] Auto-start not available (no PHP?):', err.message);
-                });
+            console.warn('[server.py] Not running. GPU Voxel + Simplify need it.');
+            console.info('[server.py] Start manually:   python3 server.py --port 8787');
+            // Try PHP auto-start as fallback (XAMPP only)
+            fetch('api/start-server.php', { signal: AbortSignal.timeout(4000) })
+                .then(r => r.ok ? r.json() : Promise.reject('PHP not running'))
+                .then(data => console.log('[server.py] Auto-start:', data.status))
+                .catch(() => {});
         });
 }
 
