@@ -738,7 +738,7 @@ async function init() {
  * Non-blocking — fires and forgets.
  */
 function ensureMeshServer() {
-    const healthUrl = '/api/health';
+    const healthUrl = 'http://127.0.0.1:8787/api/health';
     fetch(healthUrl, { signal: AbortSignal.timeout(2000) })
         .then(r => r.json())
         .then(data => {
@@ -1473,7 +1473,7 @@ async function handleGPUCalculate(calcStartTime) {
         formData.append('box_h', values.boxH);
         formData.append('cell', '1.0');
 
-        const resp = await fetch('/api/pack', {
+        const resp = await fetch('http://127.0.0.1:8787/api/pack', {
             method: 'POST',
             body: formData,
             signal: AbortSignal.timeout(10000)
@@ -1485,7 +1485,7 @@ async function handleGPUCalculate(calcStartTime) {
         do {
             setCalcProgress(true, 10, mainText('modeGPUPacking'), calcStartTime);
             await new Promise(r => setTimeout(r, 2000));
-            const r = await fetch(`/api/pack/${job_id}`);
+            const r = await fetch(`http://127.0.0.1:8787/api/pack/${job_id}`);
             job = await r.json();
         } while (job.status === 'queued' || job.status === 'running');
 
@@ -1497,7 +1497,7 @@ async function handleGPUCalculate(calcStartTime) {
         await nextFrame();
 
         // Download and display merged STL
-        const stlResp = await fetch(`/api/pack/${job_id}/stl`);
+        const stlResp = await fetch(`http://127.0.0.1:8787/api/pack/${job_id}/stl`);
         const stlBuf = await stlResp.arrayBuffer();
         const mergedGeom = await loadSTL(new Uint8Array(stlBuf));
         if (!mergedGeom) throw new Error('No s\'ha pogut carregar el STL');

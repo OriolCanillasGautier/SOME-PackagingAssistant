@@ -47,6 +47,14 @@ app = Flask(__name__, static_folder=str(Path(__file__).parent / "web"), static_u
 RESULT_DIR = Path(__file__).parent / "output" / "_api_results"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
 
+# CORS — allow frontend from any origin to call the API
+@app.after_request
+def add_cors(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "*"
+    return response
+
 # Serve the web frontend at /
 @app.route("/")
 def index():
