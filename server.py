@@ -43,9 +43,14 @@ except Exception as e:
 import trimesh
 import numpy as np
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder=str(Path(__file__).parent / "web"), static_url_path="")
 RESULT_DIR = Path(__file__).parent / "output" / "_api_results"
 RESULT_DIR.mkdir(parents=True, exist_ok=True)
+
+# Serve the web frontend at /
+@app.route("/")
+def index():
+    return send_from_directory(app.static_folder, "index.html")
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
