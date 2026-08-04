@@ -124,7 +124,8 @@ def generate_orientations(mesh, cell_size, n_yaw, n_roll, n_pitch, box_dims):
                 for p in sparse:
                     if p[1] + 1 > hm[p[0], p[2]]: hm[p[0], p[2]] = p[1] + 1
                 results.append({'mesh': t, 'size': sz, 'name': f"Y{yaw:.0f}R{roll:.0f}P{pitch:.0f}",
-                               'sparse': sparse, 'n_occ': n_occ, 'hm': hm, 'shape': occ.shape})
+                               'sparse': sparse, 'n_occ': n_occ, 'hm': hm, 'shape': occ.shape,
+                               'rotation': rot})
     results.sort(key=lambda o: (o['size'][1], o['n_occ']))
     return results
 
@@ -353,7 +354,7 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
         fill = box_occ.sum() * cell_size**3 / (box_l * box_w * box_h) * 100
         print(f"\n[VoxelGPU] DONE: {len(placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s")
         print(f"[VoxelGPU] Usage: {dict(sorted(usage.items()))}")
-    return placed_meshes
+    return placed_meshes, placed
 
 
 # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -574,7 +575,7 @@ def main():
 
     print(f"\nPacking (GPU voxel, cell={cell}mm)...")
     t0 = time.time()
-    placed_meshes = pack(orients, box_dims, cell, scan_step_vox=args.scan_vox, verbose=True)
+    placed_meshes, placed = pack(orients, box_dims, cell, scan_step_vox=args.scan_vox, verbose=True)
     elapsed = time.time() - t0
 
     print(f"\nVerifying...")

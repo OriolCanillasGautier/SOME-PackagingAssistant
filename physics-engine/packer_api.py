@@ -78,7 +78,7 @@ def run_packing_job(job_id: str, stl_data: bytes, box_dims: tuple, params: dict)
                 job.pieces = count
                 job.fill_pct = fill
             
-            placed_meshes = pack(orients, box_dims, cell, scan_step_vox=scan_vox, verbose=False)
+            placed_meshes, placed = pack(orients, box_dims, cell, scan_step_vox=scan_vox, verbose=False)
             
             elapsed = time.time() - t0
             
@@ -118,6 +118,22 @@ def run_packing_job(job_id: str, stl_data: bytes, box_dims: tuple, params: dict)
             job.time_s = elapsed
             job.stl_path = str(stl_out) if placed_meshes else ""
             job.png_path = str(png_out) if placed_meshes else ""
+            
+            # Build placements array with orientation transforms
+            job.placements = []
+            for (x, y, z, oi, name), _ in zip(placed, placed_meshes):
+                od = orients[oi]
+                rot = np.eye(4)
+                if 'rotation' in od:
+                    rot[:3, :3] = od['rotation']
+                job.placements.append({
+                    "x": round(float(x), 3),
+                    "y": round(float(y), 3),
+                    "z": round(float(z), 3),
+                    "orientation": oi,
+                    "name": name,
+                    "rotation": rot[:3, :3].tolist(),
+                })
             
     except Exception as e:
         job.status = "error"
@@ -206,6 +222,7 @@ def get_pack_status(job_id):
     if job.status == "done":
         result["stl_url"] = f"/api/pack/{job_id}/stl"
         result["png_url"] = f"/api/pack/{job_id}/png"
+        result["placements"] = job.placements
     elif job.status == "error":
         result["error"] = job.error_msg
     
