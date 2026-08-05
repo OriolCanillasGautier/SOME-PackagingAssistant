@@ -1499,7 +1499,7 @@ async function handleGPUCalculate(calcStartTime) {
         // Download and display merged STL
         const stlResp = await fetch(`/api/pack/${job_id}/stl`);
         const stlBuf = await stlResp.arrayBuffer();
-        const mergedGeom = await loadSTL(new Uint8Array(stlBuf));
+        const mergedGeom = await loadSTL(stlBuf);
         if (!mergedGeom) throw new Error('No s\'ha pogut carregar el STL');
 
         state.sceneManager.clearPieces();
