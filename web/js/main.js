@@ -1503,6 +1503,7 @@ async function handleGPUCalculate(calcStartTime) {
         if (!mergedGeom) throw new Error('No s\'ha pogut carregar el STL');
 
         state.sceneManager.clearPieces();
+        state.sceneManager.createBox(values.boxL, values.boxW, values.boxH);
         mergedGeom.computeVertexNormals();
         state.sceneManager.addSTLPiece(mergedGeom, new THREE.Vector3(0, 0, 0));
 
