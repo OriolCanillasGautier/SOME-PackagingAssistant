@@ -253,7 +253,7 @@ def submit_pack():
     box_h = float(request.form.get("box_h", 150))
 
     params = {
-        "cell": float(request.form.get("cell", 1.0)),
+        "cell": float(request.form.get("cell", 0.5)),
         "yaw": int(request.form.get("yaw", 8)),
         "roll": int(request.form.get("roll", 4)),
         "pitch": int(request.form.get("pitch", 4)),

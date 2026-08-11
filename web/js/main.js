@@ -1471,7 +1471,7 @@ async function handleGPUCalculate(calcStartTime) {
         formData.append('box_l', values.boxL);
         formData.append('box_w', values.boxW);
         formData.append('box_h', values.boxH);
-        formData.append('cell', '1.0');
+        formData.append('cell', '0.5');
 
         const resp = await fetch('/api/pack', {
             method: 'POST',
