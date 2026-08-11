@@ -1638,7 +1638,7 @@ export class SceneManager {
 
         while (placed < effectiveMaxTry) {
             if (abortSignal?.aborted) throw abortError();
-            await maybeYield();
+            if ((placed & 3) === 0) await maybeYield();
 
             let bestScore = Infinity;
             let bestOi = -1, bestGX = -1, bestGZ = -1, bestBaseH = Infinity;
@@ -1661,9 +1661,10 @@ export class SceneManager {
                 for (let gzf = 0; gzf <= gridNZ - pieceNZ; gzf += subStep) {
                     const gz = Math.max(0, Math.min(gridNZ - pieceNZ, Math.floor(gzf)));
                     for (let gxf = 0; gxf <= gridNX - pieceNX; gxf += subStep) {
-                        if ((++p2YieldCounter & 511) === 0) {
+                        if ((++p2YieldCounter & 127) === 0) {
                             await maybeYield();
                             if (onProgress) onProgress({ placed, maxTry: effectiveMaxTry });
+                            if (abortSignal?.aborted) throw abortError();
                         }
 
                         const gx = Math.max(0, Math.min(gridNX - pieceNX, Math.floor(gxf)));

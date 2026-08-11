@@ -1476,3 +1476,91 @@ body {
     padding: 12px;
     font-style: italic;
 }
+
+/* GPU Comparison Table */
+.gpu-comparison {
+    margin-top: 16px;
+    padding: 12px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius);
+    font-size: 0.85rem;
+}
+
+.gpu-comparison summary {
+    cursor: pointer;
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: var(--text-primary);
+}
+
+.comparison-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+
+.comparison-table th {
+    background: var(--bg-secondary);
+    padding: 6px 8px;
+    text-align: left;
+    font-weight: 600;
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+.comparison-table td {
+    padding: 5px 8px;
+    border-bottom: 1px solid var(--border-light);
+    white-space: nowrap;
+}
+
+.comparison-table tr.current-run {
+    background: rgba(59, 130, 246, 0.1);
+}
+
+.comparison-table tr.current-run td {
+    font-weight: 500;
+}
+
+/* GPU Options */
+#gpu-options {
+    padding: 12px 16px;
+    margin: 0 0 12px 0;
+}
+
+#gpu-options label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 6px;
+    font-size: 0.85rem;
+}
+
+#gpu-options select {
+    width: 100%;
+    padding: 8px 12px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+}
+
+/* Re-optimize button */
+.reoptimize-btn {
+    margin-top: 12px;
+    padding: 8px 20px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.2s;
+    width: 100%;
+}
+
+.reoptimize-btn:hover {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+}

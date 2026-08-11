@@ -198,6 +198,8 @@ const uiTranslations = {
         modeGPUError: 'Error del servidor',
         modeGPUPlacements: 'col·locacions individuals',
         modeGPUStlUrl: 'Descarregar STL',
+        reoptimize: 'Re-optimitzar',
+        gpuComparison: 'Comparació de resultats',
         fillPct: 'd\'ocupació',
         objectTitle: "Dimensions de l'Objecte",
         objLength: 'Llargada (mm)',
@@ -255,6 +257,8 @@ const uiTranslations = {
         modeGPUError: 'Server error',
         modeGPUPlacements: 'individual placements',
         modeGPUStlUrl: 'Download STL',
+        reoptimize: 'Re-optimize',
+        gpuComparison: 'Results comparison',
         fillPct: 'fill',
         objectTitle: 'Object Dimensions',
         objLength: 'Length (mm)',
@@ -1446,9 +1450,12 @@ function buildOrientationOverrides(geometry, allowRotation) {
 }
 
 /**
- * GPU Voxel Packer — submits STL to the backend server at port 8787,
- * polls for completion, and loads the merged STL result.
+ * GPU Voxel Packer — submits STL to the backend server,
+ * polls with live progress, stores results for comparison.
  */
+let gpuHistory = [];
+const MAX_GPU_HISTORY = 10;
+
 async function handleGPUCalculate(calcStartTime) {
     if (!state.stlGeometry) {
         elements.results.innerHTML = `<p class="error-text">${mainText('modeGPURequiresSTL')}</p>`;
@@ -1456,6 +1463,7 @@ async function handleGPUCalculate(calcStartTime) {
     }
 
     const values = getInputValues();
+    const cellSize = document.getElementById('gpu-cell-size')?.value || '0.5';
     setCalcProgress(true, 5, mainText('modeGPUSubmitting'), calcStartTime);
     await nextFrame();
 
@@ -1466,7 +1474,6 @@ async function handleGPUCalculate(calcStartTime) {
         formData.append('stl', stlBlob, state.stlFileName || 'piece.stl');
         formData.append('box_l', values.boxL);
         formData.append('box_w', values.boxW);
-        const cellSize = document.getElementById('gpu-cell-size')?.value || '0.5';
         formData.append('box_h', values.boxH);
         formData.append('cell', cellSize);
 
@@ -1478,19 +1485,29 @@ async function handleGPUCalculate(calcStartTime) {
         if (!resp.ok) throw new Error(`Servidor: ${resp.status}`);
         const { job_id } = await resp.json();
 
-        let job;
+        // Poll with live progress
+        let job, pollCount = 0;
         do {
-            setCalcProgress(true, 10, mainText('modeGPUPacking'), calcStartTime);
-            await new Promise(r => setTimeout(r, 2000));
             const r = await fetch(`/api/pack/${job_id}`);
             job = await r.json();
+            pollCount++;
+
+            if (job.status === 'running' || job.status === 'queued') {
+                const progressText = job.pieces > 0
+                    ? `${mainText('modeGPUPacking')} — ${job.pieces} ${mainText('pieces')}`
+                    : mainText('modeGPUPacking');
+                setCalcProgress(true, 10 + Math.min(pollCount * 5, 60), progressText, calcStartTime);
+            }
+            if (job.status !== 'done') {
+                await new Promise(r => setTimeout(r, 2000));
+            }
         } while (job.status === 'queued' || job.status === 'running');
 
         if (job.status === 'error') {
             throw new Error(job.error || mainText('modeGPUError'));
         }
 
-        setCalcProgress(true, 85, 'Carregant resultats...', calcStartTime);
+        setCalcProgress(true, 80, 'Carregant resultats...', calcStartTime);
         await nextFrame();
 
         // Download and display merged STL
@@ -1504,15 +1521,66 @@ async function handleGPUCalculate(calcStartTime) {
         mergedGeom.computeVertexNormals();
         state.sceneManager.addSTLPiece(mergedGeom, new THREE.Vector3(0, 0, 0));
 
+        // Store in history for comparison
+        const run = {
+            id: Date.now(),
+            cellSize: parseFloat(cellSize),
+            pieces: job.pieces,
+            fillPct: job.fill_pct,
+            timeS: job.time_s,
+            boxL: values.boxL,
+            boxW: values.boxW,
+            boxH: values.boxH,
+            stlUrl: `/api/pack/${job_id}/stl`,
+            timestamp: new Date().toLocaleTimeString(),
+        };
+        gpuHistory.unshift(run);
+        if (gpuHistory.length > MAX_GPU_HISTORY) gpuHistory.pop();
+
+        // Render results + comparison table
         const stlUrl = `/api/pack/${job_id}/stl`;
+        let comparisonHtml = '';
+        if (gpuHistory.length > 1) {
+            const rows = gpuHistory.map(r => {
+                const isCurrent = r.id === run.id;
+                const best = gpuHistory.reduce((a, b) => b.pieces > a.pieces ? b : a, gpuHistory[0]);
+                const marker = r.pieces === best.pieces && r.id === best.id ? ' 🏆' : '';
+                return `<tr${isCurrent ? ' class="current-run"' : ''}>
+                    <td>${r.timestamp}</td>
+                    <td>${r.cellSize}mm</td>
+                    <td><strong>${r.pieces}${marker}</strong></td>
+                    <td>${r.fillPct}%</td>
+                    <td>${r.timeS}s</td>
+                    <td>${r.boxL}×${r.boxW}×${r.boxH}</td>
+                </tr>`;
+            }).join('');
+            comparisonHtml = `
+                <details open class="gpu-comparison">
+                    <summary>📊 ${mainText('gpuComparison') || 'Comparació de resultats'}</summary>
+                    <table class="comparison-table">
+                        <tr><th>Hora</th><th>Cel·la</th><th>Peces</th><th>Fill</th><th>Temps</th><th>Caixa</th></tr>
+                        ${rows}
+                    </table>
+                </details>`;
+        }
+
         elements.results.innerHTML = `
             <p class="calc-result"><strong>${job.pieces}</strong> ${mainText('pieces')}</p>
             <p class="fill-result">${job.fill_pct}% ${mainText('fillPct')}</p>
-            <p class="time-result">${job.time_s}s</p>
+            <p class="time-result">${job.time_s}s — ${cellSize}mm</p>
             <p class="meta-result"><a href="${stlUrl}" target="_blank">${mainText('modeGPUStlUrl')}</a></p>
+            <button class="reoptimize-btn" onclick="document.querySelector('#calculate-btn').click()">🔄 Re-optimize</button>
+            ${comparisonHtml}
         `;
 
         setCalcProgress(false, 0, '', 0);
+
+        // Clear comparison when switching modes
+        document.querySelectorAll('.mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (btn.dataset.mode !== 'gpu') gpuHistory = [];
+            }, { once: true });
+        });
     } catch (err) {
         console.error('[GPU]', err);
         elements.results.innerHTML = `<p class="error-text">${mainText('modeGPUError')}: ${err.message}</p>`;
@@ -1940,7 +2008,11 @@ async function handleCalculate() {
                 materialName: matName,
                 labels: getCalculatorLabels(),
             });
-            elements.results.innerHTML = finalSummary;
+            elements.results.innerHTML = finalSummary + `
+                <button class="reoptimize-btn" onclick="document.querySelector('#calculate-btn').click()">
+                    🔄 ${mainText('reoptimize') || 'Re-optimitzar'}
+                </button>
+            `;
             elements.results.classList.add('fade-in');
 
              state.lastResults = {
