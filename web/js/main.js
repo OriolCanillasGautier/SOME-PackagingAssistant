@@ -627,6 +627,7 @@ const elements = {
     
     // Bulk mode options
     bulkOptions: document.getElementById('bulk-options'),
+    gpuOptions: document.getElementById('gpu-options'),
     dropHeight: document.getElementById('drop-height'),
     dropHeightValue: document.getElementById('drop-height-value'),
     maxPieces: document.getElementById('max-pieces'),
@@ -923,22 +924,17 @@ function switchMode(mode) {
     const isGPU = mode === 'gpu';
     
     elements.bulkOptions.style.display = isBulk ? 'block' : 'none';
-    elements.calculateBtn.style.display = (isBulk || isGPU) ? 'none' : 'block';
+    elements.gpuOptions.style.display = isGPU ? 'block' : 'none';
+    elements.calculateBtn.style.display = isBulk ? 'none' : 'block';
     elements.startSimBtn.style.display = isBulk ? 'block' : 'none';
-    
-    // GPU mode: show calculate button
-    if (isGPU) {
-        elements.calculateBtn.style.display = 'block';
-        elements.calculateBtn.textContent = mainText('calculate');
-    }
-    
+
+    elements.stopSimBtn.style.display = 'none';
+    elements.resetSimBtn.style.display = 'none';
+
     if (elements.applyGravityBtn) {
         elements.applyGravityBtn.style.display = 'none';
     }
-    
-    elements.stopSimBtn.style.display = 'none';
-    elements.resetSimBtn.style.display = 'none';
-    
+
     if (isBulk) {
         elements.results.innerHTML = `<p class="placeholder-text">${mainText('bulkPlaceholder')}</p>`;
         state.sceneManager.clearPieces();
@@ -1470,8 +1466,9 @@ async function handleGPUCalculate(calcStartTime) {
         formData.append('stl', stlBlob, state.stlFileName || 'piece.stl');
         formData.append('box_l', values.boxL);
         formData.append('box_w', values.boxW);
+        const cellSize = document.getElementById('gpu-cell-size')?.value || '0.5';
         formData.append('box_h', values.boxH);
-        formData.append('cell', '0.5');
+        formData.append('cell', cellSize);
 
         const resp = await fetch('/api/pack', {
             method: 'POST',
