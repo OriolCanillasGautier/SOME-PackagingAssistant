@@ -399,6 +399,15 @@ def generate_orientations(mesh, n_yaw, box_dims, use_pitch_roll=True, shrink=0.4
 
 def meshes_collide(mesh_a, mesh_b, eps=0.01):
     try:
+        # Use trimesh CollisionManager for robust mesh-mesh intersection
+        if hasattr(trimesh, 'collision') and hasattr(trimesh.collision, 'CollisionManager'):
+            m = trimesh.collision.CollisionManager()
+            m.add_object('a', mesh_a)
+            m.add_object('b', mesh_b)
+            in_collision, _ = m.in_collision_internal(return_names=True, return_data=False)
+            if in_collision:
+                return True
+        # Fallback: vertex proximity check
         pts_a, _ = trimesh.proximity.closest_point(mesh_a, mesh_b.vertices)
         pts_b, _ = trimesh.proximity.closest_point(mesh_b, mesh_a.vertices)
         if len(pts_a) == 0 or len(pts_b) == 0: return False
