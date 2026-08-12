@@ -1004,14 +1004,13 @@ class BestPacker:
 
     # ── Sparrow: Separation + Compression ──
 
-    def pack_sparrow(self, max_pieces=500, n_workers=1, n_iterations=20, verbose=True):
-        """Batch global placement → AABB separation → FCL cleanup.
-        Uses fast AABB for the separation phase, then FCL for final cleanup.
+    def pack_sparrow(self, max_pieces=500, n_workers=1, n_iterations=50, verbose=True):
+        """Batch placement → collision resolution via vertex proximity → cleanup.
         Inspired by JonasTollenaere/sparrow-3d (LGPL-3.0)."""
         orient_list = list(range(len(self.orientations)))
         all_placed, all_meshes = [], []
         t0 = time.time()
-        batch_size = 60
+        batch_size = 70
 
         if verbose:
             print(f"[Sparrow] max={max_pieces}, batch={batch_size}, workers={n_workers}", flush=True)
@@ -1035,7 +1034,6 @@ class BestPacker:
                     cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
                     state_meshes.append(cm)
 
-                # AABB-based separation: move new items to non-overlapping positions
                 prev_count = len(all_placed)
                 for _ in range(n_iterations):
                     moved = 0
@@ -1044,55 +1042,46 @@ class BestPacker:
                         o = self.orientations[o_oi]
                         sx, sy, sz = o['size']
                         best_x, best_y, best_z = state[item_idx][:3]
-                        best_overlaps = float('inf')
+                        best_collisions = float('inf')
 
-                        for _ in range(15):
+                        for _ in range(25):
                             nx = random.uniform(0, self.box_l - sx)
                             ny = random.uniform(0, self.box_h - sy)
                             nz = random.uniform(0, self.box_w - sz)
-                            c_min_x, c_max_x = nx, nx + sx
-                            c_min_y, c_max_y = ny, ny + sy
-                            c_min_z, c_max_z = nz, nz + sz
-                            overlaps = 0
+                            cm = o['mesh'].copy(); cm.apply_translation([nx, ny, nz])
+                            collisions = 0
                             for j in range(len(state)):
                                 if j == item_idx: continue
-                                b2 = state_meshes[j].bounds
-                                if (c_max_x > b2[0,0] and c_min_x < b2[1,0] and
-                                    c_max_y > b2[0,1] and c_min_y < b2[1,1] and
-                                    c_max_z > b2[0,2] and c_min_z < b2[1,2]):
-                                    overlaps += 1
-                            if overlaps < best_overlaps:
-                                best_overlaps = overlaps
+                                b1, b2 = cm.bounds, state_meshes[j].bounds
+                                if not (b1[1,0] > b2[0,0] and b1[0,0] < b2[1,0] and
+                                        b1[1,1] > b2[0,1] and b1[0,1] < b2[1,1] and
+                                        b1[1,2] > b2[0,2] and b1[0,2] < b2[1,2]): continue
+                                if meshes_collide(cm, state_meshes[j]):
+                                    collisions += 1
+                                    if collisions >= best_collisions: break
+                            if collisions < best_collisions:
+                                best_collisions = collisions
                                 best_x, best_y, best_z = nx, ny, nz
-                                if overlaps == 0: break
-                        if best_overlaps == 0:
+                                if collisions == 0: break
+                        if best_collisions == 0:
                             moved += 1
                             state[item_idx] = (best_x, best_y, best_z, o_oi, o['name'])
                             nm = o['mesh'].copy(); nm.apply_translation([best_x, best_y, best_z])
                             state_meshes[item_idx] = nm
                     if moved == 0: break
 
-                # Quick cleanup: keep items whose AABB doesn't overlap with kept items
-                cleaned = list(all_placed)
-                cleaned_meshes = list(all_meshes)
-                for pi in range(prev_count, len(state)):
-                    pm = state_meshes[pi]
-                    a = pm.bounds
-                    overlaps = False
-                    for cm_item in cleaned_meshes:
-                        b = cm_item.bounds
-                        if not (a[1,0] > b[0,0] and a[0,0] < b[1,0] and
-                                a[1,1] > b[0,1] and a[0,1] < b[1,1] and
-                                a[1,2] > b[0,2] and a[0,2] < b[1,2]): continue
-                        overlaps = True; break
-                    if not overlaps:
-                        cleaned.append(state[pi])
-                        cleaned_meshes.append(pm)
+                # Filter: keep items inside box, discard out-of-bounds
+                inside, inside_meshes = [], []
+                for i, (x, y, z, oi, name) in enumerate(state):
+                    o = self.orientations[oi]
+                    if x >= 0 and y >= 0 and z >= 0 and x + o['size'][0] <= self.box_l and y + o['size'][1] <= self.box_h and z + o['size'][2] <= self.box_w:
+                        inside.append((x, y, z, oi, name))
+                        inside_meshes.append(state_meshes[i])
 
-                if len(cleaned) > best_count:
-                    best_count = len(cleaned)
-                    best_batch_placed = cleaned
-                    best_batch_meshes = cleaned_meshes
+                if len(inside) > best_count:
+                    best_count = len(inside)
+                    best_batch_placed = inside
+                    best_batch_meshes = inside_meshes
 
             if best_count <= len(all_placed):
                 break
