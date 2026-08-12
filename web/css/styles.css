@@ -777,6 +777,13 @@ details.box-section {
     font-style: italic;
 }
 
+.error-text {
+    color: var(--accent-red);
+    text-align: center;
+    padding: 20px;
+    font-weight: 600;
+}
+
 /* Results Markdown-like styling */
 .results-content h1,
 .results-content h2,
@@ -1714,7 +1721,7 @@ details.box-section {
 
 .collapsible-section .input-group,
 .collapsible-section .placement-options,
-.collapsible-section .box-section {
+.collapsible-section .box-presets {
     padding: 0 12px;
 }
 

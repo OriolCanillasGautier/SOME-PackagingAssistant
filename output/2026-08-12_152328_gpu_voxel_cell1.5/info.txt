@@ -1,0 +1,13 @@
+Run: 2026-08-12_152328_gpu_voxel_cell1.5
+Date: 2026-08-12T15:25:51.207675
+STL: stl/6683688_simp0.1pct.stl
+Box: 385.0x285.0x150.0mm
+Method: GPU voxel
+Cell size: 1.5mm
+Scan vox step: 1
+Yaw: 8, Roll: 4, Pitch: 4
+Orientations: 10
+
+Result: 273 pieces
+Fill: 9.9%
+Time: 138s

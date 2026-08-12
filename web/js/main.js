@@ -2174,17 +2174,14 @@ async function handleCalculate() {
     } catch (err) {
         if (err?.name === 'AbortError') {
             elements.results.innerHTML = `<p class="placeholder-text">${mainText('calcCancelled')}</p>`;
-            // Clean up scene on cancellation
             state.sceneManager?.clearPieces();
             if (elements.reportButtons) elements.reportButtons.style.display = 'none';
             if (elements.applyGravityBtn) elements.applyGravityBtn.style.display = 'none';
         } else {
             console.error(err);
+            elements.results.innerHTML = `<p class="error-text">Error: ${err.message}</p>`;
         }
         setCalcProgress(false, 0);
-        if (err?.name !== 'AbortError') {
-            throw err;
-        }
     } finally {
         state.calcAbortController = null;
     }
@@ -2871,7 +2868,7 @@ async function applyLanguage() {
  */
 async function openReportModal() {
     if (!state.lastResults) {
-        alert('No hi ha resultats per generar l\'informe. Executa una simulació primer.');
+        alert(mainText('reportNoResults'));
         return;
     }
     

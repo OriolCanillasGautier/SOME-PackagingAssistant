@@ -417,7 +417,9 @@ export class SceneManager {
         this.scene.background = new THREE.Color(0x1a1a2e);
 
         // Camera
-        const aspect = this.container.clientWidth / this.container.clientHeight;
+        const containerW = this.container.clientWidth || 1;
+        const containerH = this.container.clientHeight || 1;
+        const aspect = containerW / containerH;
         this.camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 10000);
         this.camera.position.set(400, 400, 400);
 

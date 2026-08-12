@@ -28,7 +28,7 @@
 <body>
     <h1>PackAssist Heightmap Benchmark</h1>
     <p class="subtitle">Tests packing density, orientation handling, and consistency across mesh simplifications</p>
-    <button id="runBtn" onclick="runBenchmark()">Run Benchmark</button>
+    <button id="runBtn">Run Benchmark</button>
     <div id="status">Ready. Click "Run Benchmark" to start.</div>
     <div id="results"></div>
 
@@ -331,6 +331,9 @@
     }
 
     window.runBenchmark = runBenchmark;
+
+    // Bind button click programmatically
+    document.getElementById('runBtn').addEventListener('click', runBenchmark);
 
     // Auto-run mode: append ?auto=1 to URL
     if (new URLSearchParams(window.location.search).has('auto')) {

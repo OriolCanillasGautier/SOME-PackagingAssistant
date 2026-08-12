@@ -18,7 +18,7 @@ Endpoints:
 import sys, os, io, time, uuid, json, threading, tempfile, traceback
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 
 # ——————————————————————————————————————————————————————————————————————
 # Dependency checks
@@ -195,7 +195,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
 
             # Build placement data with orientation transforms
             job["placements"] = []
-            orients_for_placements = packer.orientations if method == "sparrow" else orients
+            orients_for_placements = packer._sparrow_voxel_data if method == "sparrow" else orients
             for (x, y, z, oi, name), _ in zip(placed, placed_meshes):
                 od = orients_for_placements[oi]
                 rot = np.eye(4)

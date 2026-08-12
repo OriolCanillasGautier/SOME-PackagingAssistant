@@ -188,6 +188,69 @@ def _packer_kernel(
 
 
 # ═══════════════════════════════════════════════
+# GPU kernel: voxel occupancy collision (ported from packer_gpu_voxel.py)
+# ═══════════════════════════════════════════════
+
+@cuda.jit
+def _voxel_pack_kernel(
+    candidates,
+    all_sparse,
+    all_offsets,
+    all_hm,
+    all_hm_offsets,
+    all_shapes,
+    box_occ,
+    box_hm,
+    box_nx, box_ny, box_nz,
+    y_res,
+):
+    idx = cuda.grid(1)
+    if idx >= candidates.shape[0]:
+        return
+
+    x = int(candidates[idx, 0])
+    z = int(candidates[idx, 2])
+    ori = int(candidates[idx, 1])
+    if ori >= all_shapes.shape[0]:
+        return
+
+    sx, sy, sz = all_shapes[ori, 0], all_shapes[ori, 1], all_shapes[ori, 2]
+    if x + sx > box_nx or z + sz > box_nz or sy > box_ny:
+        return
+
+    off_start = all_offsets[ori]
+    off_end = all_offsets[ori + 1]
+
+    hm_off_start = all_hm_offsets[ori]
+    base_vox = 0
+    for i in range(off_start, off_end):
+        px = all_sparse[i, 0]
+        py = all_sparse[i, 1]
+        pz = all_sparse[i, 2]
+        h = box_hm[x + px, z + pz]
+        needed = h - py
+        if needed > base_vox:
+            base_vox = needed
+    if base_vox < 0:
+        base_vox = 0
+
+    max_y = box_ny - sy
+    for try_y in range(base_vox, max_y + 1):
+        collides = False
+        for ii in range(off_start, off_end):
+            px = all_sparse[ii, 0]
+            py = all_sparse[ii, 1]
+            pz = all_sparse[ii, 2]
+            if box_occ[x + px, try_y + py, z + pz]:
+                collides = True
+                break
+        if not collides:
+            candidates[idx, 3] = try_y * y_res
+            candidates[idx, 4] = 1.0
+            return
+
+
+# ═══════════════════════════════════════════════
 # Helpers
 # ═══════════════════════════════════════════════
 
@@ -501,6 +564,50 @@ def voxelize_mesh(mesh, cell_size):
     return sparse, bmin
 
 
+def generate_sparrow_voxel_orientations(mesh, cell_size, n_yaw=8, n_roll=4, n_pitch=4, box_dims=None):
+    results, seen = [], set()
+    for yaw in np.linspace(0, 360, n_yaw, endpoint=False):
+        for roll in np.linspace(0, 360, n_roll, endpoint=False):
+            for pitch in np.linspace(0, 360, n_pitch, endpoint=False):
+                rot = Rotation.from_euler('xyz', [roll, pitch, yaw], degrees=True).as_matrix()
+                t = mesh.copy()
+                t.apply_transform(np.vstack([np.hstack([rot, np.zeros((3, 1))]), [0, 0, 0, 1]]))
+                bmin_orig = t.bounds[0]
+                t.apply_translation([-bmin_orig[0], -bmin_orig[1], -bmin_orig[2]])
+                sz = t.extents
+                if box_dims and (sz[0] > box_dims[0] + 0.5 or sz[2] > box_dims[2] + 0.5 or
+                                 sz[1] > box_dims[1] + 0.5):
+                    continue
+                key = tuple(np.round(sz).astype(int))
+                if key in seen:
+                    continue
+                seen.add(key)
+                sparse, origin = voxelize_mesh(t, cell_size)
+                n_occ = int(len(sparse))
+                if n_occ == 0:
+                    continue
+                shift_x = int(sparse[:, 0].min())
+                shift_y = int(sparse[:, 1].min())
+                shift_z = int(sparse[:, 2].min())
+                sparse_shifted = sparse - np.array([shift_x, shift_y, shift_z], dtype=np.int32)
+                sx_v = int(sparse_shifted[:, 0].max() + 1)
+                sy_v = int(sparse_shifted[:, 1].max() + 1)
+                sz_v = int(sparse_shifted[:, 2].max() + 1)
+                shape = (sx_v, sy_v, sz_v)
+                hm = np.zeros((shape[0], shape[2]), dtype=np.int32)
+                for p in sparse_shifted:
+                    if p[1] + 1 > hm[p[0], p[2]]:
+                        hm[p[0], p[2]] = p[1] + 1
+                results.append({
+                    'mesh': t, 'size': sz, 'name': f"Y{yaw:.0f}R{roll:.0f}P{pitch:.0f}",
+                    'sparse': sparse_shifted, 'n_occ': n_occ,
+                    'hm': hm, 'shape': shape,
+                    'rotation': rot,
+                })
+    results.sort(key=lambda o: (o['size'][1], o['n_occ']))
+    return results
+
+
 # ═══════════════════════════════════════════════
 # Best Packer
 # ═══════════════════════════════════════════════
@@ -536,6 +643,7 @@ class BestPacker:
         self._load_orientations(trimesh_mesh, n_yaw, shrink)
 
     def _load_orientations(self, mesh, n_yaw, shrink):
+        self._source_mesh = mesh
         self.orientations = generate_orientations(mesh, n_yaw, self.box_dims, shrink=shrink)
         self._max_v = max(len(o.get('coll_verts', o['verts'])) for o in self.orientations)
         self._max_f = max(len(o.get('coll_faces', o['faces'])) for o in self.orientations)
@@ -748,8 +856,43 @@ class BestPacker:
         self._voxel_data = []
         for o in self.orientations:
             sparse, origin = voxelize_mesh(o['mesh'], cell_size)
-            self._voxel_data.append({'sparse': sparse, 'origin': origin})
+            occ = np.zeros(o['mesh'].extents.round().astype(int) + 5, dtype=np.uint8)
+            sx_v = int(math.ceil(o['size'][0] / cell_size)) + 2
+            sy_v = int(math.ceil(o['size'][1] / cell_size)) + 2
+            sz_v = int(math.ceil(o['size'][2] / cell_size)) + 2
+            shape = (max(1, sx_v), max(1, sy_v), max(1, sz_v))
+            hm = np.zeros((shape[0], shape[2]), dtype=np.int32)
+            for p in sparse:
+                py = p[1]
+                if py + 1 > hm[p[0], p[2]]:
+                    hm[p[0], p[2]] = py + 1
+            self._voxel_data.append({
+                'sparse': sparse, 'origin': origin,
+                'shape': shape, 'hm': hm, 'n_occ': len(sparse),
+            })
+        self._init_gpu_voxel_buffers()
         return self._voxel_data
+
+    def _init_gpu_voxel_buffers(self):
+        vd = self._voxel_data
+        all_sparse_list = [d['sparse'] for d in vd]
+        all_hm_list = [d['hm'].flatten() for d in vd]
+        all_shapes = np.array([d['shape'] for d in vd], dtype=np.int32)
+        all_offsets = np.zeros(len(vd) + 1, dtype=np.int32)
+        all_hm_offsets = np.zeros(len(vd) + 1, dtype=np.int32)
+        for i in range(len(vd)):
+            all_offsets[i + 1] = all_offsets[i] + len(all_sparse_list[i])
+            all_hm_offsets[i + 1] = all_hm_offsets[i] + len(all_hm_list[i])
+        self._voxel_all_sparse = np.concatenate(all_sparse_list).astype(np.int32)
+        self._voxel_all_hm = np.concatenate(all_hm_list).astype(np.int32)
+        self._voxel_all_shapes = all_shapes
+        self._voxel_all_offsets = all_offsets
+        self._voxel_all_hm_offsets = all_hm_offsets
+        self._d_voxel_all_sparse = cuda.to_device(self._voxel_all_sparse)
+        self._d_voxel_all_offsets = cuda.to_device(self._voxel_all_offsets)
+        self._d_voxel_all_hm = cuda.to_device(self._voxel_all_hm)
+        self._d_voxel_all_hm_offsets = cuda.to_device(self._voxel_all_hm_offsets)
+        self._d_voxel_all_shapes = cuda.to_device(self._voxel_all_shapes)
 
     def _mark_in_grid(self, grid, piece_id, x, y, z, oi, cell_size):
         vd = self._voxel_data[oi]
@@ -1148,29 +1291,99 @@ class BestPacker:
 
         return lp, lm
 
-    # ── Sparrow: Separation + Compression ──
+    # ── Sparrow: GPU-accelerated voxel packing ──
+
+    def _gpu_voxel_scan_all(self, box_occ, box_hm, nx_vox, ny_vox, nz_vox, step_vox=1):
+        cand_parts = []
+        for oi, vd in enumerate(self._sparrow_voxel_data):
+            sx_v, sy_v, sz_v = vd['shape']
+            if sy_v > ny_vox:
+                continue
+            xs = np.arange(0, nx_vox - sx_v + 1, step_vox, dtype=np.float64)
+            zs = np.arange(0, nz_vox - sz_v + 1, step_vox, dtype=np.float64)
+            nx, nz = len(xs), len(zs)
+            if nx == 0 or nz == 0:
+                continue
+            n = nx * nz
+            cand = np.zeros((n, 5), dtype=np.float64)
+            cand[:, 0] = np.repeat(xs, nz)
+            cand[:, 1] = float(oi)
+            cand[:, 2] = np.tile(zs, nx)
+            cand[:, 3] = -1.0
+            cand[:, 4] = 0.0
+            cand_parts.append(cand)
+        if not cand_parts:
+            return np.zeros((0, 5))
+        cand_array = np.concatenate(cand_parts)
+        n_cand = len(cand_array)
+        d_cand = cuda.to_device(cand_array)
+        d_box_occ = cuda.to_device(box_occ)
+        d_box_hm = cuda.to_device(box_hm)
+        threads = 256
+        blocks = (n_cand + threads - 1) // threads
+        _voxel_pack_kernel[blocks, threads](
+            d_cand,
+            self._d_sparrow_sparse,
+            self._d_sparrow_offsets,
+            self._d_sparrow_hm,
+            self._d_sparrow_hm_offsets,
+            self._d_sparrow_shapes,
+            d_box_occ,
+            d_box_hm,
+            nx_vox, ny_vox, nz_vox,
+            self._sparrow_cell_size,
+        )
+        cuda.synchronize()
+        return d_cand.copy_to_host()
 
     def pack_sparrow(self, max_pieces=500, n_workers=4, n_iterations=200, cell_size=None, verbose=True):
-        """Sequential voxel-based packing using occupancy grid collision detection.
-        Places pieces one at a time, scanning for the lowest valid Y position
-        using height-map accelerated search. Guarantees valid non-colliding
-        results (concave-safe via voxel occupancy)."""
         if cell_size is None:
             cell_size = 1.5
-        if not hasattr(self, '_voxel_data') or self._voxel_data is None or \
-           getattr(self, '_voxel_cell_size', 0) != cell_size:
-            self._ensure_voxel_data(cell_size)
-        vox_data = self._voxel_data
-        if not vox_data:
+        source = getattr(self, '_source_mesh', None)
+        if source is None:
             if verbose:
-                print("[Sparrow] Voxel data unavailable, falling back to greedy")
+                print("[Sparrow] No source mesh, falling back to greedy")
             return self.pack_greedy(max_pieces, verbose)
 
-        n_items = min(max_pieces, 500)
-        orient_list = list(range(len(self.orientations)))
+        n_yaw = 8
+        n_roll = 4
+        n_pitch = 4
         if verbose:
-            print(f"[Sparrow] {n_items} items, cell={cell_size}mm, "
-                  f"{n_workers} workers", flush=True)
+            print(f"[Sparrow] Generating voxel orientations (yaw={n_yaw} roll={n_roll} pitch={n_pitch})...", end=" ", flush=True)
+        t0_ori = time.time()
+        sparrow_oris = generate_sparrow_voxel_orientations(
+            source, cell_size, n_yaw=n_yaw, n_roll=n_roll, n_pitch=n_pitch,
+            box_dims=(self.box_l, self.box_w, self.box_h),
+        )
+        if verbose:
+            print(f"{len(sparrow_oris)} orientations ({time.time()-t0_ori:.1f}s)", flush=True)
+
+        if not sparrow_oris:
+            if verbose:
+                print("[Sparrow] No valid orientations, falling back to greedy")
+            return self.pack_greedy(max_pieces, verbose)
+
+        self._sparrow_voxel_data = sparrow_oris
+        self._sparrow_cell_size = cell_size
+
+        all_sparse_list = [d['sparse'] for d in sparrow_oris]
+        all_hm_list = [d['hm'].flatten() for d in sparrow_oris]
+        all_shapes = np.array([d['shape'] for d in sparrow_oris], dtype=np.int32)
+        all_offsets = np.zeros(len(sparrow_oris) + 1, dtype=np.int32)
+        all_hm_offsets = np.zeros(len(sparrow_oris) + 1, dtype=np.int32)
+        for i in range(len(sparrow_oris)):
+            all_offsets[i + 1] = all_offsets[i] + len(all_sparse_list[i])
+            all_hm_offsets[i + 1] = all_hm_offsets[i] + len(all_hm_list[i])
+        self._d_sparrow_sparse = cuda.to_device(np.concatenate(all_sparse_list).astype(np.int32))
+        self._d_sparrow_offsets = cuda.to_device(all_offsets)
+        self._d_sparrow_hm = cuda.to_device(np.concatenate(all_hm_list).astype(np.int32))
+        self._d_sparrow_hm_offsets = cuda.to_device(all_hm_offsets)
+        self._d_sparrow_shapes = cuda.to_device(all_shapes)
+
+        n_items = min(max_pieces, 500)
+        if verbose:
+            print(f"[Sparrow] GPU: {n_items} items, cell={cell_size}mm, "
+                  f"{len(sparrow_oris)} orientations, {n_workers} workers", flush=True)
 
         best_placed, best_meshes = [], []
         best_count = 0
@@ -1180,99 +1393,52 @@ class BestPacker:
         ny_vox = int(math.ceil(self.box_h / cell_size))
         nz_vox = int(math.ceil(self.box_w / cell_size))
 
-        sparse_cache = [(vd['sparse'], vd['origin']) for vd in vox_data]
-
         for worker in range(n_workers):
-            grid = np.zeros((nx_vox, ny_vox, nz_vox), dtype=np.int16)
-            world_hm = np.zeros((nx_vox, nz_vox), dtype=np.int32)
+            box_occ = np.zeros((nx_vox, ny_vox, nz_vox), dtype=np.uint8)
+            box_hm = np.zeros((nx_vox, nz_vox), dtype=np.int32)
             placed_w = []
             meshes_w = []
             consecutive = 0
             iter_count = 0
 
-            while len(placed_w) < n_items and consecutive < 300 and iter_count < n_iterations:
+            while len(placed_w) < n_items and consecutive < 30 and iter_count < n_iterations:
                 iter_count += 1
-                oi = random.choice(orient_list)
-                o = self.orientations[oi]
-                osx, osy, osz = o['size']
 
-                if osy > self.box_h:
+                results = self._gpu_voxel_scan_all(box_occ, box_hm, nx_vox, ny_vox, nz_vox, 1)
+                valid = results[:, 4] > 0.5
+                if not valid.any():
                     consecutive += 1
                     continue
 
-                sx_v = int(math.ceil(osx / cell_size))
-                sy_v = int(math.ceil(osy / cell_size))
-                sz_v = int(math.ceil(osz / cell_size))
+                valid_results = results[valid]
+                best_idx = np.argmin(valid_results[:, 3])
+                best = valid_results[best_idx]
+                best_x, best_oi, best_z, best_y_vox = int(best[0]), int(best[1]), int(best[2]), best[3]
+                best_y_mm = best_y_vox
 
-                if sx_v > nx_vox or sz_v > nz_vox or sy_v > ny_vox:
-                    consecutive += 1
-                    continue
+                vd = sparrow_oris[best_oi]
+                sp = vd['sparse']
+                world_sp = sp + np.array([best_x, int(best_y_mm / cell_size), best_z])
+                box_occ[world_sp[:, 0], world_sp[:, 1], world_sp[:, 2]] = 1
 
-                sparse, origin = sparse_cache[oi]
-                best_y = float('inf')
-                best_xyz = None
+                for p in sp:
+                    wx, wy, wz = best_x + p[0], int(best_y_mm / cell_size) + p[1], best_z + p[2]
+                    if wy + 1 > box_hm[wx, wz]:
+                        box_hm[wx, wz] = wy + 1
 
-                # Sample ~100 XZ positions randomly
-                xz_step = max(1, int(4.0 / cell_size))
-                x_positions = list(range(0, nx_vox - sx_v + 1, xz_step))
-                z_positions = list(range(0, nz_vox - sz_v + 1, xz_step))
-                random.shuffle(x_positions)
-                random.shuffle(z_positions)
-                if len(x_positions) * len(z_positions) > 100:
-                    x_positions = x_positions[:max(5, int(100 / max(1, len(z_positions))))]
-                    z_positions = z_positions[:max(5, int(100 / max(1, len(x_positions))))]
-                    random.shuffle(x_positions)
-                    random.shuffle(z_positions)
-
-                for gx in x_positions:
-                    for gz in z_positions:
-                        # Vectorized base Y from height map
-                        wx = gx + sparse[:, 0]
-                        wz = gz + sparse[:, 2]
-                        m = (wx >= 0) & (wx < nx_vox) & (wz >= 0) & (wz < nz_vox)
-                        needed = world_hm[wx[m], wz[m]] - sparse[m, 1]
-                        base_vox = max(0, 0 if len(needed) == 0 else int(needed.max()))
-
-                        max_y = ny_vox - sy_v
-                        for try_y in range(base_vox, max_y + 1):
-                            wy = try_y + sparse[:, 1]
-                            m2 = (wx >= 0) & (wx < nx_vox) & (wy >= 0) & (wy < ny_vox) & (wz >= 0) & (wz < nz_vox)
-                            if not m2.all():
-                                continue
-                            if grid[wx[m2], wy[m2], wz[m2]].any():
-                                continue
-                            ny_mm = try_y * cell_size
-                            if ny_mm < best_y:
-                                best_y = ny_mm
-                                best_xyz = (gx * cell_size, ny_mm, gz * cell_size, oi)
-                            break
-                        if best_y == 0:
-                            break
-                    if best_y == 0:
-                        break
-
-                if best_xyz is None:
-                    consecutive += 1
-                    continue
-
-                nx, ny, nz = best_xyz[:3]
-                self._mark_in_grid(grid, len(placed_w) + 1, nx, ny, nz, oi, cell_size)
-
-                nvx = int(nx / cell_size)
-                nvy = int(ny / cell_size)
-                nvz = int(nz / cell_size)
-                wx_all = nvx + sparse[:, 0]
-                wy_all = nvy + sparse[:, 1]
-                wz_all = nvz + sparse[:, 2]
-                m_all = (wx_all >= 0) & (wx_all < nx_vox) & (wz_all >= 0) & (wz_all < nz_vox)
-                for i_v in np.where(m_all)[0]:
-                    if wy_all[i_v] + 1 > world_hm[wx_all[i_v], wz_all[i_v]]:
-                        world_hm[wx_all[i_v], wz_all[i_v]] = wy_all[i_v] + 1
-
-                cm = o['mesh'].copy(); cm.apply_translation([nx, ny, nz])
+                x_mm = best_x * cell_size
+                z_mm = best_z * cell_size
+                cm = vd['mesh'].copy()
+                cm.apply_translation([x_mm, best_y_mm, z_mm])
                 meshes_w.append(cm)
-                placed_w.append((nx, ny, nz, oi, o['name']))
+                placed_w.append((x_mm, best_y_mm, z_mm, best_oi, vd['name']))
                 consecutive = 0
+
+                if verbose and len(placed_w) % 50 == 0:
+                    elapsed = time.time() - t0
+                    fill = box_occ.sum() * cell_size**3 / (self.box_l * self.box_w * self.box_h) * 100
+                    print(f"  [Worker {worker+1}] {len(placed_w)} pieces, {fill:.1f}% fill, {elapsed:.0f}s",
+                          flush=True)
 
             if len(placed_w) > best_count:
                 best_count = len(placed_w)
@@ -1281,7 +1447,8 @@ class BestPacker:
                 if verbose:
                     vol = sum(m.volume for m in meshes_w)
                     fill = vol / (self.box_l * self.box_w * self.box_h) * 100
-                    print(f"  [Worker {worker+1}] {len(placed_w)} pieces, {fill:.1f}% fill, iter={iter_count}", flush=True)
+                    print(f"  [Worker {worker+1}] done: {len(placed_w)} pieces, {fill:.1f}% fill, iter={iter_count}",
+                          flush=True)
 
         elapsed = time.time() - t0
         vol = sum(m.volume for m in best_meshes) if best_meshes else 0

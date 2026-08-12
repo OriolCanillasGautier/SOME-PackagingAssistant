@@ -1,0 +1,19 @@
+Run: 2026-08-12_153507_sparrow
+Date: 2026-08-12T15:36:29.567239
+STL: stl/6683688_simp0.1pct.stl
+Box: 385.0x285.0x150.0mm
+Method: sparrow
+Scan step: 5.0mm, Y-res: 2.0mm
+Yaw: 8, Shrink: 0.4
+Beam width: 5
+Hierarchical: False
+  Coarse step: 10.0, Fine step: 2.0
+  Top: 40, Per orient: 8, Min dist: 15.0
+Explore local: False
+Compact: False
+Sparrow workers: 1
+Voxel cell: 1.5mm
+Seed: 42
+
+Result: 296 pieces, 10.7% fill
+Time: 57s
