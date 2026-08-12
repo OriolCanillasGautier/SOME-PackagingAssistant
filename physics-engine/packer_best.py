@@ -904,7 +904,7 @@ class BestPacker:
             current_y = max(current_y, top_y)
 
             if verbose:
-                elapsed = time.time() - t0
+        elapsed = time.time() - t0
                 vol = sum(m.volume for m in meshes)
                 fill = vol / (self.box_l * self.box_w * self.box_h) * 100
                 nm = self.orientations[best_ori]['name']
@@ -1072,25 +1072,22 @@ class BestPacker:
                             state_meshes[item_idx] = nm
                     if moved == 0: break
 
-                # FCL cleanup: remove colliding pieces (greedy, fast)
+                # Quick cleanup: keep items whose AABB doesn't overlap with kept items
                 cleaned = list(all_placed)
                 cleaned_meshes = list(all_meshes)
-                cleaned_bounds = [m.bounds for m in cleaned_meshes]
                 for pi in range(prev_count, len(state)):
                     pm = state_meshes[pi]
-                    collides = False
                     a = pm.bounds
-                    for ci, cm_item in enumerate(cleaned_meshes):
-                        b = cleaned_bounds[ci]
+                    overlaps = False
+                    for cm_item in cleaned_meshes:
+                        b = cm_item.bounds
                         if not (a[1,0] > b[0,0] and a[0,0] < b[1,0] and
                                 a[1,1] > b[0,1] and a[0,1] < b[1,1] and
                                 a[1,2] > b[0,2] and a[0,2] < b[1,2]): continue
-                        if meshes_collide(pm, cm_item):
-                            collides = True; break
-                    if not collides:
+                        overlaps = True; break
+                    if not overlaps:
                         cleaned.append(state[pi])
                         cleaned_meshes.append(pm)
-                        cleaned_bounds.append(a)
 
                 if len(cleaned) > best_count:
                     best_count = len(cleaned)
