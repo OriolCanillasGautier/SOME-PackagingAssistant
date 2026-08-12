@@ -1583,7 +1583,7 @@ async function handleGPUCalculate(calcStartTime) {
 
     const values = getInputValues();
     const cellSize = document.getElementById('gpu-cell-size')?.value || '0.5';
-    const gpuMethod = document.getElementById('gpu-method')?.value || 'sparrow';
+    const gpuMethod = document.getElementById('gpu-method')?.value || 'voxel';
     setCalcProgress(true, 5, mainText('modeGPUSubmitting'), calcStartTime);
     await nextFrame();
 
