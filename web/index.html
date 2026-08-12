@@ -238,12 +238,17 @@
 
                     <!-- GPU Voxel Options -->
                     <div id="gpu-options" style="display: none;" class="input-section">
-                        <label for="gpu-cell-size">Resolució GPU (mm)</label>
+                        <label for="gpu-method">Mètode</label>
+                        <select id="gpu-method">
+                            <option value="sparrow">Sparrow — Separació + Compressió (ràpid, millor)</option>
+                            <option value="voxel">Voxel 0.5mm — Màxima precisió (lent)</option>
+                        </select>
+                        <label for="gpu-cell-size" style="margin-top: 8px;">Resolució (només Voxel)</label>
                         <select id="gpu-cell-size">
-                            <option value="0.5">0.5 mm — Màxima qualitat (més lent)</option>
-                            <option value="1.0">1.0 mm — Equilibri</option>
-                            <option value="1.5">1.5 mm — Ràpid</option>
-                            <option value="2.0">2.0 mm — Molt ràpid</option>
+                            <option value="0.5">0.5 mm</option>
+                            <option value="1.0">1.0 mm</option>
+                            <option value="1.5">1.5 mm</option>
+                            <option value="2.0">2.0 mm</option>
                         </select>
                     </div>
 

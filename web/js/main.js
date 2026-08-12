@@ -1464,6 +1464,7 @@ async function handleGPUCalculate(calcStartTime) {
 
     const values = getInputValues();
     const cellSize = document.getElementById('gpu-cell-size')?.value || '0.5';
+    const gpuMethod = document.getElementById('gpu-method')?.value || 'sparrow';
     setCalcProgress(true, 5, mainText('modeGPUSubmitting'), calcStartTime);
     await nextFrame();
 
@@ -1476,6 +1477,7 @@ async function handleGPUCalculate(calcStartTime) {
         formData.append('box_w', values.boxW);
         formData.append('box_h', values.boxH);
         formData.append('cell', cellSize);
+        formData.append('method', gpuMethod);
 
         const resp = await fetch('/api/pack', {
             method: 'POST',
@@ -1567,7 +1569,7 @@ async function handleGPUCalculate(calcStartTime) {
         elements.results.innerHTML = `
             <p class="calc-result"><strong>${job.pieces}</strong> ${mainText('pieces')}</p>
             <p class="fill-result">${job.fill_pct}% ${mainText('fillPct')}</p>
-            <p class="time-result">${job.time_s}s — ${cellSize}mm</p>
+            <p class="time-result">${job.time_s}s — ${cellSize}mm — ${gpuMethod}</p>
             <p class="meta-result"><a href="${stlUrl}" target="_blank">${mainText('modeGPUStlUrl')}</a></p>
             <button class="reoptimize-btn" onclick="document.querySelector('#calculate-btn').click()">🔄 Re-optimize</button>
             ${comparisonHtml}

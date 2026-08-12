@@ -36,6 +36,8 @@ try:
     if HAS_CUDA:
         sys.path.insert(0, str(Path(__file__).parent / "physics-engine"))
         from packer_gpu_voxel import generate_orientations, pack, verify
+        sys.path.insert(0, str(Path(__file__).parent / "physics-engine"))
+        from packer_best import BestPacker, generate_orientations as gen_orient_best, compute_face_normals
 except Exception as e:
     HAS_CUDA = False
     print(f"[server] WARNING: CUDA/GPU packer not available: {e}")
@@ -123,17 +125,29 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                     [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)])
 
             box_l, box_w, box_h = box_dims
-            cell = params.get("cell", 1.0)
+            cell = params.get("cell", 0.5)
             yaw = params.get("yaw", 8)
             roll = params.get("roll", 4)
             pitch = params.get("pitch", 4)
             scan_vox = params.get("scan_vox", 1)
+            method = params.get("method", "voxel")
 
             t0 = time.time()
-            orients = generate_orientations(mesh, cell, yaw, roll, pitch, box_dims)
-            placed_meshes, placed = pack(orients, box_dims, cell,
-                                         scan_step_vox=scan_vox, verbose=False)
-            elapsed = time.time() - t0
+
+            if method == "sparrow":
+                import random as _random
+                _random.seed(abs(hash(stl_data)) % (2**31))
+                packer = BestPacker(box_dims)
+                packer.load_mesh_from_data(mesh, n_yaw=yaw)
+                placed_sparrow, placed_meshes = packer.pack_sparrow(
+                    max_pieces=500, n_workers=1, verbose=False)
+                elapsed = time.time() - t0
+                placed = placed_sparrow
+            else:
+                orients = generate_orientations(mesh, cell, yaw, roll, pitch, box_dims)
+                placed_meshes, placed = pack(orients, box_dims, cell,
+                                             scan_step_vox=scan_vox, verbose=False)
+                elapsed = time.time() - t0
 
             jid = job["job_id"][:8]
             stl_out = RESULT_DIR / f"packed_{jid}.stl"
@@ -179,8 +193,9 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
 
             # Build placement data with orientation transforms
             job["placements"] = []
+            orients_for_placements = packer.orientations if method == "sparrow" else orients
             for (x, y, z, oi, name), _ in zip(placed, placed_meshes):
-                od = orients[oi]
+                od = orients_for_placements[oi]
                 rot = np.eye(4)
                 if "rotation" in od:
                     rot[:3, :3] = od["rotation"]
@@ -258,6 +273,7 @@ def submit_pack():
         "roll": int(request.form.get("roll", 4)),
         "pitch": int(request.form.get("pitch", 4)),
         "scan_vox": int(request.form.get("scan_vox", 1)),
+        "method": request.form.get("method", "voxel"),
     }
 
     job_id = str(uuid.uuid4())

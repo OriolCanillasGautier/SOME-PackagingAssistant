@@ -437,6 +437,12 @@ class BestPacker:
         mesh = trimesh.load(str(fp), force='mesh')
         if isinstance(mesh, trimesh.Scene):
             mesh = trimesh.util.concatenate([g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)])
+        self._load_orientations(mesh, n_yaw, shrink)
+
+    def load_mesh_from_data(self, trimesh_mesh, n_yaw=8, shrink=0.4):
+        self._load_orientations(trimesh_mesh, n_yaw, shrink)
+
+    def _load_orientations(self, mesh, n_yaw, shrink):
         self.orientations = generate_orientations(mesh, n_yaw, self.box_dims, shrink=shrink)
         self._max_v = max(len(o.get('coll_verts', o['verts'])) for o in self.orientations)
         self._max_f = max(len(o.get('coll_faces', o['faces'])) for o in self.orientations)
