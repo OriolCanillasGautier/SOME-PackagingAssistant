@@ -36,11 +36,13 @@ try:
     if HAS_CUDA:
         sys.path.insert(0, str(Path(__file__).parent / "physics-engine"))
         from packer_gpu_voxel import generate_orientations, pack, verify
-        sys.path.insert(0, str(Path(__file__).parent / "physics-engine"))
-        from packer_best import BestPacker, generate_orientations as gen_orient_best, compute_face_normals
 except Exception as e:
     HAS_CUDA = False
     print(f"[server] WARNING: CUDA/GPU packer not available: {e}")
+
+# BestPacker doesn't need CUDA — available unconditionally
+sys.path.insert(0, str(Path(__file__).parent / "physics-engine"))
+from packer_best import BestPacker
 
 import trimesh
 import numpy as np
