@@ -595,32 +595,75 @@ async function updateStableOrientationCache() {
 }
 
 function renderOrientationSelector() {
-    const container = document.getElementById('orientation-selector');
+    const modal = document.getElementById('orientation-modal');
     const optionsDiv = document.getElementById('orientation-options');
-    if (!container || !optionsDiv) return;
+    if (!modal || !optionsDiv) return;
 
     const orientations = state.stlStableOrientations || [];
     if (orientations.length <= 1) {
-        container.style.display = 'none';
-        state.selectedOrientations = null;
+        modal.style.display = 'none';
+        state.selectedOrientations = new Set([0]);
         return;
     }
 
     if (!state.selectedOrientations) state.selectedOrientations = new Set([0]);
-    const selected = state.selectedOrientations;
 
     optionsDiv.innerHTML = orientations.slice(0, 4).map((o, i) => {
         const dims = extractDimensions(o.geometry);
-        const isSelected = selected.has(i);
+        const isSelected = state.selectedOrientations.has(i);
+        const canvasId = `orient-canvas-${i}`;
         return `<div class="orient-card ${isSelected ? 'selected' : ''}" data-index="${i}"
-                onclick="toggleOrientation(${i})" title="Base ${i+1}: ${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}mm">
-            <span class="orient-icon">⬡</span>
-            <span class="orient-dims">${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}</span>
-            <span class="orient-stability">${(o.stability * 100).toFixed(0)}%</span>
+                onclick="toggleOrientation(${i})">
+            <canvas id="${canvasId}" class="orient-preview" width="140" height="140"></canvas>
+            <div class="orient-info">
+                <span class="orient-dims">${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}mm</span>
+            </div>
         </div>`;
     }).join('');
 
-    container.style.display = 'block';
+    modal.style.display = 'flex';
+    document.getElementById('orientation-confirm').onclick = () => { modal.style.display = 'none'; };
+
+    // Render 3D previews after DOM update
+    requestAnimationFrame(() => {
+        orientations.slice(0, 4).forEach((o, i) => {
+            renderOrientationPreview(`orient-canvas-${i}`, o.geometry);
+        });
+    });
+}
+
+function renderOrientationPreview(canvasId, geometry) {
+    const canvas = document.getElementById(canvasId);
+    if (!canvas) return;
+
+    const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    renderer.setSize(140, 140);
+    renderer.setClearColor(0x000000, 0);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 1000);
+    camera.position.set(2, 1.5, 2);
+    camera.lookAt(0, 0, 0);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambient);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
+    dir.position.set(1, 2, 1);
+    scene.add(dir);
+
+    const meshGeom = geometry.clone();
+    meshGeom.computeVertexNormals();
+    meshGeom.center();
+    const mat = new THREE.MeshPhongMaterial({ color: 0x3b82f6, flatShading: false, shininess: 40 });
+    const mesh = new THREE.Mesh(meshGeom, mat);
+    scene.add(mesh);
+
+    const box = new THREE.Box3().setFromObject(mesh);
+    const size = Math.max(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z);
+    camera.position.set(size * 1.5, size * 1.2, size * 1.5);
+    camera.lookAt(0, 0, 0);
+
+    renderer.render(scene, camera);
 }
 
 function toggleOrientation(index) {
@@ -631,6 +674,14 @@ function toggleOrientation(index) {
         state.selectedOrientations.add(index);
     }
     renderOrientationSelector();
+}
+
+function setBoxPreset(l, w, h, btn) {
+    document.getElementById('box-length').value = l;
+    document.getElementById('box-width').value = w;
+    document.getElementById('box-height').value = h;
+    document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
 }
 
 // DOM Elements

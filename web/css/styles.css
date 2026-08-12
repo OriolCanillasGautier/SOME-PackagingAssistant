@@ -1565,66 +1565,173 @@ body {
     border-color: var(--accent);
 }
 
-/* Orientation Selector */
-.orientation-selector {
-    margin: 12px 0;
-    padding: 0;
+/* Orientation Modal */
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(2px);
 }
 
-.orientation-selector label {
-    display: block;
+.orientation-modal-content {
+    background: var(--bg-primary);
+    border-radius: var(--radius-lg);
+    padding: 24px;
+    max-width: 700px;
+    width: 95%;
+    max-height: 90vh;
+    overflow-y: auto;
+    box-shadow: var(--shadow-lg);
+}
+
+.orientation-modal-content h3 {
+    margin: 0 0 4px 0;
+    font-size: 1.1rem;
+    color: var(--text-primary);
+}
+
+.modal-subtitle {
+    margin: 0 0 16px 0;
     font-size: 0.8rem;
-    font-weight: 600;
     color: var(--text-muted);
-    margin-bottom: 6px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
 }
 
 .orientation-options {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
-    gap: 6px;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
 }
 
 .orient-card {
     background: var(--bg-tertiary);
     border: 2px solid var(--border);
     border-radius: var(--radius);
-    padding: 8px 6px;
-    text-align: center;
+    padding: 8px;
     cursor: pointer;
     transition: all 0.15s;
-    user-select: none;
+    text-align: center;
 }
 
 .orient-card:hover {
     border-color: var(--accent);
-    background: var(--bg-secondary);
 }
 
 .orient-card.selected {
     border-color: var(--accent);
-    background: rgba(59, 130, 246, 0.12);
+    background: rgba(59, 130, 246, 0.1);
+    box-shadow: 0 0 0 1px var(--accent);
 }
 
-.orient-icon {
+.orient-preview {
     display: block;
-    font-size: 1.2rem;
-    margin-bottom: 2px;
+    width: 140px;
+    height: 140px;
+    margin: 0 auto 8px;
+    border-radius: 4px;
+    background: var(--bg-secondary);
+}
+
+.orient-info {
+    font-size: 0.8rem;
+    font-weight: 500;
 }
 
 .orient-dims {
-    display: block;
-    font-size: 0.7rem;
     color: var(--text-primary);
-    font-weight: 500;
-    line-height: 1.2;
 }
 
-.orient-stability {
+.btn-primary {
     display: block;
+    width: 100%;
+    padding: 10px;
+    background: var(--accent);
+    color: white;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 0.9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.15s;
+}
+
+.btn-primary:hover {
+    opacity: 0.9;
+}
+
+/* Remove old inline orientation selector */
+.orientation-selector { display: none; }
+
+/* Collapsible sections */
+.collapsible-section {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    overflow: hidden;
+}
+
+.collapsible-section summary {
+    padding: 10px 12px;
+    font-weight: 600;
+    font-size: 0.85rem;
+    cursor: pointer;
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+    user-select: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.collapsible-section summary::before {
+    content: '▶';
     font-size: 0.65rem;
-    color: var(--text-muted);
-    margin-top: 2px;
+    transition: transform 0.15s;
+    display: inline-block;
+    width: 12px;
+}
+
+.collapsible-section[open] summary::before {
+    transform: rotate(90deg);
+}
+
+.collapsible-section .input-group,
+.collapsible-section .placement-options,
+.collapsible-section .box-section {
+    padding: 0 12px;
+}
+
+.collapsible-section .input-group:last-child { padding-bottom: 10px; }
+.collapsible-section .input-group:first-of-type { padding-top: 8px; }
+
+/* Box presets */
+.box-presets {
+    display: flex;
+    gap: 4px;
+    padding: 8px 12px 0;
+    flex-wrap: wrap;
+}
+
+.preset-btn {
+    padding: 4px 10px;
+    font-size: 0.75rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.preset-btn:hover { border-color: var(--accent); }
+
+.preset-btn.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
 }

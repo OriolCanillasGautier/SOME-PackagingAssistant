@@ -72,11 +72,15 @@
                         </div>
                         <div id="stl-status" class="stl-status"></div>
                         
-                        <!-- Orientation selector -->
-                        <div id="orientation-selector" class="orientation-selector" style="display:none;">
-                            <label>Orientació estable</label>
-                            <div id="orientation-options" class="orientation-options">
-                                <!-- Populated by JS -->
+                        <!-- Orientation Modal (shown after STL upload) -->
+                        <div id="orientation-modal" class="modal-overlay" style="display:none;">
+                            <div class="modal-content orientation-modal-content">
+                                <h3>Selecciona l'orientació estable</h3>
+                                <p class="modal-subtitle">Clica per seleccionar/desmarcar. Es poden triar múltiples.</p>
+                                <div id="orientation-options" class="orientation-options">
+                                    <!-- Populated by JS with 3D previews -->
+                                </div>
+                                <button id="orientation-confirm" class="btn-primary">Confirmar</button>
                             </div>
                         </div>
 
@@ -87,6 +91,8 @@
                             </div>
                         </div>
                         
+                        <details class="collapsible-section" id="object-dims-section">
+                            <summary>Dimensions de l'Objecte</summary>
                         <div class="input-group">
                             <label for="obj-length">Llargada (mm)</label>
                             <input type="number" id="obj-length" value="50" min="0.01" step="0.1">
@@ -130,7 +136,12 @@
                             <input type="checkbox" id="allow-rotation" checked>
                             <label for="allow-rotation">Permet girar l'objecte (explorar orientacions)</label>
                         </div>
+                        </details>
+                        
+                        <details class="collapsible-section" id="placement-options-section" open>
+                            <summary>Opcions de Col·locació</summary>
                         <div class="placement-options" id="placement-options">
+                            <div class="input-group">
                             <h3 id="placement-options-title">Opcions de Col·locació STL</h3>
                             <div class="input-group">
                                 <label for="placement-strategy">Estratègia de col·locació</label>
@@ -171,10 +182,17 @@
                             <input type="range" id="opt-piece-colors" min="2" max="20" value="10" step="1">
                         </div>
                     </section>
+                        </details>
 
                     <!-- Box Section -->
-                    <section class="input-section box-section">
-                        <h2>Dimensions de la Caixa</h2>
+                    <details class="collapsible-section" id="box-section" open>
+                        <summary>Dimensions de la Caixa</summary>
+                        <div class="box-presets">
+                            <button class="preset-btn active" onclick="setBoxPreset(160,160,160,this)">160³</button>
+                            <button class="preset-btn" onclick="setBoxPreset(200,200,200,this)">200³</button>
+                            <button class="preset-btn" onclick="setBoxPreset(300,200,200,this)">300×200</button>
+                            <button class="preset-btn" onclick="setBoxPreset(385,285,150,this)">385×285</button>
+                        </div>
                         <div class="input-group">
                             <label for="box-length">Llargada (mm)</label>
                             <input type="number" id="box-length" value="160" min="0.1" step="1">
@@ -195,7 +213,7 @@
                             <label for="packing-gap">Espaiat entre peces: <span id="packing-gap-value">0</span> mm</label>
                             <input type="range" id="packing-gap" min="0" max="50" value="0" step="1">
                         </div>
-                    </section>
+                    </details>
 
                     <!-- Bulk Mode Options (hidden by default) -->
                     <section class="input-section bulk-section" id="bulk-options" style="display: none;">
