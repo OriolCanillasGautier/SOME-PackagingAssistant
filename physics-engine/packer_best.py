@@ -199,6 +199,126 @@ def compute_face_normals(verts, faces):
     return n / mag[:, np.newaxis]
 
 
+# ═══════════════════════════════════════════════
+# InaccessibilityPoles — fast collision proxy
+# ═══════════════════════════════════════════════
+
+def compute_inaccessibility_poles(vertices, faces, n_poles=5):
+    """Compute the N largest empty spheres inside a convex hull.
+    Used as a fast collision proxy: if two meshes' poles don't overlap,
+    the meshes definitely don't collide (conservative reject).
+    Inspired by JonasTollenaere/sparrow-3d (LGPL-3.0)."""
+    from scipy.spatial import ConvexHull as SPConvexHull
+    import heapq
+
+    verts = np.asarray(vertices, dtype=np.float64)
+    if len(verts) < 4:
+        center = verts.mean(axis=0)
+        r = 0 if len(verts) < 2 else np.max(np.linalg.norm(verts - center, axis=1)) * 0.5
+        return [(center.tolist(), float(r))]
+
+    try:
+        hull = SPConvexHull(verts)
+        hull_verts = verts[hull.vertices]
+        hull_normals = hull.equations[:, :3]
+        hull_offsets = hull.equations[:, 3]
+    except Exception:
+        center = verts.mean(axis=0)
+        r = np.max(np.linalg.norm(verts - center, axis=1)) * 0.3
+        return [(center.tolist(), float(r))]
+
+    def signed_distance(point):
+        """Signed distance from point to convex hull surface."""
+        d = hull_normals @ point + hull_offsets
+        max_d = np.max(d)
+        if max_d <= 0:
+            return -np.min(np.abs(d))  # outside
+        return np.min(d[d > 0])  # inside → positive
+
+    aabb_min = hull_verts.min(axis=0)
+    aabb_max = hull_verts.max(axis=0)
+    extent = aabb_max - aabb_min
+    side = float(np.max(extent))
+    aabb_size = side * 0.6
+    aabb_center = (aabb_min + aabb_max) / 2.0
+    aabb_half = np.array([side, side, side]) * 0.5
+    eps = side * 1e-4
+
+    poles = []
+
+    for _ in range(n_poles):
+        queue = []
+        center_point = aabb_center
+        init_d = signed_distance(center_point)
+        for prev in poles:
+            pc = np.array(prev[0]); pr = prev[1]
+            pd = float(np.linalg.norm(center_point - pc)) - pr
+            if pd < init_d: init_d = pd
+        best_point, best_d = center_point, max(0.0, float(init_d))
+        heapq.heappush(queue, (-(best_d + side * 0.87), tuple(aabb_center - aabb_half), tuple(aabb_center + aabb_half)))
+
+        while queue:
+            neg_potential, bb_min_t, bb_max_t = heapq.heappop(queue)
+            bb_min = np.array(bb_min_t); bb_max = np.array(bb_max_t)
+            b_center = (bb_min + bb_max) * 0.5
+            b_half_size = float(np.linalg.norm(bb_max - bb_min)) * 0.25
+            if b_half_size < eps: continue
+
+            potential = -neg_potential
+            if potential < best_d + eps: break
+
+            for cx in [bb_min[0], b_center[0], bb_max[0]]:
+                for cy in [bb_min[1], b_center[1], bb_max[1]]:
+                    for cz in [bb_min[2], b_center[2], bb_max[2]]:
+                        pt = np.array([cx, cy, cz])
+                        d = signed_distance(pt)
+                        for prev in poles:
+                            pc = np.array(prev[0]); pr = prev[1]
+                            pd = float(np.linalg.norm(pt - pc)) - pr
+                            if pd < d: d = pd
+                        if d > best_d:
+                            best_d = d; best_point = pt
+
+            if best_d + b_half_size < best_d + eps: continue
+            child_half = b_half_size * 0.5
+            for ox in [-child_half, 0, child_half]:
+                for oy in [-child_half, 0, child_half]:
+                    for oz in [-child_half, 0, child_half]:
+                        if abs(ox) + abs(oy) + abs(oz) < 1e-12: continue
+                        c = b_center + np.array([ox, oy, oz])
+                        d = signed_distance(c)
+                        for prev in poles:
+                            pc = np.array(prev[0]); pr = prev[1]
+                            pd = float(np.linalg.norm(c - pc)) - pr
+                            if pd < d: d = pd
+                        pot = d + float(np.linalg.norm(np.array([ox, oy, oz])))
+                        if pot > best_d - eps:
+                            cmin = c - child_half; cmax = c + child_half
+                            heapq.heappush(queue, (-pot, tuple(cmin), tuple(cmax)))
+
+        if best_d > 0:
+            poles.append((best_point.tolist(), float(best_d)))
+        else:
+            poles.append((best_point.tolist(), 0.0))
+
+    return poles
+
+
+def poles_collide(poles_a, transform_a, poles_b, transform_b):
+    """Check if any pair of poles (in world space) overlap.
+    Returns True if poles overlap (potential collision, need full check).
+    Returns False if no overlap (definitely no collision — fast reject)."""
+    if not poles_a or not poles_b:
+        return True  # can't reject → assume collision
+    for ca, ra in poles_a:
+        wa = np.array(ca) + transform_a
+        for cb, rb in poles_b:
+            wb = np.array(cb) + transform_b
+            if np.linalg.norm(wa - wb) < ra + rb:
+                return True
+    return False
+
+
 def generate_orientations(mesh, n_yaw, box_dims, use_pitch_roll=True, shrink=0.4):
     results, seen = [], set()
 
@@ -240,6 +360,13 @@ def generate_orientations(mesh, n_yaw, box_dims, use_pitch_roll=True, shrink=0.4
             result['coll_verts'] = hull.vertices
             result['coll_faces'] = hull.faces
             result['coll_norms'] = hull.normals
+        # Precompute InaccessibilityPoles for fast collision proxy
+        try:
+            cv = result.get('coll_verts', result['verts'])
+            cf = result.get('coll_faces', result['faces'])
+            result['poles'] = compute_inaccessibility_poles(cv, cf, n_poles=5)
+        except Exception:
+            result['poles'] = []
         return result
 
     # Yaw rotations (around Y axis)
@@ -437,13 +564,67 @@ class BestPacker:
         y_min = valid[:, 3].min()
         scores = valid[:, 3].copy()
         if placed_count > 0:
-            vertical_range = self.box_h
-            if vertical_range > 0:
-                norm_heights = valid[:, 3] / max(1.0, vertical_range)
-                scores = scores + 0.02 * self.box_h * norm_heights
+            norm_heights = valid[:, 3] / max(1.0, self.box_h)
+            scores = scores + 0.02 * self.box_h * norm_heights
 
         best_idx = np.argmin(scores)
         return valid[best_idx]
+
+    def _explore_local(self, x, y, z, oi, placed, meshes, n_samples=50):
+        """Generate local perturbations around (x,y,z) and return best non-colliding position by composite score."""
+        o = self.orientations[oi]
+        sx, sy, sz = o['size']
+        candidate_poles = o.get('poles', [])
+        local_max_h = 0
+        for px, py, pz, poi_p, _ in placed:
+            top = py + self.orientations[poi_p]['size'][1]
+            if top > local_max_h: local_max_h = top
+
+        best_score = float('inf')
+        best_xyz = (x, y, z)
+        found_any = False
+        half_window = self.scan_step * 2
+
+        for i in range(n_samples):
+            if i < 20:
+                dx = (random.random() - 0.5) * half_window * 2
+                dy = (random.random() - 0.5) * half_window * 0.5
+                dz = (random.random() - 0.5) * half_window * 2
+            else:
+                j = (i - 20) % 6
+                k = (i - 20) // 6
+                dx = (j - 2.5) * self.scan_step * 0.3
+                dy = 0
+                dz = (k - 2.5) * self.scan_step * 0.3
+
+            nx, ny, nz = x + dx, max(0, y + dy), z + dz
+            if nx < 0 or nz < 0 or nx + sx > self.box_l or nz + sz > self.box_w: continue
+            if ny + sy > self.box_h: continue
+
+            cm = o['mesh'].copy(); cm.apply_translation([nx, ny, nz])
+            collides = False
+            for pi, (px_p, py_p, pz_p, poi_p, _) in enumerate(placed):
+                b1, b2 = cm.bounds, meshes[pi].bounds
+                if not (b1[1,0] > b2[0,0] and b1[0,0] < b2[1,0] and
+                        b1[1,1] > b2[0,1] and b1[0,1] < b2[1,1] and
+                        b1[1,2] > b2[0,2] and b1[0,2] < b2[1,2]): continue
+                placed_poles = self.orientations[poi_p].get('poles', [])
+                if candidate_poles and placed_poles:
+                    if not poles_collide(candidate_poles, np.array([nx, ny, nz]),
+                                        placed_poles, np.array([px_p, py_p, pz_p])): continue
+                if meshes_collide(cm, meshes[pi]): collides = True; break
+            if collides: continue
+
+            new_max_h = max(local_max_h, ny + sy)
+            height_increase = max(0, new_max_h - local_max_h)
+            score = ny + 0.10 * height_increase + 0.005 * ((nx - self.box_l/2)**2 + (nz - self.box_w/2)**2) / max(1, self.box_l)
+
+            if score < best_score:
+                best_score = score
+                best_xyz = (nx, ny, nz)
+                found_any = True
+
+        return best_xyz, found_any
 
     def _place_piece_gpu(self, pi, x, y, z, oi):
         o = self.orientations[oi]
@@ -460,7 +641,7 @@ class BestPacker:
 
     # ── Greedy baseline ──
 
-    def pack_greedy(self, max_pieces=500, verbose=True, beam_width=5, hierarchical=False):
+    def pack_greedy(self, max_pieces=500, verbose=True, beam_width=5, hierarchical=False, explore_local=False):
         placed, meshes = [], []
         consecutive = 0
         t0 = time.time()
@@ -505,16 +686,30 @@ class BestPacker:
                 top = valid[np.argsort(valid[:, 3])[:top_n]]
                 best = top[random.randint(0, len(top) - 1)]
                 x, z, oi, y = best[0], best[1], int(best[2]), best[3]
+
+            # Local exploration: try perturbations to find a better non-colliding position
+            if explore_local and placed:
+                (x, y, z), found = self._explore_local(x, y, z, oi, placed, meshes)
+                if not found:
+                    consecutive += 1
+                    continue
+
             o = self.orientations[oi]
 
             cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
+            candidate_poles = o.get('poles', [])
             collides = False
-            for pm in meshes:
-                b1, b2 = cm.bounds, pm.bounds
+            for pi, (px, py, pz, poi, _) in enumerate(placed):
+                b1, b2 = cm.bounds, meshes[pi].bounds
                 if (b1[1, 0] > b2[0, 0] and b1[0, 0] < b2[1, 0] and
                     b1[1, 1] > b2[0, 1] and b1[0, 1] < b2[1, 1] and
                     b1[1, 2] > b2[0, 2] and b1[0, 2] < b2[1, 2]):
-                    if meshes_collide(cm, pm): collides = True; break
+                    placed_poles = self.orientations[poi].get('poles', [])
+                    if candidate_poles and placed_poles:
+                        if not poles_collide(candidate_poles, np.array([x, y, z]),
+                                            placed_poles, np.array([px, py, pz])):
+                            continue  # fast reject: poles don't overlap
+                    if meshes_collide(cm, meshes[pi]): collides = True; break
             if collides: continue
 
             meshes.append(cm); placed.append((x, y, z, oi, o['name']))
@@ -582,12 +777,18 @@ class BestPacker:
                     o = self.orientations[oi]
 
                     cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
+                    candidate_poles = o.get('poles', [])
                     collides = False
-                    for pm in sub_meshes:
+                    for pi, pm in enumerate(sub_meshes):
                         b1, b2 = cm.bounds, pm.bounds
                         if (b1[1, 0] > b2[0, 0] and b1[0, 0] < b2[1, 0] and
                             b1[1, 1] > b2[0, 1] and b1[0, 1] < b2[1, 1] and
                             b1[1, 2] > b2[0, 2] and b1[0, 2] < b2[1, 2]):
+                            placed_poles = self.orientations[sub_placed[pi][3]].get('poles', [])
+                            if candidate_poles and placed_poles:
+                                if not poles_collide(candidate_poles, np.array([x, y, z]),
+                                                    placed_poles, np.array([sub_placed[pi][0], sub_placed[pi][1], sub_placed[pi][2]])):
+                                    continue
                             if meshes_collide(cm, pm): collides = True; break
                     if collides: continue
 
@@ -751,12 +952,20 @@ class BestPacker:
             best = top[random.randint(0, len(top) - 1)]
             x, z, y = best[0], best[1], best[3]
             cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
+            candidate_poles = o.get('poles', [])
+            all_meshes = existing_meshes + lm
+            all_placed = existing_placed + lp
             collides = False
-            for pm in existing_meshes + lm:
+            for pi, pm in enumerate(all_meshes):
                 b1, b2 = cm.bounds, pm.bounds
                 if (b1[1,0] > b2[0,0] and b1[0,0] < b2[1,0] and
                     b1[1,1] > b2[0,1] and b1[0,1] < b2[1,1] and
                     b1[1,2] > b2[0,2] and b1[0,2] < b2[1,2]):
+                    placed_poles = self.orientations[all_placed[pi][3]].get('poles', [])
+                    if candidate_poles and placed_poles:
+                        if not poles_collide(candidate_poles, np.array([x, y, z]),
+                                            placed_poles, np.array([all_placed[pi][0], all_placed[pi][1], all_placed[pi][2]])):
+                            continue
                     if meshes_collide(cm, pm): collides = True; break
             if collides: continue
 
@@ -776,13 +985,157 @@ class BestPacker:
 
         return lp, lm
 
-    # ── Full pipeline ──
+    # ── Sparrow: Separation + Compression ──
 
-    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False):
+    def pack_sparrow(self, max_pieces=500, n_workers=4, n_iterations=200, verbose=True):
+        """Global optimization via random placement → separation → compression.
+        Inspired by JonasTollenaere/sparrow-3d (LGPL-3.0)."""
+        import copy as _copy
+        n_items = min(max_pieces, 500)
+        orient_list = list(range(len(self.orientations)))
+        total_vol = sum(o['size'][0] * o['size'][1] * o['size'][2] for o in self.orientations)
+        base_height = total_vol / (self.box_l * self.box_w) * 1.5
+        initial_height = min(self.box_h * 3, max(self.box_h * 1.2, base_height))
+        if verbose:
+            print(f"[Sparrow] {n_items} items, initial_height={initial_height:.0f}mm, {n_workers} workers")
+
+        best_placed, best_meshes = [], []
+        best_count = 0
         t0 = time.time()
 
-        if method == 'greedy':
-            placed, meshes = self.pack_greedy(max_pieces, verbose, beam_width=beam_width, hierarchical=hierarchical)
+        for worker in range(n_workers):
+            state = []
+            state_meshes = []
+            for i in range(n_items):
+                oi = random.choice(orient_list)
+                o = self.orientations[oi]
+                sx, sy, sz = o['size']
+                x = random.uniform(0, self.box_l - sx)
+                z = random.uniform(0, self.box_w - sz)
+                y = random.uniform(0, initial_height - sy)
+                state.append((x, y, z, oi, o['name']))
+                cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
+                state_meshes.append(cm)
+
+            # Separation phase
+            collision_weights = {}
+            current_height = initial_height
+            improved = True
+            iter_count = 0
+
+            while improved and iter_count < n_iterations:
+                improved = False
+                iter_count += 1
+
+                # Find colliding pairs
+                colliding = set()
+                for i in range(len(state)):
+                    for j in range(i + 1, len(state)):
+                        key = (i, j)
+                        a, b = state_meshes[i], state_meshes[j]
+                        if not (a.bounds[1,0] > b.bounds[0,0] and a.bounds[0,0] < b.bounds[1,0] and
+                                a.bounds[1,1] > b.bounds[0,1] and a.bounds[0,1] < b.bounds[1,1] and
+                                a.bounds[1,2] > b.bounds[0,2] and a.bounds[0,2] < b.bounds[1,2]):
+                            continue
+                        if meshes_collide(a, b):
+                            colliding.add(i)
+                            colliding.add(j)
+                            collision_weights[key] = collision_weights.get(key, 1.0) * 1.05
+
+                if not colliding:
+                    # Successfully separated — try compression
+                    if current_height > self.box_h * 0.8:
+                        current_height *= 0.995
+                        improved = True
+                    break
+
+                # Try to move each colliding item
+                items = sorted(colliding)
+                random.shuffle(items)
+                for item_idx in items:
+                    oi = state[item_idx][3]
+                    o = self.orientations[oi]
+                    sx, sy, sz = o['size']
+
+                    best_score = float('inf')
+                    best_xyz = None
+                    old_x, old_y, old_z = state[item_idx][:3]
+
+                    # 50 samples: 20 random + 30 grid
+                    for s in range(50):
+                        if s < 20:
+                            nx = random.uniform(0, self.box_l - sx)
+                            nz = random.uniform(0, self.box_w - sz)
+                            ny = random.uniform(0, current_height - sy)
+                        else:
+                            j = (s - 20) % 6
+                            k = (s - 20) // 6
+                            nx = old_x + (j - 2.5) * self.scan_step
+                            nz = old_z + (k - 2.5) * self.scan_step
+                            ny = old_y + (random.random() - 0.5) * self.scan_step
+                        nx = max(0, min(self.box_l - sx, nx))
+                        ny = max(0, min(current_height - sy, ny))
+                        nz = max(0, min(self.box_w - sz, nz))
+
+                        cm = o['mesh'].copy(); cm.apply_translation([nx, ny, nz])
+                        score = 0
+                        bad = False
+                        for j in range(len(state)):
+                            if j == item_idx: continue
+                            b1, b2 = cm.bounds, state_meshes[j].bounds
+                            if not (b1[1,0] > b2[0,0] and b1[0,0] < b2[1,0] and
+                                    b1[1,1] > b2[0,1] and b1[0,1] < b2[1,1] and
+                                    b1[1,2] > b2[0,2] and b1[0,2] < b2[1,2]): continue
+                            if meshes_collide(cm, state_meshes[j]):
+                                w = collision_weights.get((min(item_idx, j), max(item_idx, j)), 1.0)
+                                score += w
+                                if score >= best_score: bad = True; break
+                        if bad: continue
+
+                        if score < best_score:
+                            best_score = score
+                            best_xyz = (nx, ny, nz)
+
+                    if best_xyz and best_score == 0:
+                        improved = True
+                        state[item_idx] = (best_xyz[0], best_xyz[1], best_xyz[2], oi, o['name'])
+                        nm = o['mesh'].copy(); nm.apply_translation([best_xyz[0], best_xyz[1], best_xyz[2]])
+                        state_meshes[item_idx] = nm
+
+            # Filter to pieces inside the actual box
+            inside = []
+            inside_meshes = []
+            for i, (x, y, z, oi, name) in enumerate(state):
+                o = self.orientations[oi]
+                if x >= 0 and y >= 0 and z >= 0 and x + o['size'][0] <= self.box_l and y + o['size'][1] <= self.box_h and z + o['size'][2] <= self.box_w:
+                    inside.append((x, y, z, oi, name))
+                    inside_meshes.append(state_meshes[i])
+
+            if len(inside) > best_count:
+                best_count = len(inside)
+                best_placed = inside
+                best_meshes = inside_meshes
+                if verbose:
+                    vol = sum(m.volume for m in inside_meshes)
+                    fill = vol / (self.box_l * self.box_w * self.box_h) * 100
+                    print(f"  [Worker {worker+1}] {len(inside)} pieces, {fill:.1f}% fill, iter={iter_count}")
+
+        elapsed = time.time() - t0
+        if verbose:
+            vol = sum(m.volume for m in best_meshes) if best_meshes else 0
+            fill = vol / (self.box_l * self.box_w * self.box_h) * 100 if vol > 0 else 0
+            print(f"  [Sparrow] DONE: {best_count} pieces, {fill:.1f}% fill, {elapsed:.0f}s")
+        return best_placed, best_meshes
+
+    # ── Full pipeline ──
+
+    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False, explore_local=False, sparrow_workers=4):
+        t0 = time.time()
+
+        if method == 'sparrow':
+            placed, meshes = self.pack_sparrow(max_pieces, n_workers=sparrow_workers, verbose=verbose)
+        elif method == 'greedy':
+            placed, meshes = self.pack_greedy(max_pieces, verbose, beam_width=beam_width, hierarchical=hierarchical, explore_local=explore_local)
         elif method == 'layers':
             placed, meshes = self.pack_layers(max_pieces, verbose)
         else:
@@ -970,7 +1323,7 @@ def main():
     p.add_argument("--yaw", type=int, default=8)
     p.add_argument("--yres", type=float, default=2.0)
     p.add_argument("--shrink", type=float, default=0.4, help="Hull shrink factor (0.4=aggressive, 1.0=full hull)")
-    p.add_argument("--method", type=str, default="backtrack", choices=["greedy", "backtrack", "layers"])
+    p.add_argument("--method", type=str, default="backtrack", choices=["greedy", "backtrack", "layers", "sparrow"])
     p.add_argument("--compact", action="store_true")
     p.add_argument("--beam-width", type=int, default=5, help="Top-K candidates for random selection (1=lowest-Y, 5=explore)")
     p.add_argument("--hierarchical", action="store_true", help="Coarse-to-fine candidate search")
@@ -981,6 +1334,8 @@ def main():
     p.add_argument("--coarse-min-distance", type=float, default=15.0, help="Min XZ distance between kept candidates (mm)")
     p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     p.add_argument("--export-stl", action="store_true", help="Export merged STL of all placed pieces")
+    p.add_argument("--explore-local", action="store_true", help="Local perturbation search around each placement (sparrow-style)")
+    p.add_argument("--sparrow-workers", type=int, default=4, help="Parallel workers for sparrow mode")
     p.add_argument("--output", type=str, default="packed_best.png")
     args = p.parse_args()
 
@@ -1036,7 +1391,7 @@ def main():
 
     print(f"\nPacking ({args.method})...")
     t_start = time.time()
-    placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width, hierarchical=args.hierarchical)
+    placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width, hierarchical=args.hierarchical, explore_local=args.explore_local, sparrow_workers=args.sparrow_workers)
     elapsed = time.time() - t_start
 
     if meshes:
@@ -1063,7 +1418,9 @@ def main():
             f"Hierarchical: {args.hierarchical}",
             f"  Coarse step: {args.coarse_step}, Fine step: {args.fine_step}",
             f"  Top: {args.coarse_top}, Per orient: {args.coarse_per_orientation}, Min dist: {args.coarse_min_distance}",
+            f"Explore local: {args.explore_local}",
             f"Compact: {args.compact}",
+            f"Sparrow workers: {args.sparrow_workers if args.method == 'sparrow' else 'N/A'}",
             f"Seed: {args.seed}",
             f"",
             f"Result: {len(placed)} pieces, {sum(m.volume for m in meshes)/(box_dims[0]*box_dims[1]*box_dims[2])*100:.1f}% fill",
