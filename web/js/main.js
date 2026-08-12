@@ -606,12 +606,12 @@ function renderOrientationSelector() {
         return;
     }
 
-    const selected = state.selectedOrientations || new Set([0]);
-    if (!(selected instanceof Set)) state.selectedOrientations = new Set([0]);
+    if (!state.selectedOrientations) state.selectedOrientations = new Set([0]);
+    const selected = state.selectedOrientations;
 
     optionsDiv.innerHTML = orientations.slice(0, 4).map((o, i) => {
         const dims = extractDimensions(o.geometry);
-        const isSelected = state.selectedOrientations.has(i);
+        const isSelected = selected.has(i);
         return `<div class="orient-card ${isSelected ? 'selected' : ''}" data-index="${i}"
                 onclick="toggleOrientation(${i})" title="Base ${i+1}: ${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}mm">
             <span class="orient-icon">⬡</span>
