@@ -43,6 +43,7 @@ const state = {
     stlAlignedGeometry: null, // transient in-memory geometry aligned to stable gravity orientation
     stlSettledQuat: null, // cached quaternion from gravity drop on current loaded geometry
     stlStableOrientations: [], // [{ quat, geometry, stability }] precomputed gravity bases
+    selectedOrientations: null, // Set of selected orientation indices
     orientationPrepMs: 0,
     stlIntegrity: null,
     stlDimensions: null,
@@ -589,7 +590,47 @@ async function updateStableOrientationCache() {
     state.stlDimensions = primary ? extractDimensions(primary.geometry) : extractDimensions(state.stlGeometry);
     state.orientationPrepMs = performance.now() - t0;
 
+    renderOrientationSelector();
     return primary?.geometry || null;
+}
+
+function renderOrientationSelector() {
+    const container = document.getElementById('orientation-selector');
+    const optionsDiv = document.getElementById('orientation-options');
+    if (!container || !optionsDiv) return;
+
+    const orientations = state.stlStableOrientations || [];
+    if (orientations.length <= 1) {
+        container.style.display = 'none';
+        state.selectedOrientations = null;
+        return;
+    }
+
+    const selected = state.selectedOrientations || new Set([0]);
+    if (!(selected instanceof Set)) state.selectedOrientations = new Set([0]);
+
+    optionsDiv.innerHTML = orientations.slice(0, 4).map((o, i) => {
+        const dims = extractDimensions(o.geometry);
+        const isSelected = state.selectedOrientations.has(i);
+        return `<div class="orient-card ${isSelected ? 'selected' : ''}" data-index="${i}"
+                onclick="toggleOrientation(${i})" title="Base ${i+1}: ${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}mm">
+            <span class="orient-icon">⬡</span>
+            <span class="orient-dims">${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}</span>
+            <span class="orient-stability">${(o.stability * 100).toFixed(0)}%</span>
+        </div>`;
+    }).join('');
+
+    container.style.display = 'block';
+}
+
+function toggleOrientation(index) {
+    if (!state.selectedOrientations) state.selectedOrientations = new Set();
+    if (state.selectedOrientations.has(index)) {
+        if (state.selectedOrientations.size > 1) state.selectedOrientations.delete(index);
+    } else {
+        state.selectedOrientations.add(index);
+    }
+    renderOrientationSelector();
 }
 
 // DOM Elements
@@ -1799,8 +1840,11 @@ async function handleCalculate() {
                         const orientationPool = [];
 
                         const baseSources = [];
+                        const selectedSet = state.selectedOrientations;
                         if (state.stlStableOrientations && state.stlStableOrientations.length > 0) {
-                            for (const sb of state.stlStableOrientations) {
+                            for (let i = 0; i < state.stlStableOrientations.length; i++) {
+                                const sb = state.stlStableOrientations[i];
+                                if (selectedSet && !selectedSet.has(i)) continue;
                                 if (sb.geometry) baseSources.push(sb.geometry);
                             }
                         }

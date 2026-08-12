@@ -1564,3 +1564,67 @@ body {
     color: white;
     border-color: var(--accent);
 }
+
+/* Orientation Selector */
+.orientation-selector {
+    margin: 12px 0;
+    padding: 0;
+}
+
+.orientation-selector label {
+    display: block;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.orientation-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+    gap: 6px;
+}
+
+.orient-card {
+    background: var(--bg-tertiary);
+    border: 2px solid var(--border);
+    border-radius: var(--radius);
+    padding: 8px 6px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.15s;
+    user-select: none;
+}
+
+.orient-card:hover {
+    border-color: var(--accent);
+    background: var(--bg-secondary);
+}
+
+.orient-card.selected {
+    border-color: var(--accent);
+    background: rgba(59, 130, 246, 0.12);
+}
+
+.orient-icon {
+    display: block;
+    font-size: 1.2rem;
+    margin-bottom: 2px;
+}
+
+.orient-dims {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--text-primary);
+    font-weight: 500;
+    line-height: 1.2;
+}
+
+.orient-stability {
+    display: block;
+    font-size: 0.65rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
