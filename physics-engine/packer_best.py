@@ -1134,6 +1134,33 @@ class BestPacker:
                     fill = vol / (self.box_l * self.box_w * self.box_h) * 100
                     print(f"  [Worker {worker+1}] {len(inside)} pieces, {fill:.1f}% fill, iter={iter_count}", flush=True)
 
+        # FCL cleanup: remove truly colliding pieces (AABB pre-filtered)
+        if len(best_placed) > 0:
+            t_clean = time.time()
+            verified, verified_meshes = [], []
+            fcl_checks = 0
+            _FCL_AVAILABLE = True  # enable FCL for cleanup only
+            for pi, pm in enumerate(best_meshes):
+                collides = False
+                a = pm.bounds
+                for vm in verified_meshes:
+                    b = vm.bounds
+                    if not (a[1,0] > b[0,0] and a[0,0] < b[1,0] and
+                            a[1,1] > b[0,1] and a[0,1] < b[1,1] and
+                            a[1,2] > b[0,2] and a[0,2] < b[1,2]): continue
+                    fcl_checks += 1
+                    if meshes_collide(pm, vm):
+                        collides = True; break
+                if not collides:
+                    verified.append(best_placed[pi])
+                    verified_meshes.append(pm)
+            removed = len(best_placed) - len(verified)
+            if removed > 0:
+                best_placed, best_meshes = verified, verified_meshes
+                if verbose:
+                    print(f"  [Cleanup] Removed {removed} colliding pieces ({time.time()-t_clean:.1f}s, {fcl_checks} FCL checks)", flush=True)
+            _FCL_AVAILABLE = _fcl_was  # restore
+
         elapsed = time.time() - t0
         vol = sum(m.volume for m in best_meshes) if best_meshes else 0
         fill = vol / (self.box_l * self.box_w * self.box_h) * 100 if vol > 0 else 0
