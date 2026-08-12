@@ -632,6 +632,10 @@ function renderOrientationSelector() {
     });
 }
 
+// Expose for inline onclick handlers (module scope)
+window.toggleOrientation = toggleOrientation;
+window.setBoxPreset = setBoxPreset;
+
 function renderOrientationPreview(canvasId, geometry) {
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
