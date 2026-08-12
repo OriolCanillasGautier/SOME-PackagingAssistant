@@ -1006,7 +1006,12 @@ class BestPacker:
 
     def pack_sparrow(self, max_pieces=500, n_workers=4, n_iterations=200, verbose=True):
         """Global optimization via random placement → separation → compression.
+        Uses fast vertex proximity (FCL disabled — too slow for O(n²) inner loop).
         Inspired by JonasTollenaere/sparrow-3d (LGPL-3.0)."""
+        global _FCL_AVAILABLE
+        _fcl_was = _FCL_AVAILABLE
+        _FCL_AVAILABLE = False  # FCL too slow for O(n²) inner loop
+
         n_items = min(max_pieces, 500)
         orient_list = list(range(len(self.orientations)))
         total_vol = sum(o['size'][0] * o['size'][1] * o['size'][2] for o in self.orientations)
@@ -1134,6 +1139,7 @@ class BestPacker:
         fill = vol / (self.box_l * self.box_w * self.box_h) * 100 if vol > 0 else 0
         if verbose:
             print(f"  [Sparrow] DONE: {best_count} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
+        _FCL_AVAILABLE = _fcl_was
         return best_placed, best_meshes
 
     # ── Full pipeline ──
