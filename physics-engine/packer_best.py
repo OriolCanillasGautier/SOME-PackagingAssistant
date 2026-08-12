@@ -904,7 +904,7 @@ class BestPacker:
             current_y = max(current_y, top_y)
 
             if verbose:
-        elapsed = time.time() - t0
+                elapsed = time.time() - t0
                 vol = sum(m.volume for m in meshes)
                 fill = vol / (self.box_l * self.box_w * self.box_h) * 100
                 nm = self.orientations[best_ori]['name']
