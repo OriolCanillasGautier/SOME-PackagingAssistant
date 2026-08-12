@@ -20,6 +20,12 @@
     --accent-red: #ef4444;
     --accent-purple: #8b5cf6;
     --border-color: #cbd5e1;
+    --border: var(--border-color);
+    --border-light: rgba(203, 213, 225, 0.5);
+    --bg-tertiary: #dde4ed;
+    --input-bg: #f8fafc;
+    --accent: var(--accent-blue);
+    --radius: var(--radius-md);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
     --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.1);
     --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.15);
@@ -43,6 +49,12 @@
         --accent-green: #34d399;
         --accent-green-hover: #10b981;
         --border-color: #475569;
+        --border: var(--border-color);
+        --border-light: rgba(71, 85, 105, 0.5);
+        --bg-tertiary: #2d3a50;
+        --input-bg: #1e293b;
+        --accent: var(--accent-blue);
+        --radius: var(--radius-md);
         --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
         --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.4);
         --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.5);
@@ -267,7 +279,7 @@ body {
 }
 
 /* Box section accent */
-.box-section {
+details.box-section {
     border-left: 4px solid var(--accent-green);
 }
 

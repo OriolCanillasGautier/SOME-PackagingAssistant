@@ -636,11 +636,20 @@ function renderOrientationSelector() {
 window.toggleOrientation = toggleOrientation;
 window.setBoxPreset = setBoxPreset;
 
+const orientationRenderers = new Map();
+
 function renderOrientationPreview(canvasId, geometry) {
     const canvas = document.getElementById(canvasId);
     if (!canvas) return;
 
+    const oldRenderer = orientationRenderers.get(canvasId);
+    if (oldRenderer) {
+        oldRenderer.dispose();
+        orientationRenderers.delete(canvasId);
+    }
+
     const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
+    orientationRenderers.set(canvasId, renderer);
     renderer.setSize(140, 140);
     renderer.setClearColor(0x000000, 0);
 
@@ -962,6 +971,20 @@ function setupEventListeners() {
             elements.autoModeHint.style.display = autoMode ? 'block' : 'none';
         }
     });
+
+    // GPU method change — show/hide cell-size based on method
+    const gpuMethod = document.getElementById('gpu-method');
+    const gpuCellSize = document.getElementById('gpu-cell-size');
+    if (gpuMethod && gpuCellSize) {
+        const updateGPUOptions = () => {
+            const isVoxel = gpuMethod.value === 'voxel';
+            gpuCellSize.style.display = isVoxel ? '' : 'none';
+            const cellSizeLabel = gpuCellSize.parentElement?.querySelector('label[for="gpu-cell-size"]');
+            if (cellSizeLabel) cellSizeLabel.style.display = isVoxel ? '' : 'none';
+        };
+        gpuMethod.addEventListener('change', updateGPUOptions);
+        updateGPUOptions();  // initial state
+    }
 
     elements.objWeight.addEventListener('input', updateMaxPiecesLimit);
     elements.maxWeight.addEventListener('input', updateMaxPiecesLimit);
@@ -2688,10 +2711,10 @@ async function applyLanguage() {
     
     // Section titles
     const objSection = document.querySelector('.object-section .section-header h2');
-    const boxSection = document.querySelector('.box-section > h2');
+    const boxSummary = document.querySelector('details.box-section > summary');
     const bulkSection = document.querySelector('.bulk-section > h2');
     if (objSection) objSection.textContent = t.objectTitle;
-    if (boxSection) boxSection.textContent = t.boxTitle;
+    if (boxSummary) boxSummary.textContent = t.boxTitle;
     if (bulkSection) bulkSection.textContent = t.bulkTitle;
     
     // Input labels (by associated input id)

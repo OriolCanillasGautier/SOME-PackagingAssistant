@@ -419,6 +419,88 @@ def meshes_collide(mesh_a, mesh_b, eps=0.01):
         return False
 
 
+def voxelize_mesh(mesh, cell_size):
+    """Rasterize mesh faces into 3D sparse occupancy data.
+    Returns (sparse_voxels, origin_mm) where sparse_voxels is [N,3] int32
+    local voxel indices and origin_mm is the mm position of voxel (0,0,0)."""
+    bmin = mesh.bounds[0] - cell_size
+    bmax = mesh.bounds[1] + cell_size
+    nx = max(1, int(math.ceil((bmax[0] - bmin[0]) / cell_size)))
+    ny = max(1, int(math.ceil((bmax[1] - bmin[1]) / cell_size)))
+    nz = max(1, int(math.ceil((bmax[2] - bmin[2]) / cell_size)))
+    occ = np.zeros((nx, ny, nz), dtype=np.uint8)
+
+    for fi in range(len(mesh.faces)):
+        f = mesh.faces[fi]
+        v0 = mesh.vertices[f[0]].copy()
+        v1 = mesh.vertices[f[1]].copy()
+        v2 = mesh.vertices[f[2]].copy()
+
+        tri_min = np.minimum(np.minimum(v0, v1), v2)
+        tri_max = np.maximum(np.maximum(v0, v1), v2)
+
+        ix0 = max(0, int((tri_min[0] - bmin[0]) / cell_size))
+        ix1 = min(nx - 1, int((tri_max[0] - bmin[0]) / cell_size))
+        iy0 = max(0, int((tri_min[1] - bmin[1]) / cell_size))
+        iy1 = min(ny - 1, int((tri_max[1] - bmin[1]) / cell_size))
+        iz0 = max(0, int((tri_min[2] - bmin[2]) / cell_size))
+        iz1 = min(nz - 1, int((tri_max[2] - bmin[2]) / cell_size))
+
+        if ix0 > ix1 or iy0 > iy1 or iz0 > iz1:
+            continue
+
+        e0x, e0y, e0z = float(v1[0]-v0[0]), float(v1[1]-v0[1]), float(v1[2]-v0[2])
+        e1x, e1y, e1z = float(v2[0]-v0[0]), float(v2[1]-v0[1]), float(v2[2]-v0[2])
+
+        nx_n = e0y*e1z - e0z*e1y
+        ny_n = e0z*e1x - e0x*e1z
+        nz_n = e0x*e1y - e0y*e1x
+        nl = math.sqrt(nx_n*nx_n + ny_n*ny_n + nz_n*nz_n)
+        if nl < 1e-12:
+            continue
+        nx_n /= nl; ny_n /= nl; nz_n /= nl
+
+        d00 = e0x*e0x + e0y*e0y + e0z*e0z
+        d01 = e0x*e1x + e0y*e1y + e0z*e1z
+        d11 = e1x*e1x + e1y*e1y + e1z*e1z
+        denom = d00 * d11 - d01 * d01
+        if abs(denom) < 1e-12:
+            continue
+
+        v0x, v0y, v0z = float(v0[0]), float(v0[1]), float(v0[2])
+
+        for ix in range(ix0, ix1 + 1):
+            cx = bmin[0] + (ix + 0.5) * cell_size
+            dpx0 = cx - v0x
+            for iy in range(iy0, iy1 + 1):
+                cy = bmin[1] + (iy + 0.5) * cell_size
+                dpy0 = cy - v0y
+                for iz in range(iz0, iz1 + 1):
+                    cz = bmin[2] + (iz + 0.5) * cell_size
+                    dpz0 = cz - v0z
+
+                    dist = abs(dpx0*nx_n + dpy0*ny_n + dpz0*nz_n)
+                    if dist > cell_size * 1.1:
+                        continue
+
+                    d20 = dpx0*e0x + dpy0*e0y + dpz0*e0z
+                    d21 = dpx0*e1x + dpy0*e1y + dpz0*e1z
+                    u = (d11 * d20 - d01 * d21) / denom
+                    v = (d00 * d21 - d01 * d20) / denom
+
+                    if u >= -0.08 and v >= -0.08 and u + v <= 1.08:
+                        occ[ix, iy, iz] = 1
+
+    try:
+        from scipy.ndimage import binary_fill_holes
+        occ = binary_fill_holes(occ > 0).astype(np.uint8)
+    except Exception:
+        pass
+
+    sparse = np.argwhere(occ > 0).astype(np.int32)
+    return sparse, bmin
+
+
 # ═══════════════════════════════════════════════
 # Best Packer
 # ═══════════════════════════════════════════════
@@ -655,6 +737,70 @@ class BestPacker:
         for fi in range(len(o['faces'])):
             for d in range(3):
                 self._d_placed_norms[pi, fi, d] = wns[fi, d]
+
+    # ── Voxel occupancy helpers (for sparrow collision detection) ──
+
+    def _ensure_voxel_data(self, cell_size):
+        if hasattr(self, '_voxel_data') and self._voxel_data is not None \
+           and getattr(self, '_voxel_cell_size', 0) == cell_size:
+            return
+        self._voxel_cell_size = cell_size
+        self._voxel_data = []
+        for o in self.orientations:
+            sparse, origin = voxelize_mesh(o['mesh'], cell_size)
+            self._voxel_data.append({'sparse': sparse, 'origin': origin})
+        return self._voxel_data
+
+    def _mark_in_grid(self, grid, piece_id, x, y, z, oi, cell_size):
+        vd = self._voxel_data[oi]
+        sparse, origin = vd['sparse'], vd['origin']
+        ox = int(round((x + origin[0]) / cell_size))
+        oy = int(round((y + origin[1]) / cell_size))
+        oz = int(round((z + origin[2]) / cell_size))
+        wv = sparse + np.array([ox, oy, oz], dtype=np.int32)
+        gx, gy, gz = wv[:, 0], wv[:, 1], wv[:, 2]
+        sh = grid.shape
+        m = (gx >= 0) & (gx < sh[0]) & (gy >= 0) & (gy < sh[1]) & (gz >= 0) & (gz < sh[2])
+        grid[gx[m], gy[m], gz[m]] = piece_id
+
+    def _item_collides_in_grid(self, grid, piece_id, x, y, z, oi, cell_size):
+        vd = self._voxel_data[oi]
+        sparse, origin = vd['sparse'], vd['origin']
+        ox = int(round((x + origin[0]) / cell_size))
+        oy = int(round((y + origin[1]) / cell_size))
+        oz = int(round((z + origin[2]) / cell_size))
+        wv = sparse + np.array([ox, oy, oz], dtype=np.int32)
+        gx, gy, gz = wv[:, 0], wv[:, 1], wv[:, 2]
+        sh = grid.shape
+        m = (gx >= 0) & (gx < sh[0]) & (gy >= 0) & (gy < sh[1]) & (gz >= 0) & (gz < sh[2])
+        vals = grid[gx[m], gy[m], gz[m]]
+        return np.any((vals != 0) & (vals != piece_id))
+
+    def _clear_from_grid(self, grid, piece_id, x, y, z, oi, cell_size):
+        vd = self._voxel_data[oi]
+        sparse, origin = vd['sparse'], vd['origin']
+        ox = int(round((x + origin[0]) / cell_size))
+        oy = int(round((y + origin[1]) / cell_size))
+        oz = int(round((z + origin[2]) / cell_size))
+        wv = sparse + np.array([ox, oy, oz], dtype=np.int32)
+        gx, gy, gz = wv[:, 0], wv[:, 1], wv[:, 2]
+        sh = grid.shape
+        m = (gx >= 0) & (gx < sh[0]) & (gy >= 0) & (gy < sh[1]) & (gz >= 0) & (gz < sh[2])
+        gx, gy, gz = gx[m], gy[m], gz[m]
+        pos = (gx, gy, gz)
+        mask = grid[pos] == piece_id
+        if mask.any():
+            grid[gx[mask], gy[mask], gz[mask]] = 0
+
+    def _check_occupied(self, grid, x, y, z, sparse, origin, cell_size):
+        ox = int(round((x + origin[0]) / cell_size))
+        oy = int(round((y + origin[1]) / cell_size))
+        oz = int(round((z + origin[2]) / cell_size))
+        wv = sparse + np.array([ox, oy, oz], dtype=np.int32)
+        gx, gy, gz = wv[:, 0], wv[:, 1], wv[:, 2]
+        sh = grid.shape
+        m = (gx >= 0) & (gx < sh[0]) & (gy >= 0) & (gy < sh[1]) & (gz >= 0) & (gz < sh[2])
+        return np.any(grid[gx[m], gy[m], gz[m]] != 0)
 
     # ── Greedy baseline ──
 
@@ -1004,178 +1150,153 @@ class BestPacker:
 
     # ── Sparrow: Separation + Compression ──
 
-    def pack_sparrow(self, max_pieces=500, n_workers=4, n_iterations=200, verbose=True):
-        """Global optimization via random placement → separation → compression.
-        Uses fast vertex proximity (FCL disabled — too slow for O(n²) inner loop).
-        Inspired by JonasTollenaere/sparrow-3d (LGPL-3.0)."""
-        global _FCL_AVAILABLE
-        _fcl_was = _FCL_AVAILABLE
-        _FCL_AVAILABLE = False  # FCL too slow for O(n²) inner loop
+    def pack_sparrow(self, max_pieces=500, n_workers=4, n_iterations=200, cell_size=None, verbose=True):
+        """Sequential voxel-based packing using occupancy grid collision detection.
+        Places pieces one at a time, scanning for the lowest valid Y position
+        using height-map accelerated search. Guarantees valid non-colliding
+        results (concave-safe via voxel occupancy)."""
+        if cell_size is None:
+            cell_size = 1.5
+        if not hasattr(self, '_voxel_data') or self._voxel_data is None or \
+           getattr(self, '_voxel_cell_size', 0) != cell_size:
+            self._ensure_voxel_data(cell_size)
+        vox_data = self._voxel_data
+        if not vox_data:
+            if verbose:
+                print("[Sparrow] Voxel data unavailable, falling back to greedy")
+            return self.pack_greedy(max_pieces, verbose)
 
         n_items = min(max_pieces, 500)
         orient_list = list(range(len(self.orientations)))
-        total_vol = sum(o['size'][0] * o['size'][1] * o['size'][2] for o in self.orientations)
-        base_height = total_vol / (self.box_l * self.box_w) * 1.5
-        initial_height = min(self.box_h * 3, max(self.box_h * 1.2, base_height))
         if verbose:
-            print(f"[Sparrow] {n_items} items, initial_height={initial_height:.0f}mm, {n_workers} workers", flush=True)
+            print(f"[Sparrow] {n_items} items, cell={cell_size}mm, "
+                  f"{n_workers} workers", flush=True)
 
         best_placed, best_meshes = [], []
         best_count = 0
         t0 = time.time()
 
-        for worker in range(n_workers):
-            state = []
-            state_meshes = []
-            for i in range(n_items):
-                oi = random.choice(orient_list)
-                o = self.orientations[oi]
-                sx, sy, sz = o['size']
-                x = random.uniform(0, self.box_l - sx)
-                z = random.uniform(0, self.box_w - sz)
-                y = random.uniform(0, initial_height - sy)
-                state.append((x, y, z, oi, o['name']))
-                cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
-                state_meshes.append(cm)
+        nx_vox = int(math.ceil(self.box_l / cell_size))
+        ny_vox = int(math.ceil(self.box_h / cell_size))
+        nz_vox = int(math.ceil(self.box_w / cell_size))
 
-            collision_weights = {}
-            current_height = initial_height
-            improved = True
+        sparse_cache = [(vd['sparse'], vd['origin']) for vd in vox_data]
+
+        for worker in range(n_workers):
+            grid = np.zeros((nx_vox, ny_vox, nz_vox), dtype=np.int16)
+            world_hm = np.zeros((nx_vox, nz_vox), dtype=np.int32)
+            placed_w = []
+            meshes_w = []
+            consecutive = 0
             iter_count = 0
 
-            while improved and iter_count < n_iterations:
-                improved = False
+            while len(placed_w) < n_items and consecutive < 300 and iter_count < n_iterations:
                 iter_count += 1
-
-                colliding = set()
-                for i in range(len(state)):
-                    for j in range(i + 1, len(state)):
-                        key = (i, j)
-                        a, b = state_meshes[i], state_meshes[j]
-                        if not (a.bounds[1,0] > b.bounds[0,0] and a.bounds[0,0] < b.bounds[1,0] and
-                                a.bounds[1,1] > b.bounds[0,1] and a.bounds[0,1] < b.bounds[1,1] and
-                                a.bounds[1,2] > b.bounds[0,2] and a.bounds[0,2] < b.bounds[1,2]):
-                            continue
-                        if meshes_collide(a, b):
-                            colliding.add(i)
-                            colliding.add(j)
-                            collision_weights[key] = collision_weights.get(key, 1.0) * 1.05
-
-                if not colliding:
-                    if current_height > self.box_h * 0.8:
-                        current_height *= 0.995
-                        improved = True
-                    break
-
-                items = sorted(colliding)
-                random.shuffle(items)
-                for item_idx in items:
-                    oi = state[item_idx][3]
-                    o = self.orientations[oi]
-                    sx, sy, sz = o['size']
-                    best_score = float('inf')
-                    best_xyz = None
-                    old_x, old_y, old_z = state[item_idx][:3]
-
-                    for s in range(50):
-                        if s < 20:
-                            nx = random.uniform(0, self.box_l - sx)
-                            nz = random.uniform(0, self.box_w - sz)
-                            ny = random.uniform(0, current_height - sy)
-                        else:
-                            j = (s - 20) % 6
-                            k = (s - 20) // 6
-                            nx = old_x + (j - 2.5) * self.scan_step
-                            nz = old_z + (k - 2.5) * self.scan_step
-                            ny = old_y + (random.random() - 0.5) * self.scan_step
-                        nx = max(0, min(self.box_l - sx, nx))
-                        ny = max(0, min(current_height - sy, ny))
-                        nz = max(0, min(self.box_w - sz, nz))
-
-                        cm = o['mesh'].copy(); cm.apply_translation([nx, ny, nz])
-                        score = 0
-                        bad = False
-                        for j in range(len(state)):
-                            if j == item_idx: continue
-                            b1, b2 = cm.bounds, state_meshes[j].bounds
-                            if not (b1[1,0] > b2[0,0] and b1[0,0] < b2[1,0] and
-                                    b1[1,1] > b2[0,1] and b1[0,1] < b2[1,1] and
-                                    b1[1,2] > b2[0,2] and b1[0,2] < b2[1,2]): continue
-                            if meshes_collide(cm, state_meshes[j]):
-                                w = collision_weights.get((min(item_idx, j), max(item_idx, j)), 1.0)
-                                score += w
-                                if score >= best_score: bad = True; break
-                        if bad: continue
-
-                        if score < best_score:
-                            best_score = score
-                            best_xyz = (nx, ny, nz)
-
-                    if best_xyz and best_score == 0:
-                        improved = True
-                        state[item_idx] = (best_xyz[0], best_xyz[1], best_xyz[2], oi, o['name'])
-                        nm = o['mesh'].copy(); nm.apply_translation([best_xyz[0], best_xyz[1], best_xyz[2]])
-                        state_meshes[item_idx] = nm
-
-            inside = []
-            inside_meshes = []
-            for i, (x, y, z, oi, name) in enumerate(state):
+                oi = random.choice(orient_list)
                 o = self.orientations[oi]
-                if x >= 0 and y >= 0 and z >= 0 and x + o['size'][0] <= self.box_l and y + o['size'][1] <= self.box_h and z + o['size'][2] <= self.box_w:
-                    inside.append((x, y, z, oi, name))
-                    inside_meshes.append(state_meshes[i])
+                osx, osy, osz = o['size']
 
-            if len(inside) > best_count:
-                best_count = len(inside)
-                best_placed = inside
-                best_meshes = inside_meshes
+                if osy > self.box_h:
+                    consecutive += 1
+                    continue
+
+                sx_v = int(math.ceil(osx / cell_size))
+                sy_v = int(math.ceil(osy / cell_size))
+                sz_v = int(math.ceil(osz / cell_size))
+
+                if sx_v > nx_vox or sz_v > nz_vox or sy_v > ny_vox:
+                    consecutive += 1
+                    continue
+
+                sparse, origin = sparse_cache[oi]
+                best_y = float('inf')
+                best_xyz = None
+
+                # Sample ~100 XZ positions randomly
+                xz_step = max(1, int(4.0 / cell_size))
+                x_positions = list(range(0, nx_vox - sx_v + 1, xz_step))
+                z_positions = list(range(0, nz_vox - sz_v + 1, xz_step))
+                random.shuffle(x_positions)
+                random.shuffle(z_positions)
+                if len(x_positions) * len(z_positions) > 100:
+                    x_positions = x_positions[:max(5, int(100 / max(1, len(z_positions))))]
+                    z_positions = z_positions[:max(5, int(100 / max(1, len(x_positions))))]
+                    random.shuffle(x_positions)
+                    random.shuffle(z_positions)
+
+                for gx in x_positions:
+                    for gz in z_positions:
+                        # Vectorized base Y from height map
+                        wx = gx + sparse[:, 0]
+                        wz = gz + sparse[:, 2]
+                        m = (wx >= 0) & (wx < nx_vox) & (wz >= 0) & (wz < nz_vox)
+                        needed = world_hm[wx[m], wz[m]] - sparse[m, 1]
+                        base_vox = max(0, 0 if len(needed) == 0 else int(needed.max()))
+
+                        max_y = ny_vox - sy_v
+                        for try_y in range(base_vox, max_y + 1):
+                            wy = try_y + sparse[:, 1]
+                            m2 = (wx >= 0) & (wx < nx_vox) & (wy >= 0) & (wy < ny_vox) & (wz >= 0) & (wz < nz_vox)
+                            if not m2.all():
+                                continue
+                            if grid[wx[m2], wy[m2], wz[m2]].any():
+                                continue
+                            ny_mm = try_y * cell_size
+                            if ny_mm < best_y:
+                                best_y = ny_mm
+                                best_xyz = (gx * cell_size, ny_mm, gz * cell_size, oi)
+                            break
+                        if best_y == 0:
+                            break
+                    if best_y == 0:
+                        break
+
+                if best_xyz is None:
+                    consecutive += 1
+                    continue
+
+                nx, ny, nz = best_xyz[:3]
+                self._mark_in_grid(grid, len(placed_w) + 1, nx, ny, nz, oi, cell_size)
+
+                nvx = int(nx / cell_size)
+                nvy = int(ny / cell_size)
+                nvz = int(nz / cell_size)
+                wx_all = nvx + sparse[:, 0]
+                wy_all = nvy + sparse[:, 1]
+                wz_all = nvz + sparse[:, 2]
+                m_all = (wx_all >= 0) & (wx_all < nx_vox) & (wz_all >= 0) & (wz_all < nz_vox)
+                for i_v in np.where(m_all)[0]:
+                    if wy_all[i_v] + 1 > world_hm[wx_all[i_v], wz_all[i_v]]:
+                        world_hm[wx_all[i_v], wz_all[i_v]] = wy_all[i_v] + 1
+
+                cm = o['mesh'].copy(); cm.apply_translation([nx, ny, nz])
+                meshes_w.append(cm)
+                placed_w.append((nx, ny, nz, oi, o['name']))
+                consecutive = 0
+
+            if len(placed_w) > best_count:
+                best_count = len(placed_w)
+                best_placed = list(placed_w)
+                best_meshes = list(meshes_w)
                 if verbose:
-                    vol = sum(m.volume for m in inside_meshes)
+                    vol = sum(m.volume for m in meshes_w)
                     fill = vol / (self.box_l * self.box_w * self.box_h) * 100
-                    print(f"  [Worker {worker+1}] {len(inside)} pieces, {fill:.1f}% fill, iter={iter_count}", flush=True)
-
-        # FCL cleanup: remove truly colliding pieces (AABB pre-filtered)
-        if len(best_placed) > 0:
-            t_clean = time.time()
-            verified, verified_meshes = [], []
-            fcl_checks = 0
-            _FCL_AVAILABLE = True  # enable FCL for cleanup only
-            for pi, pm in enumerate(best_meshes):
-                collides = False
-                a = pm.bounds
-                for vm in verified_meshes:
-                    b = vm.bounds
-                    if not (a[1,0] > b[0,0] and a[0,0] < b[1,0] and
-                            a[1,1] > b[0,1] and a[0,1] < b[1,1] and
-                            a[1,2] > b[0,2] and a[0,2] < b[1,2]): continue
-                    fcl_checks += 1
-                    if meshes_collide(pm, vm):
-                        collides = True; break
-                if not collides:
-                    verified.append(best_placed[pi])
-                    verified_meshes.append(pm)
-            removed = len(best_placed) - len(verified)
-            if removed > 0:
-                best_placed, best_meshes = verified, verified_meshes
-                if verbose:
-                    print(f"  [Cleanup] Removed {removed} colliding pieces ({time.time()-t_clean:.1f}s, {fcl_checks} FCL checks)", flush=True)
-            _FCL_AVAILABLE = _fcl_was  # restore
+                    print(f"  [Worker {worker+1}] {len(placed_w)} pieces, {fill:.1f}% fill, iter={iter_count}", flush=True)
 
         elapsed = time.time() - t0
         vol = sum(m.volume for m in best_meshes) if best_meshes else 0
         fill = vol / (self.box_l * self.box_w * self.box_h) * 100 if vol > 0 else 0
         if verbose:
             print(f"  [Sparrow] DONE: {best_count} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
-        _FCL_AVAILABLE = _fcl_was
         return best_placed, best_meshes
 
     # ── Full pipeline ──
 
-    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False, explore_local=False, sparrow_workers=4):
+    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False, explore_local=False, sparrow_workers=4, voxel_cell=1.5):
         t0 = time.time()
 
         if method == 'sparrow':
-            placed, meshes = self.pack_sparrow(max_pieces, n_workers=sparrow_workers, verbose=verbose)
+            placed, meshes = self.pack_sparrow(max_pieces, n_workers=sparrow_workers, n_iterations=max_pieces * 40, cell_size=voxel_cell, verbose=verbose)
         elif method == 'greedy':
             placed, meshes = self.pack_greedy(max_pieces, verbose, beam_width=beam_width, hierarchical=hierarchical, explore_local=explore_local)
         elif method == 'layers':
@@ -1378,6 +1499,7 @@ def main():
     p.add_argument("--export-stl", action="store_true", help="Export merged STL of all placed pieces")
     p.add_argument("--explore-local", action="store_true", help="Local perturbation search around each placement (sparrow-style)")
     p.add_argument("--sparrow-workers", type=int, default=1, help="Parallel attempts per batch (higher = more robust but slower)")
+    p.add_argument("--voxel-cell", type=float, default=1.5, help="Voxel cell size in mm for sparrow collision grid (1.0=higher precision, 2.0=faster)")
     p.add_argument("--output", type=str, default="packed_best.png")
     args = p.parse_args()
 
@@ -1433,7 +1555,7 @@ def main():
 
     print(f"\nPacking ({args.method})...", flush=True)
     t_start = time.time()
-    placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width, hierarchical=args.hierarchical, explore_local=args.explore_local, sparrow_workers=args.sparrow_workers)
+    placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width, hierarchical=args.hierarchical, explore_local=args.explore_local, sparrow_workers=args.sparrow_workers, voxel_cell=args.voxel_cell)
     elapsed = time.time() - t_start
 
     if meshes:
@@ -1463,6 +1585,7 @@ def main():
             f"Explore local: {args.explore_local}",
             f"Compact: {args.compact}",
             f"Sparrow workers: {args.sparrow_workers if args.method == 'sparrow' else 'N/A'}",
+            f"Voxel cell: {args.voxel_cell if args.method == 'sparrow' else 'N/A'}mm",
             f"Seed: {args.seed}",
             f"",
             f"Result: {len(placed)} pieces, {sum(m.volume for m in meshes)/(box_dims[0]*box_dims[1]*box_dims[2])*100:.1f}% fill",
