@@ -360,13 +360,8 @@ def generate_orientations(mesh, n_yaw, box_dims, use_pitch_roll=True, shrink=0.4
             result['coll_verts'] = hull.vertices
             result['coll_faces'] = hull.faces
             result['coll_norms'] = hull.normals
-        # Precompute InaccessibilityPoles for fast collision proxy
-        try:
-            cv = result.get('coll_verts', result['verts'])
-            cf = result.get('coll_faces', result['faces'])
-            result['poles'] = compute_inaccessibility_poles(cv, cf, n_poles=5)
-        except Exception:
-            result['poles'] = []
+        # InaccessibilityPoles: fast collision proxy (computed on demand, ~4s/orientation)
+        result['poles'] = []  # disabled by default — enable with --poles flag
         return result
 
     # Yaw rotations (around Y axis)
@@ -397,10 +392,17 @@ def generate_orientations(mesh, n_yaw, box_dims, use_pitch_roll=True, shrink=0.4
     return results
 
 
+_FCL_AVAILABLE = False
+try:
+    if hasattr(trimesh, 'collision') and hasattr(trimesh.collision, 'CollisionManager'):
+        trimesh.collision.CollisionManager()  # test instantiation
+        _FCL_AVAILABLE = True
+except Exception:
+    pass
+
 def meshes_collide(mesh_a, mesh_b, eps=0.01):
     try:
-        # Use trimesh CollisionManager for robust mesh-mesh intersection
-        if hasattr(trimesh, 'collision') and hasattr(trimesh.collision, 'CollisionManager'):
+        if _FCL_AVAILABLE:
             m = trimesh.collision.CollisionManager()
             m.add_object('a', mesh_a)
             m.add_object('b', mesh_b)
@@ -1002,149 +1004,118 @@ class BestPacker:
 
     # ── Sparrow: Separation + Compression ──
 
-    def pack_sparrow(self, max_pieces=500, n_workers=4, n_iterations=200, verbose=True):
-        """Global optimization via random placement → separation → compression.
+    def pack_sparrow(self, max_pieces=500, n_workers=1, n_iterations=20, verbose=True):
+        """Batch global placement → AABB separation → FCL cleanup.
+        Uses fast AABB for the separation phase, then FCL for final cleanup.
         Inspired by JonasTollenaere/sparrow-3d (LGPL-3.0)."""
-        import copy as _copy
-        n_items = min(max_pieces, 500)
         orient_list = list(range(len(self.orientations)))
-        total_vol = sum(o['size'][0] * o['size'][1] * o['size'][2] for o in self.orientations)
-        base_height = total_vol / (self.box_l * self.box_w) * 1.5
-        initial_height = min(self.box_h * 3, max(self.box_h * 1.2, base_height))
-        if verbose:
-            print(f"[Sparrow] {n_items} items, initial_height={initial_height:.0f}mm, {n_workers} workers")
-
-        best_placed, best_meshes = [], []
-        best_count = 0
+        all_placed, all_meshes = [], []
         t0 = time.time()
+        batch_size = 60
 
-        for worker in range(n_workers):
-            state = []
-            state_meshes = []
-            for i in range(n_items):
-                oi = random.choice(orient_list)
-                o = self.orientations[oi]
-                sx, sy, sz = o['size']
-                x = random.uniform(0, self.box_l - sx)
-                z = random.uniform(0, self.box_w - sz)
-                y = random.uniform(0, initial_height - sy)
-                state.append((x, y, z, oi, o['name']))
-                cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
-                state_meshes.append(cm)
+        if verbose:
+            print(f"[Sparrow] max={max_pieces}, batch={batch_size}, workers={n_workers}", flush=True)
 
-            # Separation phase
-            collision_weights = {}
-            current_height = initial_height
-            improved = True
-            iter_count = 0
+        while len(all_placed) < max_pieces:
+            batch_n = min(batch_size, max_pieces - len(all_placed))
+            best_batch_placed, best_batch_meshes = [], []
+            best_count = -1
 
-            while improved and iter_count < n_iterations:
-                improved = False
-                iter_count += 1
-
-                # Find colliding pairs
-                colliding = set()
-                for i in range(len(state)):
-                    for j in range(i + 1, len(state)):
-                        key = (i, j)
-                        a, b = state_meshes[i], state_meshes[j]
-                        if not (a.bounds[1,0] > b.bounds[0,0] and a.bounds[0,0] < b.bounds[1,0] and
-                                a.bounds[1,1] > b.bounds[0,1] and a.bounds[0,1] < b.bounds[1,1] and
-                                a.bounds[1,2] > b.bounds[0,2] and a.bounds[0,2] < b.bounds[1,2]):
-                            continue
-                        if meshes_collide(a, b):
-                            colliding.add(i)
-                            colliding.add(j)
-                            collision_weights[key] = collision_weights.get(key, 1.0) * 1.05
-
-                if not colliding:
-                    # Successfully separated — try compression
-                    if current_height > self.box_h * 0.8:
-                        current_height *= 0.995
-                        improved = True
-                    break
-
-                # Try to move each colliding item
-                items = sorted(colliding)
-                random.shuffle(items)
-                for item_idx in items:
-                    oi = state[item_idx][3]
+            for worker in range(n_workers):
+                state = list(all_placed)
+                state_meshes = list(all_meshes)
+                for i in range(batch_n):
+                    oi = random.choice(orient_list)
                     o = self.orientations[oi]
                     sx, sy, sz = o['size']
+                    x = random.uniform(0, self.box_l - sx)
+                    y = random.uniform(0, self.box_h - sy)
+                    z = random.uniform(0, self.box_w - sz)
+                    state.append((x, y, z, oi, o['name']))
+                    cm = o['mesh'].copy(); cm.apply_translation([x, y, z])
+                    state_meshes.append(cm)
 
-                    best_score = float('inf')
-                    best_xyz = None
-                    old_x, old_y, old_z = state[item_idx][:3]
+                # AABB-based separation: move new items to non-overlapping positions
+                prev_count = len(all_placed)
+                for _ in range(n_iterations):
+                    moved = 0
+                    for item_idx in range(prev_count, len(state)):
+                        o_oi = state[item_idx][3]
+                        o = self.orientations[o_oi]
+                        sx, sy, sz = o['size']
+                        best_x, best_y, best_z = state[item_idx][:3]
+                        best_overlaps = float('inf')
 
-                    # 50 samples: 20 random + 30 grid
-                    for s in range(50):
-                        if s < 20:
+                        for _ in range(15):
                             nx = random.uniform(0, self.box_l - sx)
+                            ny = random.uniform(0, self.box_h - sy)
                             nz = random.uniform(0, self.box_w - sz)
-                            ny = random.uniform(0, current_height - sy)
-                        else:
-                            j = (s - 20) % 6
-                            k = (s - 20) // 6
-                            nx = old_x + (j - 2.5) * self.scan_step
-                            nz = old_z + (k - 2.5) * self.scan_step
-                            ny = old_y + (random.random() - 0.5) * self.scan_step
-                        nx = max(0, min(self.box_l - sx, nx))
-                        ny = max(0, min(current_height - sy, ny))
-                        nz = max(0, min(self.box_w - sz, nz))
+                            c_min_x, c_max_x = nx, nx + sx
+                            c_min_y, c_max_y = ny, ny + sy
+                            c_min_z, c_max_z = nz, nz + sz
+                            overlaps = 0
+                            for j in range(len(state)):
+                                if j == item_idx: continue
+                                b2 = state_meshes[j].bounds
+                                if (c_max_x > b2[0,0] and c_min_x < b2[1,0] and
+                                    c_max_y > b2[0,1] and c_min_y < b2[1,1] and
+                                    c_max_z > b2[0,2] and c_min_z < b2[1,2]):
+                                    overlaps += 1
+                            if overlaps < best_overlaps:
+                                best_overlaps = overlaps
+                                best_x, best_y, best_z = nx, ny, nz
+                                if overlaps == 0: break
+                        if best_overlaps == 0:
+                            moved += 1
+                            state[item_idx] = (best_x, best_y, best_z, o_oi, o['name'])
+                            nm = o['mesh'].copy(); nm.apply_translation([best_x, best_y, best_z])
+                            state_meshes[item_idx] = nm
+                    if moved == 0: break
 
-                        cm = o['mesh'].copy(); cm.apply_translation([nx, ny, nz])
-                        score = 0
-                        bad = False
-                        for j in range(len(state)):
-                            if j == item_idx: continue
-                            b1, b2 = cm.bounds, state_meshes[j].bounds
-                            if not (b1[1,0] > b2[0,0] and b1[0,0] < b2[1,0] and
-                                    b1[1,1] > b2[0,1] and b1[0,1] < b2[1,1] and
-                                    b1[1,2] > b2[0,2] and b1[0,2] < b2[1,2]): continue
-                            if meshes_collide(cm, state_meshes[j]):
-                                w = collision_weights.get((min(item_idx, j), max(item_idx, j)), 1.0)
-                                score += w
-                                if score >= best_score: bad = True; break
-                        if bad: continue
+                # FCL cleanup: remove colliding pieces (greedy, fast)
+                cleaned = list(all_placed)
+                cleaned_meshes = list(all_meshes)
+                cleaned_bounds = [m.bounds for m in cleaned_meshes]
+                for pi in range(prev_count, len(state)):
+                    pm = state_meshes[pi]
+                    collides = False
+                    a = pm.bounds
+                    for ci, cm_item in enumerate(cleaned_meshes):
+                        b = cleaned_bounds[ci]
+                        if not (a[1,0] > b[0,0] and a[0,0] < b[1,0] and
+                                a[1,1] > b[0,1] and a[0,1] < b[1,1] and
+                                a[1,2] > b[0,2] and a[0,2] < b[1,2]): continue
+                        if meshes_collide(pm, cm_item):
+                            collides = True; break
+                    if not collides:
+                        cleaned.append(state[pi])
+                        cleaned_meshes.append(pm)
+                        cleaned_bounds.append(a)
 
-                        if score < best_score:
-                            best_score = score
-                            best_xyz = (nx, ny, nz)
+                if len(cleaned) > best_count:
+                    best_count = len(cleaned)
+                    best_batch_placed = cleaned
+                    best_batch_meshes = cleaned_meshes
 
-                    if best_xyz and best_score == 0:
-                        improved = True
-                        state[item_idx] = (best_xyz[0], best_xyz[1], best_xyz[2], oi, o['name'])
-                        nm = o['mesh'].copy(); nm.apply_translation([best_xyz[0], best_xyz[1], best_xyz[2]])
-                        state_meshes[item_idx] = nm
-
-            # Filter to pieces inside the actual box
-            inside = []
-            inside_meshes = []
-            for i, (x, y, z, oi, name) in enumerate(state):
-                o = self.orientations[oi]
-                if x >= 0 and y >= 0 and z >= 0 and x + o['size'][0] <= self.box_l and y + o['size'][1] <= self.box_h and z + o['size'][2] <= self.box_w:
-                    inside.append((x, y, z, oi, name))
-                    inside_meshes.append(state_meshes[i])
-
-            if len(inside) > best_count:
-                best_count = len(inside)
-                best_placed = inside
-                best_meshes = inside_meshes
-                if verbose:
-                    vol = sum(m.volume for m in inside_meshes)
-                    fill = vol / (self.box_l * self.box_w * self.box_h) * 100
-                    print(f"  [Worker {worker+1}] {len(inside)} pieces, {fill:.1f}% fill, iter={iter_count}")
+            if best_count <= len(all_placed):
+                break
+            all_placed = best_batch_placed
+            all_meshes = best_batch_meshes
+            if verbose:
+                vol = sum(m.volume for m in all_meshes)
+                fill = vol / (self.box_l * self.box_w * self.box_h) * 100
+                print(f"  [Batch] {len(all_placed)} pieces, {fill:.1f}% fill", flush=True)
 
         elapsed = time.time() - t0
+        vol = sum(m.volume for m in all_meshes) if all_meshes else 0
+        fill = vol / (self.box_l * self.box_w * self.box_h) * 100 if vol > 0 else 0
         if verbose:
-            vol = sum(m.volume for m in best_meshes) if best_meshes else 0
-            fill = vol / (self.box_l * self.box_w * self.box_h) * 100 if vol > 0 else 0
-            print(f"  [Sparrow] DONE: {best_count} pieces, {fill:.1f}% fill, {elapsed:.0f}s")
-        return best_placed, best_meshes
+            print(f"  [Sparrow] DONE: {len(all_placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
+        return all_placed, all_meshes
 
     # ── Full pipeline ──
 
-    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False, explore_local=False, sparrow_workers=4):
+    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False, explore_local=False, sparrow_workers=1):
         t0 = time.time()
 
         if method == 'sparrow':
@@ -1163,7 +1134,7 @@ class BestPacker:
         if verbose and placed:
             vol = sum(m.volume for m in meshes)
             fill = vol / (self.box_l * self.box_w * self.box_h) * 100
-            print(f"\nTotal: {len(placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s")
+            print(f"\nTotal: {len(placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
         return placed, meshes
 
 
@@ -1350,7 +1321,7 @@ def main():
     p.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
     p.add_argument("--export-stl", action="store_true", help="Export merged STL of all placed pieces")
     p.add_argument("--explore-local", action="store_true", help="Local perturbation search around each placement (sparrow-style)")
-    p.add_argument("--sparrow-workers", type=int, default=4, help="Parallel workers for sparrow mode")
+    p.add_argument("--sparrow-workers", type=int, default=1, help="Parallel attempts per batch (higher = more robust but slower)")
     p.add_argument("--output", type=str, default="packed_best.png")
     args = p.parse_args()
 
@@ -1365,7 +1336,7 @@ def main():
         fp = Path(args.stl)
         if not fp.exists():
             print(f"ERROR: {fp}"); sys.exit(1)
-        print(f"Loading: {fp.name}...")
+        print(f"Loading: {fp.name}...", flush=True)
         packer.load_mesh(str(fp), n_yaw=args.yaw, shrink=args.shrink)
     else:
         v = np.array([[0, 0, 20], [0, 0, 0], [0, -20, 0], [0, -20, 20], [40, 0, 0], [40, -20, 0]], dtype=np.float64)
@@ -1404,7 +1375,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     out_prefix = str(out_dir / "packed")
 
-    print(f"\nPacking ({args.method})...")
+    print(f"\nPacking ({args.method})...", flush=True)
     t_start = time.time()
     placed, meshes = packer.pack(method=args.method, max_pieces=500, compact=args.compact, verbose=True, beam_width=args.beam_width, hierarchical=args.hierarchical, explore_local=args.explore_local, sparrow_workers=args.sparrow_workers)
     elapsed = time.time() - t_start
