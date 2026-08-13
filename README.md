@@ -2,11 +2,18 @@
 
 Version 0.0.5
 
-SOME-PackAssist is a web-based packing calculator with 3D visualization (Three.js) and physics simulation (Rapier.js). It estimates how many parts fit in a box and renders the result interactively.
+SOME-PackAssist is a web-based packing calculator with 3D visualization (Three.js), physics simulation (Rapier.js), and GPU-accelerated packing. It estimates how many parts fit in a box and renders the result interactively.
 
-The application runs directly in the browser (ES Modules + CDN imports). No build step is required.
+The frontend runs directly in the browser (ES Modules + CDN imports). The Python backend (Flask) serves the static files, runs mesh simplification, and executes GPU packing jobs asynchronously.
 
-## Features
+## Web modes
+
+| Mode | Description |
+|---|---|
+| **Optimized** | Heightmap BVH nesting for irregular shapes (async, cancelable) |
+| **Fast Optimizer** | BVH-validated compressed grid, brick-pattern support, instant results |
+| **Bulk** | Physics simulation with gravity (Rapier.js WASM), refill cycles, vibration |
+| **GPU** | CUDA backend via server — **Sparrow** (fast GPU voxel kernel, default) or **Voxel** (max-precision dense scan) |
 
 ### Optimized mode
 - Height-map BVH nesting for irregular shapes (async, cancelable)
@@ -28,10 +35,9 @@ The application runs directly in the browser (ES Modules + CDN imports). No buil
 - Configurable vibration (frequency, amplitude, noise)
 - Supports cuboid and STL geometries
 
-### GPU Voxel mode
-- CUDA-accelerated sparse-voxel packing via backend server
-- Voxelizes each orientation at 0.5mm resolution — handles concave nesting natively
-- Dual-GPU support for 2× throughput
+### GPU mode
+- Sparrow backend (default): CUDA sparse-voxel kernel from `packer_best.py` — fast, recommended for the web
+- Voxel backend: `packer_gpu_voxel.py` at 0.5–2.0mm resolution for maximum fill rate
 - Polling-based async job submission with progress
 - Downloads merged STL result and renders in Three.js
 
@@ -53,14 +59,112 @@ The application runs directly in the browser (ES Modules + CDN imports). No buil
 - Weight: kilograms (kg)
 - STL files are assumed to be authored in mm
 
+## Backend
+
+The project uses a single unified Flask server (`server.py`, port 8787) that serves both the web frontend and the API.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/` | GET | Web frontend |
+| `/api/health` | GET | Server status + GPU info |
+| `/api/simplify` | POST | Mesh decimation (PyMeshLab) |
+| `/api/pack` | POST | Submit GPU packing job (adaptive resolution + ETA) |
+| `/api/pack/<id>` | GET | Job status + placement data |
+| `/api/pack/<id>/stl` | GET | Download merged STL |
+| `/api/pack/<id>/png` | GET | Download preview PNG |
+| `/api/jobs` | GET | List recent jobs |
+
+Deployment options:
+- **systemd service** (`packassist.service`) — auto-starts on boot, restarts on crash
+- **nginx reverse proxy** (`sites-available/packassist`) — proxies `/api/*` to `127.0.0.1:8787`, serves static files, 10-min proxy timeouts
+
+## GPU-accelerated packers (CLI)
+
+Two GPU packers available in `physics-engine/`:
+
+### Sparrow GPU kernel (`packer_best.py`)
+
+```bash
+python3 physics-engine/packer_best.py [stl] [box_l] [box_w] [box_h]
+    --method sparrow          # GPU voxel kernel (default for web)
+    --method greedy|backtrack # SAT-based fallback methods
+    --voxel-cell 1.5          # voxel size for sparrow collision grid (mm)
+    --yaw 8 --yres 2.0
+    --shrink 0.4
+    --sparrow-workers 1
+    --export-stl
+    --seed 42
+```
+
+- `--method sparrow` — batched GPU sparse-voxel Y-scanning; natively handles concave nesting. On a 385×285×150mm box it packs **296 pieces at 10.7% fill in ~57s**; on a 160³mm box it packs **62 pieces in ~2.8s**.
+- `--method greedy` / `--method backtrack` — SAT packer with beam search, hierarchical coarse-to-fine scan, and hull-shrink compaction.
+
+### Voxel packer (`packer_gpu_voxel.py`)
+
+```bash
+python3 physics-engine/packer_gpu_voxel.py [stl] [box_l] [box_w] [box_h]
+    --cell 0.5        # voxel size in mm (0.5=max quality, 1.0=fast)
+    --scan-vox 1      # XZ scan step in voxels (1=every voxel, 2=skip 1)
+    --yaw 8 --roll 4 --pitch 4
+    --export-stl
+```
+
+- Best fill rate — 273–327 pieces at 11.8% fill with 0.5mm cells.
+- Dual-GPU support: splits candidate scan across 2 GPUs for 2× throughput.
+
+### Adaptive resolution (web `/api/pack`)
+
+The server scales job parameters automatically to keep responses practical:
+- **`scan_vox` auto-scaling** — increases XZ scan step (1→2→4→8) until the estimated time fits
+- **Cell auto-adjust** — if still too slow, bumps the voxel cell (up to 4.0mm) and reports `cell_adjusted_from`
+- **Live ETA** — model-based estimate returned at submit (`estimated_time`) and shown in the UI
+- **10-minute watchdog** — any job still queued/running after 600s is marked as errored so the frontend stops polling
+
+## Benchmark results
+
+All benchmarks pack **an irregular concave part (~28×37×97mm)** into the given box (no part name/STL disclosed).
+
+| Packer | Method | Box (mm) | Pieces | Fill | Time |
+|---|---|---|---|---|---|
+| Sparrow GPU | `--method sparrow` (voxel cell 1.5mm) | 385×285×150 | **296** | **10.7%** | ~57s |
+| Sparrow GPU | `--method sparrow` | 160³ | 62 | — | ~2.8s |
+| GPU Voxel | 0.5mm cells | 385×285×150 | 273–327 | 11.8% | slowest |
+| SAT GPU | Greedy (beam=1) | 385×285×150 | 218 | 7.9% | ~60s |
+| SAT GPU | Greedy + hierarchical | 385×285×150 | 213 | 7.7% | ~59s |
+
+The voxel-based methods (Sparrow / GPU Voxel) pack ~50% more pieces than SAT because they natively handle concave shapes — no convex hull approximation.
+
+### Architecture
+
+```
+packer_best.py (SAT)
+├── GPU kernel: batched Y-scanning SAT (all candidates in one launch)
+├── pack_greedy(): bottom-deepest + random top-K beam selection
+├── pack_backtrack(): remove-last-N, random top-5 reorder, retry
+├── pack_sparrow(): batched GPU sparse-voxel Y-scanning (concave-aware)
+├── hierarchical: coarse-to-fine diverse candidate search
+└── compact(): GPU physics settling with high-freq ground vibration
+
+packer_gpu_voxel.py (Voxel)
+├── CPU: voxelize each orientation → sparse occupancy + height maps
+├── GPU kernel: 3D sparse-voxel collision (bitwise AND-equivalent)
+├── Dual-GPU: split candidate scan across 2 GPUs for 2× throughput
+└── Placement: lowest-Y greedy, updates box occupancy in-place
+```
+
+## Credits
+
+- **JonasTollenaere** (KU Leuven) — the separation + compression strategy in `sparrow-3d` (and MeshCore) inspired the Sparrow GPU packing algorithm in this project (`sparrow-3d` is LGPL-3.0; the Python implementation here is original work that draws on the published approach).
+
 ## Project structure
 
 ```
 SOME-PackagingAssistant/
-├── server.py                   # Unified Flask backend (API + static files)
+├── server.py                   # Unified Flask backend (API + static files, port 8787)
 ├── web/
 │   ├── index.html              # Main application
 │   ├── admin.html              # Admin tools (benchmark + orientation tester)
+│   ├── benchmark.html          # Benchmark runner
 │   ├── historial.html          # Calculation history
 │   ├── api/
 │   │   └── start-server.php    # Auto-launcher (XAMPP/nginx+PHP)
@@ -83,22 +187,19 @@ SOME-PackagingAssistant/
 │   │   └── storage/
 │   │       ├── storage-manager.js
 │   │       └── server-storage.js
-│   └── library/                # STL library files
+│   ├── locales/                # i18n (ca, en)
+│   └── library/                # User STL library (generated, gitignored)
 ├── output/                     # Timestamped packing results (gitignored)
-│   └── YYYY-MM-DD_HHMMSS_*/
+│   └── YYYY-MM-DD_HHMMSS_<method>/
+│       ├── info.txt            # Run metadata (box, method, params, result)
 │       ├── packed_2d.png
 │       ├── packed_3d.png
-│       ├── packed_layers.png
-│       ├── merged.stl
-│       └── info.txt
+│       └── packed_layers.png
 ├── physics-engine/             # GPU/CPU packing engines
-│   ├── server.py               # (legacy — now project root server.py)
-│   ├── packer_best.py          # CUDA SAT packer with beam search + hierarchical scan
+│   ├── packer_best.py          # CUDA SAT + Sparrow voxel packer
 │   ├── packer_gpu_voxel.py     # CUDA sparse-voxel packer (best fill rate)
-│   ├── packer_api.py           # (legacy — merged into server.py)
 │   ├── packer_gpu.py           # Base CUDA SAT packer
 │   ├── packer_cpu.py           # CPU brute-force packer
-│   ├── packer_final.py         # CPU voxel occupancy packer
 │   ├── packer_physics_drop.py  # CPU physics-based packer
 │   ├── engine/                 # Standalone GPU physics engine
 │   │   ├── hull.py             # Convex hull generation (CPU, scipy)
@@ -109,11 +210,23 @@ SOME-PackagingAssistant/
 │   │   └── world.py            # Orchestrator (step loop, memory mgmt)
 │   ├── PhysicsEngine/          # C# / Silk.NET OpenGL packer (legacy)
 │   └── stl/                    # Test STL mesh files
-├── mesh_server.py              # (legacy — merged into server.py)
 ├── pdf_generator.py            # Server-side PDF generation (standalone)
+├── test/                       # Endpoint + benchmark test scripts
 ├── env/                        # Python virtual environment
 ├── implementation.md           # Implementation plan
 └── TODO.md                     # Feature backlog
+```
+
+## Output directory
+
+Each packing run (web or CLI) is written to a timestamped folder under `output/`:
+
+```
+output/2026-08-12_153507_sparrow/
+├── info.txt            # box, method, parameters, piece count, fill %, time
+├── packed_2d.png       # top-down occupancy preview
+├── packed_3d.png       # isometric render of the packed box
+└── packed_layers.png   # layer-by-layer breakdown
 ```
 
 ## Quick start
@@ -158,90 +271,9 @@ python -m http.server 5555
 
 Then open `http://localhost:5555`. Start the API backend separately: `python3 server.py --port 8787`.
 
-## Backend API
-
-The unified Flask server (`server.py`, port 8787) exposes:
-
-| Endpoint | Method | Description |
-|---|---|---|
-| `/` | GET | Web frontend |
-| `/api/health` | GET | Server status + GPU info |
-| `/api/simplify` | POST | Mesh decimation (PyMeshLab) |
-| `/api/pack` | POST | Submit GPU packing job |
-| `/api/pack/<id>` | GET | Job status + placement data |
-| `/api/pack/<id>/stl` | GET | Download merged STL |
-| `/api/pack/<id>/png` | GET | Download preview PNG |
-| `/api/jobs` | GET | List recent jobs |
-
 ## Caching notice
 
 The web app caches the last result and remembers the current mode/box/packing gap. If you've changed the JavaScript files, add a query string to the script import (e.g., `?v=force_update_42`) or clear the browser cache to ensure the latest code runs.
-
-## GPU-accelerated packers (CLI)
-
-Two GPU packers available in `physics-engine/`:
-
-### SAT packer (fast, convex hulls)
-
-```bash
-python3 physics-engine/packer_best.py [stl] [box_l] [box_w] [box_h]
-    --method greedy|backtrack
-    --beam-width 5
-    --hierarchical
-    --coarse-step 10 --fine-step 2
-    --shrink 0.4
-    --compact
-    --export-stl
-    --seed 42
-```
-
-Key options:
-- `--beam-width N` — top-K candidates for random selection (1=lowest-Y, 5=explore)
-- `--hierarchical` — coarse-to-fine candidate search (43% faster)
-- `--shrink F` — hull shrink factor (0.4=aggressive, 1.0=full hull)
-- `--compact` — GPU physics settling with 0.8mm/120Hz ground vibration
-
-### Voxel packer (best fill rate, concave-aware)
-
-```bash
-python3 physics-engine/packer_gpu_voxel.py [stl] [box_l] [box_w] [box_h]
-    --cell 0.5
-    --scan-vox 1
-    --yaw 8 --roll 4 --pitch 4
-    --export-stl
-```
-
-Key options:
-- `--cell N` — voxel size in mm (0.5=max quality, 1.0=fast)
-- `--scan-vox N` — XZ scan step in voxels (1=every voxel, 2=skip 1)
-
-### Benchmark results (6683688 STL, 385×285×150mm)
-
-| Packer | Method | Pieces | Fill | Time |
-|---|---|---|---|---|
-| SAT GPU | Greedy (beam=1) | 218 | 7.9% | ~60s |
-| SAT GPU | Greedy + hierarchical | 213 | 7.7% | ~59s |
-| GPU Voxel | 0.5mm cells | **327** | **11.8%** | varies |
-| GPU Voxel | 1.0mm cells | ~302 | ~10.9% | faster |
-
-The voxel packer achieves 50% more pieces than SAT because it natively handles concave shapes — no convex hull approximation.
-
-### Architecture
-
-```
-packer_best.py (SAT)
-├── GPU kernel: batched Y-scanning SAT (all candidates in one launch)
-├── pack_greedy(): bottom-deepest + random top-K beam selection
-├── pack_backtrack(): remove-last-N, random top-5 reorder, retry
-├── hierarchical: coarse-to-fine diverse candidate search
-└── compact(): GPU physics settling with high-freq ground vibration
-
-packer_gpu_voxel.py (Voxel)
-├── CPU: voxelize each orientation → sparse occupancy + height maps
-├── GPU kernel: 3D sparse-voxel collision (bitwise AND-equivalent)
-├── Dual-GPU: split candidate scan across 2 GPUs for 2× throughput
-└── Placement: lowest-Y greedy, updates box occupancy in-place
-```
 
 ## Technology
 
@@ -250,7 +282,7 @@ packer_gpu_voxel.py (Voxel)
 - **three-mesh-bvh** (BVH acceleration for intersection tests)
 - **Flask** (Python backend server)
 - **PyMeshLab** (optional, server-side mesh decimation)
-- **Numba CUDA** (GPU-accelerated SAT and voxel packing)
+- **Numba CUDA** (GPU-accelerated SAT, Sparrow, and voxel packing)
 - ES Modules (native browser modules, no bundler)
 - CSS custom properties with automatic light/dark via `prefers-color-scheme`
 

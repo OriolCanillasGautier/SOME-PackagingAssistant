@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_42';
 import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=force_update_42';
 import { SceneManager } from './visualization/scene.js?v=organic_v1';
@@ -44,6 +45,7 @@ const state = {
     stlSettledQuat: null, // cached quaternion from gravity drop on current loaded geometry
     stlStableOrientations: [], // [{ quat, geometry, stability }] precomputed gravity bases
     selectedOrientations: null, // Set of selected orientation indices
+    activeOrientationIndex: 0, // Index of the orientation shown in the large viewer
     orientationPrepMs: 0,
     stlIntegrity: null,
     stlDimensions: null,
@@ -540,6 +542,7 @@ async function updateStableOrientationCache() {
         state.stlAlignedGeometry = fallbackGeometry;
         state.stlDimensions = extractDimensions(fallbackGeometry);
         state.orientationPrepMs = performance.now() - t0;
+        renderOrientationSelector();
         return fallbackGeometry;
     }
 
@@ -590,8 +593,135 @@ async function updateStableOrientationCache() {
     state.stlDimensions = primary ? extractDimensions(primary.geometry) : extractDimensions(state.stlGeometry);
     state.orientationPrepMs = performance.now() - t0;
 
+    state.selectedOrientations = new Set([0]);
+    state.activeOrientationIndex = 0;
     renderOrientationSelector();
     return primary?.geometry || null;
+}
+
+const MAX_ORIENTATION_CARDS = 4;
+
+const orientationViewerState = {
+    initialized: false,
+    renderer: null,
+    scene: null,
+    camera: null,
+    controls: null,
+    grid: null,
+    mesh: null,
+    animId: null
+};
+
+/**
+ * Create (once) the shared WebGL renderer, scene, camera, floor grid and
+ * OrbitControls used by the large orientation viewer. Kept alive across
+ * orientation switches so the user's orbit/zoom is preserved.
+ */
+function initOrientationViewer() {
+    const canvas = document.getElementById('orientation-viewer-canvas');
+    const container = document.getElementById('orientation-viewer');
+    if (!canvas || !container) return;
+
+    const renderer = new THREE.WebGLRenderer({ canvas, alpha: false, antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+    const width = Math.max(220, container.clientWidth || 350);
+    const height = Math.max(220, container.clientHeight || 350);
+    renderer.setSize(width, height);
+    renderer.setClearColor(0x16213e, 1);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.Fog(0x16213e, 60, 140);
+
+    const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+    camera.position.set(3, 2.2, 3);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.enablePan = true;
+    controls.target.set(0, 0, 0);
+
+    const ambient = new THREE.AmbientLight(0xffffff, 0.55);
+    scene.add(ambient);
+    const dir = new THREE.DirectionalLight(0xffffff, 0.9);
+    dir.position.set(3, 6, 2);
+    scene.add(dir);
+    const dir2 = new THREE.DirectionalLight(0x8888ff, 0.35);
+    dir2.position.set(-3, 2, -3);
+    scene.add(dir2);
+
+    const grid = new THREE.GridHelper(10, 20, 0x9aa7bd, 0x5b6b83);
+    grid.material.transparent = true;
+    grid.material.opacity = 0.55;
+    grid.position.y = 0;
+    scene.add(grid);
+
+    orientationViewerState.renderer = renderer;
+    orientationViewerState.scene = scene;
+    orientationViewerState.camera = camera;
+    orientationViewerState.controls = controls;
+    orientationViewerState.grid = grid;
+    orientationViewerState.initialized = true;
+
+    const loop = () => {
+        orientationViewerState.animId = requestAnimationFrame(loop);
+        const modal = document.getElementById('orientation-modal');
+        if (!modal || modal.style.display === 'none') return;
+        if (orientationViewerState.controls) orientationViewerState.controls.update();
+        if (orientationViewerState.renderer && orientationViewerState.scene && orientationViewerState.camera) {
+            orientationViewerState.renderer.render(orientationViewerState.scene, orientationViewerState.camera);
+        }
+    };
+    orientationViewerState.animId = requestAnimationFrame(loop);
+}
+
+/**
+ * Swap the mesh shown in the large viewer and reframe the camera/grid so the
+ * floor plane sits under the piece. Disposes the previous mesh geometry.
+ */
+function setActiveOrientationMesh(geometry) {
+    const vs = orientationViewerState;
+    if (!vs.initialized) initOrientationViewer();
+    if (!vs.scene || !vs.camera || !vs.controls) return;
+
+    if (vs.mesh) {
+        vs.scene.remove(vs.mesh);
+        if (vs.mesh.geometry) vs.mesh.geometry.dispose();
+        if (vs.mesh.material) vs.mesh.material.dispose();
+        vs.mesh = null;
+    }
+
+    if (geometry) {
+        const geom = geometry.clone();
+        geom.computeVertexNormals();
+        geom.center();
+        const mat = new THREE.MeshPhongMaterial({ color: 0x3b82f6, flatShading: false, shininess: 40 });
+        const mesh = new THREE.Mesh(geom, mat);
+        vs.scene.add(mesh);
+        vs.mesh = mesh;
+
+        const box = new THREE.Box3().setFromObject(mesh);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z) || 1;
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+        const dist = maxDim * 2.4;
+
+        vs.grid.scale.set(maxDim * 4, 1, maxDim * 4);
+        vs.grid.position.y = box.min.y;
+
+        vs.camera.near = Math.max(0.001, maxDim / 100);
+        vs.camera.far = maxDim * 100;
+        vs.camera.position.set(dist * 0.75, dist * 0.55, dist * 0.75);
+        vs.camera.updateProjectionMatrix();
+        vs.controls.target.copy(center);
+        vs.controls.minDistance = maxDim * 0.4;
+        vs.controls.maxDistance = maxDim * 20;
+        vs.controls.update();
+    }
+
+    if (vs.renderer) vs.renderer.render(vs.scene, vs.camera);
 }
 
 function renderOrientationSelector() {
@@ -607,33 +737,112 @@ function renderOrientationSelector() {
     }
 
     if (!state.selectedOrientations) state.selectedOrientations = new Set([0]);
+    if (typeof state.activeOrientationIndex !== 'number') state.activeOrientationIndex = 0;
 
-    optionsDiv.innerHTML = orientations.slice(0, 4).map((o, i) => {
+    const shown = orientations.slice(0, MAX_ORIENTATION_CARDS);
+    if (state.activeOrientationIndex >= shown.length) state.activeOrientationIndex = 0;
+
+    optionsDiv.innerHTML = shown.map((o, i) => {
         const dims = extractDimensions(o.geometry);
         const isSelected = state.selectedOrientations.has(i);
+        const isActive = state.activeOrientationIndex === i;
         const canvasId = `orient-canvas-${i}`;
-        return `<div class="orient-card ${isSelected ? 'selected' : ''}" data-index="${i}"
-                onclick="toggleOrientation(${i})">
+        const stabilityText = o.stability?.stable
+            ? `${mainText('orientationStable', {}, 'Estable')} · ${(o.stability.supportArea || 0).toFixed(0)} mm²`
+            : mainText('orientationStable', {}, 'Estable');
+        return `<div class="orient-card ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''}" data-index="${i}"
+                tabindex="0" role="button" aria-pressed="${isActive}"
+                onclick="selectOrientation(${i})">
             <canvas id="${canvasId}" class="orient-preview" width="140" height="140"></canvas>
             <div class="orient-info">
                 <span class="orient-dims">${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}mm</span>
+                <span class="orient-stability">${stabilityText}</span>
             </div>
+            <label class="orient-toggle" title="${mainText('orientationInclude', {}, 'Incloure a l\'empaquetatge')}" onclick="event.stopPropagation()">
+                <input type="checkbox" data-index="${i}" ${isSelected ? 'checked' : ''} onchange="toggleOrientation(${i})">
+                <span class="orient-toggle-track"></span>
+            </label>
         </div>`;
     }).join('');
 
     modal.style.display = 'flex';
-    document.getElementById('orientation-confirm').onclick = () => { modal.style.display = 'none'; };
+    document.getElementById('orientation-confirm').onclick = confirmOrientationSelection;
+    const confirmBtn = document.getElementById('orientation-confirm');
+    if (confirmBtn) confirmBtn.focus();
 
-    // Render 3D previews after DOM update
+    // Render thumbnail previews and the large viewer after DOM update
     requestAnimationFrame(() => {
-        orientations.slice(0, 4).forEach((o, i) => {
+        shown.forEach((o, i) => {
             renderOrientationPreview(`orient-canvas-${i}`, o.geometry);
         });
+        setActiveOrientationMesh(shown[state.activeOrientationIndex]?.geometry);
     });
+}
+
+function confirmOrientationSelection() {
+    const modal = document.getElementById('orientation-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+/**
+ * Keyboard support: Esc closes the modal, Enter on a card activates that
+ * orientation (Confirm button handles Enter-to-confirm natively), arrow keys
+ * move the active orientation.
+ */
+function setupOrientationModalKeyboard() {
+    const modal = document.getElementById('orientation-modal');
+    if (!modal) return;
+
+    document.addEventListener('keydown', (e) => {
+        if (!modal || modal.style.display === 'none') return;
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            modal.style.display = 'none';
+        } else if (e.key === 'Enter' && e.target && e.target.classList && e.target.classList.contains('orient-card')) {
+            e.preventDefault();
+            selectOrientation(parseInt(e.target.dataset.index, 10));
+        } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+            e.preventDefault();
+            moveActiveOrientation(1);
+        } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+            e.preventDefault();
+            moveActiveOrientation(-1);
+        }
+    });
+}
+
+function moveActiveOrientation(delta) {
+    const orientations = state.stlStableOrientations || [];
+    const count = Math.min(MAX_ORIENTATION_CARDS, orientations.length);
+    if (count === 0) return;
+    const next = (state.activeOrientationIndex + delta + count) % count;
+    selectOrientation(next);
+}
+
+/**
+ * Set the active orientation (shown in the large viewer). Updates only the
+ * card highlight classes — does not rebuild the thumbnail canvases or viewer.
+ */
+function selectOrientation(index) {
+    if (state.activeOrientationIndex === index) return;
+    state.activeOrientationIndex = index;
+
+    document.querySelectorAll('#orientation-options .orient-card').forEach(card => {
+        const idx = parseInt(card.dataset.index, 10);
+        const isActive = idx === index;
+        card.classList.toggle('active', isActive);
+        card.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    });
+
+    const orientations = state.stlStableOrientations || [];
+    const shown = orientations.slice(0, MAX_ORIENTATION_CARDS);
+    const o = shown[index];
+    if (o) setActiveOrientationMesh(o.geometry);
 }
 
 // Expose for inline onclick handlers (module scope)
 window.toggleOrientation = toggleOrientation;
+window.selectOrientation = selectOrientation;
 window.setBoxPreset = setBoxPreset;
 
 const orientationRenderers = new Map();
@@ -686,7 +895,14 @@ function toggleOrientation(index) {
     } else {
         state.selectedOrientations.add(index);
     }
-    renderOrientationSelector();
+
+    // Update just this card's UI without rebuilding the thumbnails or viewer
+    const card = document.querySelector(`#orientation-options .orient-card[data-index="${index}"]`);
+    if (card) {
+        card.classList.toggle('selected', state.selectedOrientations.has(index));
+        const cb = card.querySelector('input[type="checkbox"]');
+        if (cb) cb.checked = state.selectedOrientations.has(index);
+    }
 }
 
 function setBoxPreset(l, w, h, btn) {
@@ -832,6 +1048,7 @@ async function init() {
     state.storage = new StorageManager();
     await state.storage.init();
     setupEventListeners();
+    setupOrientationModalKeyboard();
     await applyLanguage();
     await loadSTLHistory();
     switchMode(state.mode);
@@ -1501,10 +1718,10 @@ function getInputValues() {
         allowRotation: elements.allowRotation.checked,
         heightMapNesting: !!state.stlGeometry,
         placementStrategy: elements.placementStrategy?.value || 'auto',
-        placementStability: 'medium',
+        placementStability: elements.placementStability?.value || 'medium',
         placementSearchEffort: elements.placementSearchEffort?.value || 'balanced',
         placementSideStacking: elements.placementSideStacking?.checked ?? true,
-        placementSettleCheck: true,
+        placementSettleCheck: elements.placementSettleCheck?.checked ?? true,
         placementLayerSeparator: Math.max(0, parseFloat(elements.placementLayerSeparator?.value) || 0),
         stackingQuality: parseInt(elements.stackingQuality?.value) || 2,
         materialDensity: (() => {
@@ -1700,12 +1917,34 @@ async function handleGPUCalculate(calcStartTime) {
                 </details>`;
         }
 
+        const clampedFill = Math.max(0, Math.min(100, job.fill_pct || 0));
         elements.results.innerHTML = `
-            <p class="calc-result"><strong>${job.pieces}</strong> ${mainText('pieces')}</p>
-            <p class="fill-result">${job.fill_pct}% ${mainText('fillPct')}</p>
-            <p class="time-result">${job.time_s}s — ${cellSize}mm — ${gpuMethod}</p>
-            <p class="meta-result"><a href="${stlUrl}" target="_blank">${mainText('modeGPUStlUrl')}</a></p>
-            <button class="reoptimize-btn" onclick="document.querySelector('#calculate-btn').click()">🔄 Re-optimize</button>
+            <div class="results-hero">
+                <div class="hero-number">${job.pieces}</div>
+                <div class="hero-label">${mainText('pieces')}</div>
+            </div>
+            <div class="results-cards">
+                <div class="result-card">
+                    <div class="card-body">
+                        <div class="card-value">${job.fill_pct}%</div>
+                        <div class="card-label">${mainText('fillPct')}</div>
+                        <div class="fill-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${job.fill_pct}">
+                            <div class="fill-bar-fill" style="width: ${clampedFill}%"></div>
+                        </div>
+                    </div>
+                </div>
+                <div class="result-card">
+                    <div class="card-body">
+                        <div class="card-value">${job.time_s}s</div>
+                        <div class="card-label">${mainText('timeResult')}</div>
+                        <div class="card-sub">${cellSize}mm · ${gpuMethod}</div>
+                    </div>
+                </div>
+            </div>
+            <div class="results-actions">
+                <a class="report-link" href="${stlUrl}" target="_blank">⬇ ${mainText('modeGPUStlUrl')}</a>
+                <button class="reoptimize-btn" onclick="document.querySelector('#calculate-btn').click()">🔄 ${mainText('reoptimize')}</button>
+            </div>
             ${comparisonHtml}
         `;
 

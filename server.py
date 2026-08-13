@@ -190,24 +190,15 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
 
             ok = verify(placed_meshes) if placed_meshes else True
 
-            job["status"] = "done"
-            job["pieces"] = len(placed_meshes)
-            job["fill_pct"] = round(sum(m.volume for m in placed_meshes) /
-                                    (box_l * box_w * box_h) * 100, 1) if placed_meshes else 0
-            job["time_s"] = round(elapsed, 1)
-            job["stl_path"] = str(stl_out) if placed_meshes else ""
-            job["png_path"] = str(png_out) if placed_meshes else ""
-            job["verified"] = ok
-
             # Build placement data with orientation transforms
-            job["placements"] = []
+            placements = []
             orients_for_placements = packer._sparrow_voxel_data if method == "sparrow" else orients
             for (x, y, z, oi, name), _ in zip(placed, placed_meshes):
                 od = orients_for_placements[oi]
                 rot = np.eye(4)
                 if "rotation" in od:
                     rot[:3, :3] = od["rotation"]
-                job["placements"].append({
+                placements.append({
                     "x": round(float(x), 3),
                     "y": round(float(y), 3),
                     "z": round(float(z), 3),
@@ -215,6 +206,18 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                     "name": name,
                     "rotation": rot[:3, :3].tolist(),
                 })
+
+            # Populate every result field BEFORE flipping status to "done" so
+            # concurrent status polls never observe a partially-written result.
+            job["pieces"] = len(placed_meshes)
+            job["fill_pct"] = round(sum(m.volume for m in placed_meshes) /
+                                    (box_l * box_w * box_h) * 100, 1) if placed_meshes else 0
+            job["time_s"] = round(elapsed, 1)
+            job["stl_path"] = str(stl_out) if placed_meshes else ""
+            job["png_path"] = str(png_out) if placed_meshes else ""
+            job["verified"] = ok
+            job["placements"] = placements
+            job["status"] = "done"
 
     except Exception as e:
         job["status"] = "error"

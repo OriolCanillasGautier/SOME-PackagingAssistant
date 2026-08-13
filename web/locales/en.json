@@ -93,6 +93,7 @@
     "resetBtn": "RESET",
     "pieces": "pieces",
     "fillPct": "fill",
+    "timeResult": "time",
     "reoptimize": "Re-optimize",
     "gpuComparison": "Results comparison",
     "previewReport": "Preview Report",
@@ -129,6 +130,8 @@
     "orientationAlternatives": "Orientation alternatives",
     "orientationView": "VIEW",
     "orientationCompareHint": "* Comparison uses real collisions (no intersections).",
+    "orientationStable": "Stable",
+    "orientationInclude": "Include in packaging",
     "gravitySettled": "Gravity settled — {count} pieces in the box",
     "gravityTimeout": "⚠️ Simulation time limit reached — {count} pieces in the box",
     "simplifyModal": {

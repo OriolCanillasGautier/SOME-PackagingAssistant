@@ -93,6 +93,7 @@
     "resetBtn": "REINICIAR",
     "pieces": "peces",
     "fillPct": "d'ocupació",
+    "timeResult": "temps",
     "reoptimize": "Re-optimitzar",
     "gpuComparison": "Comparació de resultats",
     "previewReport": "Previsualitzar Informe",
@@ -129,6 +130,8 @@
     "orientationAlternatives": "Alternatives d'orientació",
     "orientationView": "VEURE",
     "orientationCompareHint": "* Comparació feta amb col·lisions reals (no travessen).",
+    "orientationStable": "Estable",
+    "orientationInclude": "Incloure a l'empaquetatge",
     "gravitySettled": "Gravetat estabilitzada — {count} peces a la caixa",
     "gravityTimeout": "⚠️ Temps de simulació esgotat — {count} peces a la caixa",
     "simplifyModal": {

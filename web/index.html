@@ -76,9 +76,17 @@
                         <div id="orientation-modal" class="modal-overlay" style="display:none;">
                             <div class="modal-content orientation-modal-content">
                                 <h3>Selecciona l'orientació estable</h3>
-                                <p class="modal-subtitle">Clica per seleccionar/desmarcar. Es poden triar múltiples.</p>
-                                <div id="orientation-options" class="orientation-options">
-                                    <!-- Populated by JS with 3D previews -->
+                                <p class="modal-subtitle">Marca les orientacions a empaquetar (checkbox). Clica una targeta per inspeccionar-la al visor.</p>
+                                <div class="orientation-layout">
+                                    <div id="orientation-options" class="orientation-options">
+                                        <!-- Populated by JS with 3D previews -->
+                                    </div>
+                                    <div class="orientation-viewer-panel">
+                                        <div id="orientation-viewer" class="orientation-viewer">
+                                            <canvas id="orientation-viewer-canvas"></canvas>
+                                        </div>
+                                        <p class="orientation-viewer-hint">🖱️ Arrossega per girar · Scroll per fer zoom</p>
+                                    </div>
                                 </div>
                                 <button id="orientation-confirm" class="btn-primary">Confirmar</button>
                             </div>
@@ -167,9 +175,21 @@
                                     <option value="3">3 — Segur (sense nidificació, gaps mínims)</option>
                                 </select>
                             </div>
+                            <div class="input-group">
+                                <label for="placement-stability">Estabilitat del contacte</label>
+                                <select id="placement-stability">
+                                    <option value="strict">Estricta</option>
+                                    <option value="medium" selected>Equilibrada</option>
+                                    <option value="loose">Flexible</option>
+                                </select>
+                            </div>
                             <div class="input-group checkbox-group">
                                 <input type="checkbox" id="placement-side-stacking" checked>
                                 <label for="placement-side-stacking">Permetre apilat lateral/vertical si és estable</label>
+                            </div>
+                            <div class="input-group checkbox-group">
+                                <input type="checkbox" id="placement-settle-check" checked>
+                                <label for="placement-settle-check">Verificar assentament de la peça</label>
                             </div>
                             <div class="input-group">
                                 <label for="placement-layer-separator">Separador entre capes (mm)</label>
@@ -335,6 +355,9 @@
                     
                     <!-- Floating Report Button -->
                     <div class="floating-report" id="report-buttons" style="display: none;">
+                        <button id="apply-gravity-btn" class="report-float-btn" title="Aplicar gravetat a les peces col·locades" style="display: none;">
+                            ⚙️ Aplicar Gravetat
+                        </button>
                         <button id="report-preview-btn" class="report-float-btn" title="Previsualitzar i configurar informe">
                             📄 Previsualitzar Informe
                         </button>
