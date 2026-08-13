@@ -1604,19 +1604,34 @@ async function handleGPUCalculate(calcStartTime) {
             signal: AbortSignal.timeout(10000)
         });
         if (!resp.ok) throw new Error(`Servidor: ${resp.status}`);
-        const { job_id } = await resp.json();
+        const submitData = await resp.json();
+        const job_id = submitData.job_id;
 
         // Poll with live progress
         let job, pollCount = 0;
+        const staticEta = submitData.estimated_time;
         do {
             const r = await fetch(`/api/pack/${job_id}`);
             job = await r.json();
             pollCount++;
 
             if (job.status === 'running' || job.status === 'queued') {
+                let etaText = '';
+                if (job.pieces > 2 && job.time_s > 0) {
+                    // Live ETA from actual measured progress
+                    const perPiece = job.time_s / job.pieces;
+                    const boxVol = (submitData.box?.[0] || 1) * (submitData.box?.[1] || 1) * (submitData.box?.[2] || 1);
+                    const estTotal = Math.min(500, (boxVol / 100000) * 3);
+                    const remainS = Math.max(0, estTotal - job.pieces) * perPiece;
+                    etaText = remainS > 60
+                        ? ` (≈${Math.round(remainS / 60)} min restants)`
+                        : ` (≈${Math.round(remainS)}s restants)`;
+                } else if (staticEta && job.pieces === 0) {
+                    etaText = ` (≈${staticEta.label})`;
+                }
                 const progressText = job.pieces > 0
-                    ? `${mainText('modeGPUPacking')} — ${job.pieces} ${mainText('pieces')}`
-                    : mainText('modeGPUPacking');
+                    ? `${mainText('modeGPUPacking')} — ${job.pieces} ${mainText('pieces')}${etaText}`
+                    : mainText('modeGPUPacking') + etaText;
                 setCalcProgress(true, 10 + Math.min(pollCount * 5, 60), progressText, calcStartTime);
             }
             if (job.status !== 'done') {

@@ -194,7 +194,7 @@ def voxel_pack_kernel(
 # Main packer
 # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
 
-def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, verbose=True):
+def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, verbose=True, progress_callback=None):
     box_l, box_w, box_h = box_dims
     box_nx = int(math.ceil(box_l / cell_size))
     box_ny = int(math.ceil(box_h / cell_size))
@@ -343,6 +343,9 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
         placed_meshes.append(pm)
         usage[od['name']] = usage.get(od['name'], 0) + 1
         consecutive_fails = 0
+        
+        if progress_callback and len(placed) % 5 == 0:
+            progress_callback(len(placed), time.time() - start)
         
         if verbose and len(placed) % 50 == 0:
             elapsed = time.time() - start

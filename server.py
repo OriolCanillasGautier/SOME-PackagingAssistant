@@ -127,12 +127,12 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                     [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)])
 
             box_l, box_w, box_h = box_dims
-            cell = params.get("cell", 0.5)
+            cell = params.get("cell", 1.0)
             yaw = params.get("yaw", 8)
             roll = params.get("roll", 4)
             pitch = params.get("pitch", 4)
             scan_vox = params.get("scan_vox", 1)
-            method = params.get("method", "voxel")
+            method = params.get("method", "sparrow")
 
             t0 = time.time()
 
@@ -147,8 +147,14 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                 placed = placed_sparrow
             else:
                 orients = generate_orientations(mesh, cell, yaw, roll, pitch, box_dims)
+
+                def progress_cb(count, elapsed_s):
+                    job["pieces"] = count
+                    job["time_s"] = round(elapsed_s, 1)
+
                 placed_meshes, placed = pack(orients, box_dims, cell,
-                                             scan_step_vox=scan_vox, verbose=False)
+                                             scan_step_vox=scan_vox, verbose=False,
+                                             progress_callback=progress_cb)
                 elapsed = time.time() - t0
 
             jid = job["job_id"][:8]
@@ -270,13 +276,59 @@ def submit_pack():
     box_h = float(request.form.get("box_h", 150))
 
     params = {
-        "cell": float(request.form.get("cell", 0.5)),
+        "cell": float(request.form.get("cell", 1.0)),
         "yaw": int(request.form.get("yaw", 8)),
         "roll": int(request.form.get("roll", 4)),
         "pitch": int(request.form.get("pitch", 4)),
-        "scan_vox": int(request.form.get("scan_vox", 1)),
-        "method": request.form.get("method", "voxel"),
+        "scan_vox": int(request.form.get("scan_vox", 0)),
+        "method": request.form.get("method", "sparrow"),
     }
+
+    # ── Adaptive resolution: prefer scan-step scaling over cell bumping ──
+    method = params["method"]
+    cell = params["cell"]
+    requested_cell = cell
+
+    # Empirically measured throughput model (fitted to real benchmarks):
+    # 160³@2mm=2.8s, 160³@1mm=20s, 200³@1mm=68s,
+    # 385x285x150@2mm=55s, 385x285x150@1mm=450s, @0.5mm=1100s+
+    def estimate_eta_s(c, sv):
+        # Per-placement seconds ≈ A * floor_cand * sparse_voxels / sv²
+        floor_cand = (box_l / c) * (box_w / c)
+        piece_vox = (28 / c) * (37 / c) * (97 / c)
+        per_placement = 2.1e-12 * floor_cand * piece_vox / (sv ** 2)
+        n_placements = min(500, (box_l * box_w * box_h) / (28 * 37 * 97) * 3)
+        return max(1.0, per_placement * n_placements)
+
+    if method == "voxel":
+        scan_step = params["scan_vox"] if params["scan_vox"] > 0 else 1
+        # Scale scan step until fast enough (keeps cell resolution)
+        for candidate_step in (1, 2, 4, 8):
+            if estimate_eta_s(cell, candidate_step) < 90:
+                scan_step = candidate_step
+                break
+        else:
+            scan_step = 8
+        # If still too slow, bump the cell
+        while estimate_eta_s(cell, scan_step) > 90 and cell < 4.0:
+            cell = min(4.0, cell * 1.5)
+        params["cell"] = cell
+        params["scan_vox"] = scan_step
+        if cell != requested_cell:
+            params["cell_adjusted_from"] = requested_cell
+
+    # ETA estimate based on final (adjusted) params
+    if method == "sparrow":
+        box_vol = box_l * box_w * box_h
+        eta_s = max(2, min(120, box_vol / 40000))
+        eta_label = f"{eta_s:.0f}s"
+    else:
+        eta_s = max(2, estimate_eta_s(cell, params["scan_vox"]))
+        if eta_s > 60:
+            eta_label = f"{eta_s/60:.1f}min"
+        else:
+            eta_label = f"{eta_s:.0f}s"
+    estimated_time = {"seconds": round(eta_s, 1), "label": eta_label}
 
     job_id = str(uuid.uuid4())
     job = {
@@ -299,11 +351,22 @@ def submit_pack():
                      args=(job, stl_data, (box_l, box_w, box_h), params),
                      daemon=True).start()
 
+    # Watchdog: mark job as timed out after 10 minutes (frontend stops polling)
+    def watchdog():
+        time.sleep(600)
+        if job["status"] in ("queued", "running"):
+            job["status"] = "error"
+            job["error_msg"] = ("Timeout after 10 minutes. Try a larger cell size "
+                                "or the Sparrow method for faster results.")
+
+    threading.Thread(target=watchdog, daemon=True).start()
+
     return jsonify({
         "job_id": job_id,
         "status": "queued",
         "box": [box_l, box_w, box_h],
         "params": params,
+        "estimated_time": estimated_time,
         "check_url": f"/api/pack/{job_id}",
     })
 
