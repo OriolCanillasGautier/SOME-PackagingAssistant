@@ -289,28 +289,29 @@ def submit_pack():
     cell = params["cell"]
     requested_cell = cell
 
-    # Empirically measured throughput model (fitted to real benchmarks):
-    # 160³@2mm=2.8s, 160³@1mm=20s, 200³@1mm=68s,
-    # 385x285x150@2mm=55s, 385x285x150@1mm=450s, @0.5mm=1100s+
+    # Empirically measured model with Y-scan depth factor:
+    # 160³@0.5mm ≈ 4.4s/pc, 160³@1mm ≈ 0.33s/pc,
+    # 385x285x150@1mm ≈ 1.5s/pc, @2mm ≈ 0.2s/pc
     def estimate_eta_s(c, sv):
-        # Per-placement seconds ≈ A * floor_cand * sparse_voxels / sv²
-        floor_cand = (box_l / c) * (box_w / c)
+        floor_cand = (box_l / c) * (box_w / c) / (sv ** 2)
         piece_vox = (28 / c) * (37 / c) * (97 / c)
-        per_placement = 2.1e-12 * floor_cand * piece_vox / (sv ** 2)
+        box_ny = box_h / c
+        y_scan_depth = 1 + box_ny / 3
+        per_piece = floor_cand * 19 * piece_vox * y_scan_depth / 3.9e13
         n_placements = min(500, (box_l * box_w * box_h) / (28 * 37 * 97) * 3)
-        return max(1.0, per_placement * n_placements)
+        return max(1.0, per_piece * n_placements)
 
     if method == "voxel":
         scan_step = params["scan_vox"] if params["scan_vox"] > 0 else 1
         # Scale scan step until fast enough (keeps cell resolution)
         for candidate_step in (1, 2, 4, 8):
-            if estimate_eta_s(cell, candidate_step) < 90:
+            if estimate_eta_s(cell, candidate_step) < 60:
                 scan_step = candidate_step
                 break
         else:
             scan_step = 8
         # If still too slow, bump the cell
-        while estimate_eta_s(cell, scan_step) > 90 and cell < 4.0:
+        while estimate_eta_s(cell, scan_step) > 60 and cell < 4.0:
             cell = min(4.0, cell * 1.5)
         params["cell"] = cell
         params["scan_vox"] = scan_step
