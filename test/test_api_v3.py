@@ -3,7 +3,7 @@
 import requests, time, json, sys, os, numpy as np, trimesh
 
 BASE = "http://127.0.0.1:8787"
-STL = os.path.join(os.path.dirname(__file__), "..", "physics-engine", "stl", "6683688_simp0.1pct.stl")
+STL = os.path.join(os.path.dirname(__file__), "..", "physics-engine", "stl", "part.stl")
 
 def submit(params):
     with open(STL, "rb") as f:

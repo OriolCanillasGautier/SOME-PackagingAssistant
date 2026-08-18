@@ -146,6 +146,7 @@ def voxel_pack_kernel(
     box_hm,           # [box_nx, box_nz] int32: 2D height map
     box_nx, box_ny, box_nz,  # int
     y_res,            # float: Y scan resolution in voxels
+    nest_y_limit,     # int: max Y (voxels) to search for valley-nested fits
 ):
     idx = cuda.grid(1)
     if idx >= candidates.shape[0]: return
@@ -162,10 +163,8 @@ def voxel_pack_kernel(
     # Get sparse coords for this orientation
     off_start = all_offsets[ori]
     off_end = all_offsets[ori + 1]
-    n_sparse = off_end - off_start
 
     # Compute base Y from height map (per-column surface)
-    hm_off_start = all_hm_offsets[ori]
     base_vox = 0
     for i in range(off_start, off_end):
         px, py, pz = all_sparse[i, 0], all_sparse[i, 1], all_sparse[i, 2]
@@ -175,9 +174,19 @@ def voxel_pack_kernel(
             base_vox = needed
     if base_vox < 0: base_vox = 0
 
-    # Scan Y upward from base_vox
     max_y = box_ny - sy
-    for try_y in range(base_vox, max_y + 1):
+    if base_vox > max_y:
+        return
+
+    # Valley-nesting: the height map only bounds the solid top of each column, so
+    # a piece may nest into a cavity/valley below it (base_vox is a conservative
+    # resting overestimate). Scan y from 0 up to min(base_vox, nest_y_limit) and
+    # take the lowest collision-free fit, filling interior gaps the plain
+    # falling-sand scan would miss.
+    limit = nest_y_limit
+    if base_vox < limit:
+        limit = base_vox
+    for try_y in range(0, limit + 1):
         collides = False
         for i in range(off_start, off_end):
             px, py, pz = all_sparse[i, 0], all_sparse[i, 1], all_sparse[i, 2]
@@ -188,6 +197,12 @@ def voxel_pack_kernel(
             candidates[idx, 3] = try_y * y_res  # back to mm
             candidates[idx, 4] = 1.0
             return
+
+    # No nested fit within the sweep window: rest on top of the terrain.
+    # base_vox is guaranteed collision-free (every piece voxel sits at or above
+    # its column's height map, which is the max occupied +1).
+    candidates[idx, 3] = base_vox * y_res
+    candidates[idx, 4] = 1.0
 
 
 # ΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇΓöÇ
@@ -244,11 +259,32 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
     
     placed = []; placed_meshes = []; usage = {}; start = time.time()
     consecutive_fails = 0
+
+    # Nesting scan window (voxels): base_vox is the falling-sand resting height,
+    # but scanning y from 0..min(base_vox, y_limit) also finds cavity/valley fits
+    # below the height map, filling interior gaps. 40% of box height was
+    # empirically the sweet spot for the falling-sand terrain in packer_best.py.
+    nest_y_limit = max(4, int(round(0.4 * box_ny)))
+    # How many lowest-Y candidates to place per GPU scan. Each scan is the
+    # expensive step, so placing a small batch of mutually non-overlapping pieces
+    # per scan keeps total scan count low. Swept batch size empirically:
+    # N=10 was best at 1mm cells, N=6 best at 0.5mm cells (finer cells pack more
+    # pieces per scan, so place fewer of them at once). Scale with cell size.
+    batch_size = max(6, int(round(10 * cell_size)))
+    
+    # Auto-scale XZ scan step so a single GPU scan stays tractable on large boxes.
+    # Cap the full-resolution candidate count (~512k) regardless of requested
+    # scan_step_vox; a 320-voxel box at step 1 would otherwise launch >1M threads.
+    step = max(1, scan_step_vox)
+    cand_per_ori = box_nx * box_nz
+    while cand_per_ori * len(orientations) > 524288 and step < 8:
+        step += 1
+        cand_per_ori = (box_nx // step) * (box_nz // step)
     
     if verbose:
         print(f"[VoxelGPU] Box: {box_l:.0f}x{box_w:.0f}x{box_h:.0f}mm -> {box_nx}x{box_ny}x{box_nz} voxels")
         print(f"[VoxelGPU] {len(orientations)} orientations, cell={cell_size}mm")
-        print(f"[VoxelGPU] All sparse: {all_sparse.shape[0]} voxels total")
+        print(f"[VoxelGPU] All sparse: {all_sparse.shape[0]} voxels total, XZ scan step={step} voxels")
     
     while len(placed) < max_pieces and consecutive_fails < 50:
         # Build candidate list: every XZ position for every orientation
@@ -256,7 +292,6 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
         for oi, o in enumerate(orientations):
             sx_v, sy_v, sz_v = o['shape']
             if sy_v > box_ny: continue
-            step = max(1, scan_step_vox)
             for x in range(0, box_nx - sx_v + 1, step):
                 for z in range(0, box_nz - sz_v + 1, step):
                     candidates.append([float(x), float(oi), float(z), -1.0, 0.0])
@@ -277,7 +312,7 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
             d_cand0, d_all_sparse, d_all_offsets,
             d_all_hm, d_all_hm_offsets, d_all_shapes,
             d_box_occ, d_box_hm, box_nx, box_ny, box_nz,
-            cell_size
+            cell_size, nest_y_limit
         )
         
         # GPU 1: second half (launch in parallel)
@@ -290,7 +325,7 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
                 d_cand1, d_all_sparse1, d_all_offsets1,
                 d_all_hm1, d_all_hm_offsets1, d_all_shapes1,
                 d_box_occ1, d_box_hm1, box_nx, box_ny, box_nz,
-                cell_size
+                cell_size, nest_y_limit
             )
             cuda.synchronize()
             result1 = d_cand1.copy_to_host()
@@ -311,46 +346,60 @@ def pack(orientations, box_dims, cell_size, max_pieces=5000, scan_step_vox=1, ve
             consecutive_fails += 1
             continue
         
+        # Place up to `batch_size` lowest-Y candidates from this scan in one go.
+        # Candidates are re-checked against the updated occupancy grid, so a batch
+        # never overlaps itself or the box.
         valid_results = results[valid]
-        best_idx = np.argmin(valid_results[:, 3])  # lowest Y
-        best = valid_results[best_idx]
-        best_x, best_oi, best_z, best_y = int(best[0]), int(best[1]), int(best[2]), best[3]
+        order = np.argsort(valid_results[:, 3])  # ascending Y
+        placed_batch = 0
+        for bi in order:
+            if placed_batch >= batch_size:
+                break
+            best = valid_results[bi]
+            best_x, best_oi, best_z, best_y = int(best[0]), int(best[1]), int(best[2]), best[3]
+            
+            od = orientations[best_oi]
+            sp = od['sparse']
+            by_vox = int(best_y / cell_size)
+            world_sp = sp + np.array([best_x, by_vox, best_z])
+            if box_occ[world_sp[:, 0], world_sp[:, 1], world_sp[:, 2]].any():
+                continue
+            
+            # Place in box occupancy
+            box_occ[world_sp[:, 0], world_sp[:, 1], world_sp[:, 2]] = 1
+            
+            # Update height map
+            for p in sp:
+                wx, wy, wz = best_x + p[0], by_vox + p[1], best_z + p[2]
+                if wy + 1 > box_hm[wx, wz]:
+                    box_hm[wx, wz] = wy + 1
+            
+            x_mm, y_mm, z_mm = best_x * cell_size, best_y, best_z * cell_size
+            pm = od['mesh'].copy(); pm.apply_translation([x_mm, y_mm, z_mm])
+            placed.append((x_mm, y_mm, z_mm, best_oi, od['name']))
+            placed_meshes.append(pm)
+            usage[od['name']] = usage.get(od['name'], 0) + 1
+            placed_batch += 1
+            
+            if progress_callback and len(placed) % 5 == 0:
+                progress_callback(len(placed), time.time() - start)
+            
+            if verbose and len(placed) % 50 == 0:
+                elapsed = time.time() - start
+                fill = box_occ.sum() * cell_size**3 / (box_l * box_w * box_h) * 100
+                print(f"[VoxelGPU] {len(placed)} placed, {fill:.1f}% fill, {elapsed:.0f}s  {od['name']}@({x_mm:.0f},{y_mm:.0f},{z_mm:.0f})")
         
-        od = orientations[best_oi]
-        sx_v, sy_v, sz_v = od['shape']
-        
-        # Place in box occupancy
-        sp = od['sparse']
-        world_sp = sp + np.array([best_x, int(best_y / cell_size), best_z])
-        box_occ[world_sp[:, 0], world_sp[:, 1], world_sp[:, 2]] = 1
-        
-        # Update height map
-        for p in sp:
-            wx, wy, wz = best_x + p[0], int(best_y / cell_size) + p[1], best_z + p[2]
-            if wy + 1 > box_hm[wx, wz]:
-                box_hm[wx, wz] = wy + 1
-        d_box_occ.copy_to_device(box_occ)
-        d_box_hm.copy_to_device(box_hm)
-        if use_dual:
-            cuda.select_device(1)
-            d_box_occ1.copy_to_device(box_occ)
-            d_box_hm1.copy_to_device(box_hm)
-            cuda.select_device(0)
-        
-        x_mm, y_mm, z_mm = best_x * cell_size, best_y, best_z * cell_size
-        pm = od['mesh'].copy(); pm.apply_translation([x_mm, y_mm, z_mm])
-        placed.append((x_mm, y_mm, z_mm, best_oi, od['name']))
-        placed_meshes.append(pm)
-        usage[od['name']] = usage.get(od['name'], 0) + 1
-        consecutive_fails = 0
-        
-        if progress_callback and len(placed) % 5 == 0:
-            progress_callback(len(placed), time.time() - start)
-        
-        if verbose and len(placed) % 50 == 0:
-            elapsed = time.time() - start
-            fill = box_occ.sum() * cell_size**3 / (box_l * box_w * box_h) * 100
-            print(f"[VoxelGPU] {len(placed)} placed, {fill:.1f}% fill, {elapsed:.0f}s  {od['name']}@({x_mm:.0f},{y_mm:.0f},{z_mm:.0f})")
+        if placed_batch > 0:
+            consecutive_fails = 0
+            d_box_occ.copy_to_device(box_occ)
+            d_box_hm.copy_to_device(box_hm)
+            if use_dual:
+                cuda.select_device(1)
+                d_box_occ1.copy_to_device(box_occ)
+                d_box_hm1.copy_to_device(box_hm)
+                cuda.select_device(0)
+        else:
+            consecutive_fails += 1
     
     elapsed = time.time() - start
     if verbose and placed:

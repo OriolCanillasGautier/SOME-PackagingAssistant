@@ -8,12 +8,13 @@ import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_42';
 import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=force_update_42';
-import { SceneManager } from './visualization/scene.js?v=organic_v1';
+import { SceneManager } from './visualization/scene.js?v=live_pack_v1';
 import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-world.js?v=force_update_42';
 import { ReportGenerator } from './report/report-generator.js?v=force_update_42';
 import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_42';
 import { StorageManager } from './storage/storage-manager.js?v=force_update_42';
 import { loadLocale, t as localeText, getStoredLanguage, setStoredLanguage } from './i18n.js?v=force_update_42';
+import { initBoxOptions } from './box-options.js?v=box_compare_v1';
 
 // Helper for dynamic limits
 function updateMaxPiecesLimit() {
@@ -29,7 +30,6 @@ function updateMaxPiecesLimit() {
         // If current value too high, adjust
         if (parseInt(elements.maxPieces.value) > newMax) {
             elements.maxPieces.value = newMax;
-            elements.maxPiecesValue.textContent = newMax;
         }
     }
 }
@@ -37,7 +37,10 @@ function updateMaxPiecesLimit() {
 
 // Application state
 const state = {
-    mode: 'optimized', // 'optimized', 'fast', or 'bulk'
+    mode: 'fast', // 'fast' (Planar), 'bulk' (Gravetat), or 'gpu' (Optimitzat)
+    bulkVariant: 'gravity', // 'gravity' | 'optimized' — sub-option of Bulk
+    planarVariant: 'grid', // 'grid' | 'stacking' | 'compartment' — sub-option of Planar
+    bulkConfigSet: false, // User confirmed pieces/auto via popup or advanced
     language: getStoredLanguage(), // 'ca' or 'en'
     locale: null,
     stlGeometry: null,
@@ -45,6 +48,8 @@ const state = {
     stlSettledQuat: null, // cached quaternion from gravity drop on current loaded geometry
     stlStableOrientations: [], // [{ quat, geometry, stability }] precomputed gravity bases
     selectedOrientations: null, // Set of selected orientation indices
+    orientationConfirmed: false, // User confirmed a pose via the modal
+    orientationExplicit: false, // User actively clicked a pose (vs default)
     activeOrientationIndex: 0, // Index of the orientation shown in the large viewer
     orientationPrepMs: 0,
     stlIntegrity: null,
@@ -542,7 +547,7 @@ async function updateStableOrientationCache() {
         state.stlAlignedGeometry = fallbackGeometry;
         state.stlDimensions = extractDimensions(fallbackGeometry);
         state.orientationPrepMs = performance.now() - t0;
-        renderOrientationSelector();
+        maybeShowOrientationModal();
         return fallbackGeometry;
     }
 
@@ -595,8 +600,27 @@ async function updateStableOrientationCache() {
 
     state.selectedOrientations = new Set([0]);
     state.activeOrientationIndex = 0;
-    renderOrientationSelector();
+    maybeShowOrientationModal();
     return primary?.geometry || null;
+}
+
+/**
+ * The orientation selection is only relevant for modes that place pieces in
+ * a chosen pose (Planar). Bulk gravity and the GPU optimizer explore
+ * orientations themselves.
+ */
+function modeNeedsOrientation() {
+    return state.mode === 'fast';
+}
+
+/**
+ * Show the orientation modal only when the active mode needs a pose and the
+ * user has not confirmed one yet.
+ */
+function maybeShowOrientationModal() {
+    if (!state.orientationConfirmed && modeNeedsOrientation()) {
+        renderOrientationSelector();
+    }
 }
 
 const MAX_ORIENTATION_CARDS = 4;
@@ -609,7 +633,8 @@ const orientationViewerState = {
     controls: null,
     grid: null,
     mesh: null,
-    animId: null
+    animId: null,
+    resizeObserver: null
 };
 
 /**
@@ -627,10 +652,10 @@ function initOrientationViewer() {
     const width = Math.max(220, container.clientWidth || 350);
     const height = Math.max(220, container.clientHeight || 350);
     renderer.setSize(width, height);
-    renderer.setClearColor(0x16213e, 1);
+    renderer.setClearColor(0x1e1e1f, 1);
 
     const scene = new THREE.Scene();
-    scene.fog = new THREE.Fog(0x16213e, 60, 140);
+    scene.fog = new THREE.Fog(0x1e1e1f, 60, 140);
 
     const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
     camera.position.set(3, 2.2, 3);
@@ -663,6 +688,27 @@ function initOrientationViewer() {
     orientationViewerState.grid = grid;
     orientationViewerState.initialized = true;
 
+    // Keep the canvas size in sync with its container. Fires when the modal
+    // becomes visible (size jumps from 0 to its laid-out dimensions) and on
+    // any window/panel resize, so a stale 0-size frame never gets rendered.
+    if (typeof ResizeObserver !== 'undefined') {
+        const resizeObserver = new ResizeObserver(() => {
+            const w = container.clientWidth;
+            const h = container.clientHeight;
+            if (w <= 0 || h <= 0) return;
+            renderer.setSize(w, h);
+            camera.aspect = w / h;
+            camera.updateProjectionMatrix();
+            if (orientationViewerState.scene && orientationViewerState.camera) {
+                renderer.render(orientationViewerState.scene, orientationViewerState.camera);
+            }
+        });
+        resizeObserver.observe(container);
+        orientationViewerState.resizeObserver = resizeObserver;
+    }
+
+    // Self-schedule FIRST so the animation loop can never be killed by the
+    // modal-visibility early return below.
     const loop = () => {
         orientationViewerState.animId = requestAnimationFrame(loop);
         const modal = document.getElementById('orientation-modal');
@@ -706,14 +752,74 @@ function setActiveOrientationMesh(geometry) {
         const maxDim = Math.max(size.x, size.y, size.z) || 1;
         const center = new THREE.Vector3();
         box.getCenter(center);
-        const dist = maxDim * 2.4;
 
+        // Grid floor sits directly under the piece's lowest point (the
+        // geometry is centered, so box.min.y is the bottom of the mesh).
         vs.grid.scale.set(maxDim * 4, 1, maxDim * 4);
         vs.grid.position.y = box.min.y;
 
+        // Fixed diagonal camera direction (same angle as before).
+        const dirVec = new THREE.Vector3(0.75, 0.55, 0.75).normalize();
+
+        // Frame the camera so the piece's projected bounding box fills ~60%
+        // of the smaller viewport dimension. Place a provisional camera at a
+        // nominal distance to derive the view basis (right/up), then project
+        // the box corners onto it to pick a distance that guarantees the
+        // whole piece stays in frame regardless of its shape.
+        vs.camera.position.copy(center).addScaledVector(dirVec, maxDim);
+        vs.camera.lookAt(center);
+        vs.camera.updateMatrixWorld();
+        const viewDir = new THREE.Vector3();
+        vs.camera.getWorldDirection(viewDir);
+        const rightVec = new THREE.Vector3().crossVectors(viewDir, vs.camera.up).normalize();
+        const upVec = new THREE.Vector3().crossVectors(rightVec, viewDir).normalize();
+
+        const corners = [
+            new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+            new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+            new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+            new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+            new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+            new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+            new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+            new THREE.Vector3(box.max.x, box.max.y, box.max.z)
+        ];
+        let minR = Infinity, maxR = -Infinity, minU = Infinity, maxU = -Infinity;
+        for (const c of corners) {
+            const r = c.dot(rightVec);
+            const u = c.dot(upVec);
+            if (r < minR) minR = r;
+            if (r > maxR) maxR = r;
+            if (u < minU) minU = u;
+            if (u > maxU) maxU = u;
+        }
+        const projW = maxR - minR;
+        const projH = maxU - minU;
+
+        const canvasEl = vs.renderer ? vs.renderer.domElement : null;
+        const vw = canvasEl ? canvasEl.clientWidth : 0;
+        const vh = canvasEl ? canvasEl.clientHeight : 0;
+        const aspect = vw > 0 && vh > 0 ? vw / vh : 1;
+        const halfTan = Math.tan(THREE.MathUtils.degToRad(vs.camera.fov / 2));
+        const targetFraction = 0.7;
+        const distFromTarget = Math.max(
+            projW / (targetFraction * 2 * halfTan * aspect),
+            projH / (targetFraction * 2 * halfTan)
+        );
+        const dist = distFromTarget / dirVec.length();
+
+        // Keep the depth fog scaled to the piece. The camera sits ~distFromTarget
+        // away, so a fixed 60–140 fog range washes the whole scene out to the
+        // clear color whenever the piece is larger than ~50mm.
+        if (vs.scene && vs.scene.fog) {
+            vs.scene.fog.near = distFromTarget * 1.6;
+            vs.scene.fog.far = Math.max(distFromTarget * 4, vs.scene.fog.near + 1);
+        }
+
         vs.camera.near = Math.max(0.001, maxDim / 100);
         vs.camera.far = maxDim * 100;
-        vs.camera.position.set(dist * 0.75, dist * 0.55, dist * 0.75);
+        vs.camera.position.copy(center).addScaledVector(dirVec, dist);
+        vs.camera.lookAt(center);
         vs.camera.updateProjectionMatrix();
         vs.controls.target.copy(center);
         vs.controls.minDistance = maxDim * 0.4;
@@ -751,17 +857,14 @@ function renderOrientationSelector() {
             ? `${mainText('orientationStable', {}, 'Estable')} · ${(o.stability.supportArea || 0).toFixed(0)} mm²`
             : mainText('orientationStable', {}, 'Estable');
         return `<div class="orient-card ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''}" data-index="${i}"
-                tabindex="0" role="button" aria-pressed="${isActive}"
+                tabindex="0" role="button" aria-pressed="${isSelected}"
                 onclick="selectOrientation(${i})">
             <canvas id="${canvasId}" class="orient-preview" width="140" height="140"></canvas>
             <div class="orient-info">
                 <span class="orient-dims">${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}mm</span>
                 <span class="orient-stability">${stabilityText}</span>
             </div>
-            <label class="orient-toggle" title="${mainText('orientationInclude', {}, 'Incloure a l\'empaquetatge')}" onclick="event.stopPropagation()">
-                <input type="checkbox" data-index="${i}" ${isSelected ? 'checked' : ''} onchange="toggleOrientation(${i})">
-                <span class="orient-toggle-track"></span>
-            </label>
+            <span class="orient-check" aria-hidden="true"></span>
         </div>`;
     }).join('');
 
@@ -782,6 +885,7 @@ function renderOrientationSelector() {
 function confirmOrientationSelection() {
     const modal = document.getElementById('orientation-modal');
     if (modal) modal.style.display = 'none';
+    state.orientationConfirmed = true;
 }
 
 /**
@@ -816,28 +920,55 @@ function moveActiveOrientation(delta) {
     const count = Math.min(MAX_ORIENTATION_CARDS, orientations.length);
     if (count === 0) return;
     const next = (state.activeOrientationIndex + delta + count) % count;
-    selectOrientation(next);
+    setActiveOrientationIndex(next);
 }
 
 /**
- * Set the active orientation (shown in the large viewer). Updates only the
- * card highlight classes — does not rebuild the thumbnail canvases or viewer.
+ * Single selection: clicking a card makes it THE selected orientation.
+ * Clicking the already-selected card keeps it (can't deselect to zero).
  */
-function selectOrientation(index) {
-    if (state.activeOrientationIndex === index) return;
-    state.activeOrientationIndex = index;
+function toggleOrientationSelection(index) {
+    state.selectedOrientations = new Set([index]);
+    state.orientationExplicit = true; // user actively picked this pose
+}
 
+/**
+ * Sync every card's classes/aria with the current selection + active state
+ * without rebuilding the thumbnail canvases or the viewer.
+ */
+function updateOrientationCardUI() {
     document.querySelectorAll('#orientation-options .orient-card').forEach(card => {
         const idx = parseInt(card.dataset.index, 10);
-        const isActive = idx === index;
+        const isSelected = state.selectedOrientations.has(idx);
+        const isActive = state.activeOrientationIndex === idx;
+        card.classList.toggle('selected', isSelected);
         card.classList.toggle('active', isActive);
-        card.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        card.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
     });
+}
+
+/**
+ * Show an orientation in the large viewer without touching the selection.
+ */
+function setActiveOrientationIndex(index) {
+    state.activeOrientationIndex = index;
+    updateOrientationCardUI();
 
     const orientations = state.stlStableOrientations || [];
     const shown = orientations.slice(0, MAX_ORIENTATION_CARDS);
     const o = shown[index];
     if (o) setActiveOrientationMesh(o.geometry);
+}
+
+/**
+ * Card interaction: toggle this orientation for packing AND show it in the
+ * large viewer (the last clicked card is always the one inspected).
+ */
+function selectOrientation(index) {
+    const orientations = state.stlStableOrientations || [];
+    if (index < 0 || index >= Math.min(MAX_ORIENTATION_CARDS, orientations.length)) return;
+    toggleOrientationSelection(index);
+    setActiveOrientationIndex(index);
 }
 
 // Expose for inline onclick handlers (module scope)
@@ -889,20 +1020,8 @@ function renderOrientationPreview(canvasId, geometry) {
 }
 
 function toggleOrientation(index) {
-    if (!state.selectedOrientations) state.selectedOrientations = new Set();
-    if (state.selectedOrientations.has(index)) {
-        if (state.selectedOrientations.size > 1) state.selectedOrientations.delete(index);
-    } else {
-        state.selectedOrientations.add(index);
-    }
-
-    // Update just this card's UI without rebuilding the thumbnails or viewer
-    const card = document.querySelector(`#orientation-options .orient-card[data-index="${index}"]`);
-    if (card) {
-        card.classList.toggle('selected', state.selectedOrientations.has(index));
-        const cb = card.querySelector('input[type="checkbox"]');
-        if (cb) cb.checked = state.selectedOrientations.has(index);
-    }
+    toggleOrientationSelection(index);
+    updateOrientationCardUI();
 }
 
 function setBoxPreset(l, w, h, btn) {
@@ -934,7 +1053,6 @@ const elements = {
     stlUpload: document.getElementById('stl-upload'),
     stlStatus: document.getElementById('stl-status'),
     optPieceColors: document.getElementById('opt-piece-colors'),
-    optPieceColorsValue: document.getElementById('opt-piece-colors-value'),
     
     // Box inputs
     boxLength: document.getElementById('box-length'),
@@ -948,26 +1066,20 @@ const elements = {
     wallThicknessGroup: document.getElementById('wall-thickness-group'),
     wallThickness: document.getElementById('wall-thickness'),
     packingGap: document.getElementById('packing-gap'),
-    packingGapValue: document.getElementById('packing-gap-value'),
+    cardboardMm: document.getElementById('cardboard-mm'),
+    cardboardMmGroup: document.getElementById('cardboard-mm-group'),
     
     // Bulk mode options
     bulkOptions: document.getElementById('bulk-options'),
     gpuOptions: document.getElementById('gpu-options'),
     dropHeight: document.getElementById('drop-height'),
-    dropHeightValue: document.getElementById('drop-height-value'),
     maxPieces: document.getElementById('max-pieces'),
-    maxPiecesValue: document.getElementById('max-pieces-value'),
     maxPiecesGroup: document.getElementById('max-pieces-group'),
     dropInterval: document.getElementById('drop-interval'),
-    dropIntervalValue: document.getElementById('drop-interval-value'),
     vibrationFrequency: document.getElementById('vibration-frequency'),
-    vibrationFrequencyValue: document.getElementById('vibration-frequency-value'),
     vibrationAmplitude: document.getElementById('vibration-amplitude'),
-    vibrationAmplitudeValue: document.getElementById('vibration-amplitude-value'),
     vibrationNoise: document.getElementById('vibration-noise'),
-    vibrationNoiseValue: document.getElementById('vibration-noise-value'),
     pieceColors: document.getElementById('piece-colors'),
-    pieceColorsValue: document.getElementById('piece-colors-value'),
     randomRotation: document.getElementById('random-rotation'),
     autoCapacity: document.getElementById('auto-capacity'),
     autoModeHint: document.getElementById('auto-mode-hint'),
@@ -1044,6 +1156,7 @@ function nextFrame() {
 async function init() {
     state.locale = await loadLocale(state.language);
     state.sceneManager = new SceneManager(elements.threeCanvas);
+    window.__sceneManager = state.sceneManager; // dev/test hook
     state.reportGenerator = new ReportGenerator(state.sceneManager);
     state.storage = new StorageManager();
     await state.storage.init();
@@ -1099,10 +1212,40 @@ function setupEventListeners() {
         btn.addEventListener('click', () => switchMode(btn.dataset.mode));
     });
 
-    elements.packingGap.addEventListener('input', (e) => {
-        const val = e.target.value;
-        elements.packingGapValue.textContent = `${val}`;
+    // Bulk variant sub-selector (Gravetat / Optimitzat)
+    document.querySelectorAll('#bulk-variant-selector .variant-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchBulkVariant(btn.dataset.variant));
     });
+
+    // Planar variant sub-selector (Graella / Apilat / Compartiment)
+    document.querySelectorAll('#planar-variant-selector .variant-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchPlanarVariant(btn.dataset.variant));
+    });
+
+    // Auto mode popup
+    const autoModeConfirm = document.getElementById('auto-mode-confirm');
+    if (autoModeConfirm) {
+        autoModeConfirm.addEventListener('click', () => {
+            const popup = document.getElementById('auto-mode-popup');
+            if (popup) popup.style.display = 'none';
+        });
+    }
+
+    // Bulk start popup — radio toggles the fixed-pieces input
+    document.querySelectorAll('input[name="bulk-mode"]').forEach(radio => {
+        radio.addEventListener('change', (e) => {
+            const fixedGroup = document.getElementById('bulk-fixed-pieces-group');
+            if (fixedGroup) fixedGroup.style.display = e.target.value === 'fixed' ? 'block' : 'none';
+        });
+    });
+    const bulkStartConfirm = document.getElementById('bulk-start-confirm');
+    if (bulkStartConfirm) {
+        bulkStartConfirm.addEventListener('click', confirmBulkStartPopup);
+    }
+
+    // Changing the advanced bulk settings counts as a manual configuration
+    elements.autoCapacity?.addEventListener('change', () => { state.bulkConfigSet = true; });
+    elements.maxPieces?.addEventListener('input', () => { state.bulkConfigSet = true; });
 
     // Material density selector
     elements.materialDensity?.addEventListener('change', (e) => {
@@ -1134,10 +1277,6 @@ function setupEventListeners() {
         }
     });
 
-    elements.optPieceColors?.addEventListener('input', (e) => {
-        elements.optPieceColorsValue.textContent = e.target.value;
-    });
-
     elements.placementStrategy?.addEventListener('change', () => {
         const isLegacy = elements.placementStrategy.value === 'legacy';
         if (elements.placementSettleCheck) {
@@ -1145,39 +1284,7 @@ function setupEventListeners() {
         }
     });
 
-    elements.dropHeight.addEventListener('input', (e) => {
-        elements.dropHeightValue.textContent = e.target.value;
-    });
-
-    elements.maxPieces.addEventListener('input', (e) => {
-        elements.maxPiecesValue.textContent = e.target.value;
-    });
-
-    elements.dropInterval.addEventListener('input', (e) => {
-        elements.dropIntervalValue.textContent = e.target.value;
-    });
-
-    elements.vibrationFrequency?.addEventListener('input', (e) => {
-        if (elements.vibrationFrequencyValue) {
-            elements.vibrationFrequencyValue.textContent = parseFloat(e.target.value).toFixed(1);
-        }
-    });
-
-    elements.vibrationAmplitude?.addEventListener('input', (e) => {
-        if (elements.vibrationAmplitudeValue) {
-            elements.vibrationAmplitudeValue.textContent = parseFloat(e.target.value).toFixed(2);
-        }
-    });
-
-    elements.vibrationNoise?.addEventListener('input', (e) => {
-        if (elements.vibrationNoiseValue) {
-            elements.vibrationNoiseValue.textContent = parseFloat(e.target.value).toFixed(2);
-        }
-    });
-
-    elements.pieceColors.addEventListener('input', (e) => {
-        elements.pieceColorsValue.textContent = e.target.value;
-    });
+    // Bulk numeric inputs — values are read directly at simulation start
 
     elements.autoCapacity.addEventListener('change', (e) => {
         const autoMode = e.target.checked;
@@ -1187,21 +1294,11 @@ function setupEventListeners() {
         if (elements.autoModeHint) {
             elements.autoModeHint.style.display = autoMode ? 'block' : 'none';
         }
+        // Explain auto mode when the user enables it manually
+        if (autoMode && !state._programmaticBulkChange) {
+            showAutoModePopup();
+        }
     });
-
-    // GPU method change — show/hide cell-size based on method
-    const gpuMethod = document.getElementById('gpu-method');
-    const gpuCellSize = document.getElementById('gpu-cell-size');
-    if (gpuMethod && gpuCellSize) {
-        const updateGPUOptions = () => {
-            const isVoxel = gpuMethod.value === 'voxel';
-            gpuCellSize.style.display = isVoxel ? '' : 'none';
-            const cellSizeLabel = gpuCellSize.parentElement?.querySelector('label[for="gpu-cell-size"]');
-            if (cellSizeLabel) cellSizeLabel.style.display = isVoxel ? '' : 'none';
-        };
-        gpuMethod.addEventListener('change', updateGPUOptions);
-        updateGPUOptions();  // initial state
-    }
 
     elements.objWeight.addEventListener('input', updateMaxPiecesLimit);
     elements.maxWeight.addEventListener('input', updateMaxPiecesLimit);
@@ -1255,14 +1352,36 @@ function setupEventListeners() {
  */
 function switchMode(mode) {
     state.mode = mode;
-    
-    elements.modeButtons.forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.mode === mode);
-    });
-    
+
+    const isBulkGroup = mode === 'bulk' || mode === 'gpu';
     const isBulk = mode === 'bulk';
     const isGPU = mode === 'gpu';
-    
+    if (isBulkGroup) state.bulkVariant = isBulk ? 'gravity' : 'optimized';
+
+    // Main mode buttons: Bulk stays active for both variants
+    elements.modeButtons.forEach(btn => {
+        if (btn.dataset.mode === 'bulk') {
+            btn.classList.toggle('active', isBulkGroup);
+        } else {
+            btn.classList.toggle('active', btn.dataset.mode === mode);
+        }
+    });
+
+    // Planar variant sub-selector (Graella / Apilat / Compartiment) — shown
+    // only in Planar mode. state.planarVariant is preserved across switches.
+    const planarSelector = document.getElementById('planar-variant-selector');
+    if (planarSelector) planarSelector.style.display = mode === 'fast' ? 'flex' : 'none';
+    document.querySelectorAll('#planar-variant-selector .variant-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.variant === state.planarVariant);
+    });
+
+    // Bulk variant sub-selector (Gravetat / Optimitzat)
+    const variantSelector = document.getElementById('bulk-variant-selector');
+    if (variantSelector) variantSelector.style.display = isBulkGroup ? 'flex' : 'none';
+    document.querySelectorAll('#bulk-variant-selector .variant-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.variant === state.bulkVariant);
+    });
+
     elements.bulkOptions.style.display = isBulk ? 'block' : 'none';
     elements.gpuOptions.style.display = isGPU ? 'block' : 'none';
     elements.calculateBtn.style.display = isBulk ? 'none' : 'block';
@@ -1282,6 +1401,55 @@ function switchMode(mode) {
     if (isGPU) {
         elements.results.innerHTML = `<p class="placeholder-text">${mainText('gpuPlaceholder')}</p>`;
         state.sceneManager.clearPieces();
+    }
+
+    // Ask for an orientation if entering Planar without a confirmed pose
+    if (modeNeedsOrientation() && !state.orientationConfirmed && state.stlGeometry) {
+        maybeShowOrientationModal();
+    }
+}
+
+/**
+ * Switch between Bulk variants (Gravetat / Optimitzat).
+ */
+function switchBulkVariant(variant) {
+    if (variant === 'optimized') {
+        switchMode('gpu');
+    } else {
+        switchMode('bulk');
+    }
+}
+
+/**
+ * Switch between Planar variants (Graella / Apilat / Compartiment).
+ * Planar keeps state.mode = 'fast' — only the sub-variant changes.
+ */
+function switchPlanarVariant(variant) {
+    state.planarVariant = variant;
+    document.querySelectorAll('#planar-variant-selector .variant-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.variant === variant);
+    });
+
+    // Compartment mode: show the cardboard thickness input (the dividers are
+    // sized from it and the grid gap equals it).
+    if (elements.cardboardMmGroup) {
+        elements.cardboardMmGroup.style.display = variant === 'compartment' ? 'block' : 'none';
+    }
+
+    // Refresh the Planar mode button subtitle to match the active variant.
+    const descMap = {
+        grid: mainText('planarGridDesc'),
+        stacking: mainText('planarStackingDesc'),
+        compartment: mainText('planarCompartmentDesc'),
+    };
+    const planarBtn = document.querySelector('.mode-btn[data-mode="fast"]');
+    const descEl = planarBtn?.querySelector('.mode-desc');
+    if (descEl) descEl.textContent = descMap[variant] || mainText('modePlanarDesc');
+
+    // All Planar variants still place pieces in a chosen pose, so keep the
+    // orientation requirement (re-offer the modal if not yet confirmed).
+    if (state.mode === 'fast' && !state.orientationConfirmed && state.stlGeometry) {
+        maybeShowOrientationModal();
     }
 }
 
@@ -1328,10 +1496,12 @@ async function handleSTLUpload(event) {
             const triangleCount = Math.floor(vertexCount / 3);
             // Mostrar opció de simplificació
             elements.stlStatus.className = 'stl-status warning';
-            elements.stlStatus.innerHTML = `⚠️ Malla complexa (${triangleCount.toLocaleString()} triangles / ${vertexCount.toLocaleString()} vèrtexs). El rendiment pot ser lent. <button id="simplify-mesh-btn" class="btn-small">Simplificar</button>`;
+            elements.stlStatus.innerHTML = `Malla complexa (${triangleCount.toLocaleString()} triangles / ${vertexCount.toLocaleString()} vèrtexs). El rendiment pot ser lent. <button id="simplify-mesh-btn" class="btn-small">Simplificar</button>`;
         }
         
         state.stlGeometry = geometry;
+        state.orientationConfirmed = false;
+        state.orientationExplicit = false;
         elements.stlStatus.className = 'stl-status';
         elements.stlStatus.textContent = 'Preparant orientació estable...';
         elements.stlStatus.style.display = 'block';
@@ -1358,7 +1528,7 @@ async function handleSTLUpload(event) {
             const triangleCount = Math.floor(vertexCount / 3);
             const baseCount = state.stlStableOrientations?.length || 1;
             elements.stlStatus.className = 'stl-status warning';
-            elements.stlStatus.innerHTML = `⚠️ ${mainText('complexMeshWarning', {
+            elements.stlStatus.innerHTML = `${mainText('complexMeshWarning', {
                 triangles: triangleCount.toLocaleString(),
                 vertices: vertexCount.toLocaleString()
             })} <button id="simplify-mesh-btn" class="btn-small">${commonText('buttons.simplify')}</button> <button id="download-stl-btn" class="btn-small" style="margin-left:8px;">${mainText('downloadStl')}</button> <span style="margin-left:8px; opacity:.85;">${mainText('orientationLabel')}: ${state.orientationPrepMs.toFixed(0)} ms (${baseCount} ${mainText('basesLabel')})</span>`;
@@ -1731,10 +1901,22 @@ function getInputValues() {
             return parseFloat(val) || 0;
         })(),
         packingGap: Math.max(0, parseFloat(elements.packingGap.value) || 0),
+        cardboardMm: Math.max(0, parseFloat(elements.cardboardMm?.value) || 0),
         solidPiece: elements.solidPiece?.checked ?? true,
         wallThickness: parseFloat(elements.wallThickness?.value) || 2,
         // Bulk mode
-        dropHeight: parseInt(elements.dropHeight.value),
+        dropHeight: (() => {
+            const manual = parseInt(elements.dropHeight.value);
+            if (manual > 0) return manual;
+            // Auto: drop from well above the box based on box height + item bbox
+            const boxH = parseFloat(elements.boxHeight.value) || 0;
+            const itemMax = Math.max(
+                parseFloat(elements.objLength.value) || 0,
+                parseFloat(elements.objWidth.value) || 0,
+                parseFloat(elements.objHeight.value) || 0
+            );
+            return Math.max(100, boxH + itemMax * 2);
+        })(),
         maxPieces: parseInt(elements.maxPieces.value),
         dropIntervalMs: parseInt(elements.dropInterval.value),
         vibrationFrequency: parseFloat(elements.vibrationFrequency?.value) || 8.0,
@@ -1792,20 +1974,61 @@ function buildOrientationOverrides(geometry, allowRotation) {
 let gpuHistory = [];
 const MAX_GPU_HISTORY = 10;
 
-async function handleGPUCalculate(calcStartTime) {
+async function handleGPUCalculate(calcStartTime, options = null) {
     if (!state.stlGeometry) {
         elements.results.innerHTML = `<p class="error-text">${mainText('modeGPURequiresSTL')}</p>`;
         return;
     }
 
     const values = getInputValues();
-    const cellSize = document.getElementById('gpu-cell-size')?.value || '0.5';
-    const gpuMethod = document.getElementById('gpu-method')?.value || 'voxel';
+    let cellSize = document.getElementById('gpu-cell-size')?.value || '0.5';
+    let gpuMethod = document.getElementById('gpu-method')?.value || 'voxel';
+    let extraSeed = 0;
+
+    if (options) {
+        // Method override (Planar stacking/compartment variants reuse this handler).
+        if (options.method) {
+            gpuMethod = options.method;
+        } else if (state.mode === 'fast' && (state.planarVariant === 'stacking' || state.planarVariant === 'compartment')) {
+            // Re-optimize (horizontal angle / accuracy / reseed) reuses the
+            // active Planar variant's packer.
+            gpuMethod = state.planarVariant;
+        }
+        if (options.accuracy === 'accurate') {
+            gpuMethod = 'voxel';
+            cellSize = '0.5';
+        } else if (options.accuracy === 'fast') {
+            gpuMethod = 'sparrow';
+            cellSize = '2.0';
+        } else if (options.accuracy === 'reseed') {
+            extraSeed = Math.floor(Math.random() * 2 ** 31);
+        }
+    }
+
     setCalcProgress(true, 5, mainText('modeGPUSubmitting'), calcStartTime);
     await nextFrame();
 
     try {
-        const stlBlob = new Blob([state.stlFileData], { type: 'application/octet-stream' });
+        // Stacking/Compartment ALWAYS honor the user's chosen orientation
+        // (the modal selection): export the selected pose's geometry and tell
+        // the server to use only that rotation. Other methods explore all
+        // orientations themselves.
+        let stlBlob = null;
+        let fixedOrientation = 0;
+        const isPoseMethod = gpuMethod === 'stacking' || gpuMethod === 'compartment';
+        const selectedSet = state.selectedOrientations;
+        if (isPoseMethod && selectedSet && selectedSet.size === 1 && state.stlStableOrientations?.length) {
+            const selIdx = [...selectedSet][0];
+            const selOrientation = state.stlStableOrientations[selIdx];
+            if (selOrientation?.geometry) {
+                stlBlob = new Blob([exportGeometryToBinarySTL(selOrientation.geometry)],
+                                   { type: 'application/octet-stream' });
+                fixedOrientation = 1;
+            }
+        }
+        if (!stlBlob) {
+            stlBlob = new Blob([state.stlFileData], { type: 'application/octet-stream' });
+        }
 
         const formData = new FormData();
         formData.append('stl', stlBlob, state.stlFileName || 'piece.stl');
@@ -1814,6 +2037,11 @@ async function handleGPUCalculate(calcStartTime) {
         formData.append('box_h', values.boxH);
         formData.append('cell', cellSize);
         formData.append('method', gpuMethod);
+        if (extraSeed) formData.append('seed', String(extraSeed));
+        if (fixedOrientation) formData.append('fixed_orientation', String(fixedOrientation));
+        if (fixedOrientation && options?.horizontalAngle != null) {
+            formData.append('horizontal_angle', String(options.horizontalAngle));
+        }
 
         const resp = await fetch('/api/pack', {
             method: 'POST',
@@ -1827,10 +2055,45 @@ async function handleGPUCalculate(calcStartTime) {
         // Poll with live progress
         let job, pollCount = 0;
         const staticEta = submitData.estimated_time;
+        const gpuColorCount = parseInt(elements.optPieceColors?.value) || 10;
+        // Live-preview bookkeeping: the server's placements_partial grows in
+        // pack order, so we only ever append the NEW entries to the scene.
+        let liveGeo = null;
+        let liveRendered = 0;
         do {
             const r = await fetch(`/api/pack/${job_id}`);
             job = await r.json();
             pollCount++;
+
+            // Live packing preview (sparrow): render placements as they arrive
+            // so the user watches the box fill while the server is still packing.
+            if (job.status === 'running' && Array.isArray(job.placements_partial)) {
+                const partialLen = job.placements_partial.length;
+                // A later worker attempt restarts from zero → drop the stale
+                // preview and re-render the new attempt from the start so the
+                // visible state always matches a single consistent packing run.
+                if (partialLen < liveRendered) {
+                    state.sceneManager.clearPieces();
+                    liveRendered = 0;
+                }
+                if (partialLen > liveRendered) {
+                    if (!liveGeo) {
+                        liveGeo = await loadSTL(state.stlFileData);
+                    }
+                    if (liveGeo) {
+                        state.sceneManager.createBox(values.boxL, values.boxW, values.boxH);
+                        state.sceneManager.addPackedPlacementsPartial({
+                            placements: job.placements_partial,
+                            baseGeometry: liveGeo,
+                            boxL: values.boxL,
+                            boxW: values.boxW,
+                            boxH: values.boxH,
+                            colorCount: gpuColorCount,
+                        });
+                        liveRendered = partialLen;
+                    }
+                }
+            }
 
             if (job.status === 'running' || job.status === 'queued') {
                 let etaText = '';
@@ -1863,16 +2126,51 @@ async function handleGPUCalculate(calcStartTime) {
         setCalcProgress(true, 80, 'Carregant resultats...', calcStartTime);
         await nextFrame();
 
-        // Download and display merged STL
-        const stlResp = await fetch(`/api/pack/${job_id}/stl`);
-        const stlBuf = await stlResp.arrayBuffer();
-        const mergedGeom = await loadSTL(stlBuf);
-        if (!mergedGeom) throw new Error('No s\'ha pogut carregar el STL');
+        // Render individual pieces from the server's placement data.
+        // baseGeometry must match the exact STL bytes that were sent to the
+        // server (raw file bytes, or the exported selected pose) — NOT
+        // state.stlGeometry, which may have been aligned/transformed client-side.
+        let baseGeometry;
+        if (fixedOrientation && state.selectedOrientations && state.stlStableOrientations?.length) {
+            const selIdx = [...state.selectedOrientations][0];
+            baseGeometry = state.stlStableOrientations[selIdx]?.geometry?.clone() || null;
+        } else if (state.stlFileData instanceof ArrayBuffer) {
+            baseGeometry = liveGeo || await loadSTL(state.stlFileData);
+        }
+        if (!baseGeometry) throw new Error('No s\'ha pogut carregar el STL');
 
-        state.sceneManager.clearPieces();
         state.sceneManager.createBox(values.boxL, values.boxW, values.boxH);
-        mergedGeom.computeVertexNormals();
-        state.sceneManager.addSTLPiece(mergedGeom, new THREE.Vector3(0, 0, 0));
+
+        const placements = job.placements || [];
+        state.sceneManager.addPackedPlacements({
+            placements,
+            baseGeometry,
+            boxL: values.boxL,
+            boxW: values.boxW,
+            boxH: values.boxH,
+            colorCount: gpuColorCount,
+            fillPct: job.fill_pct || 0,
+            onProgress: (p) => {
+                const el = document.getElementById('gpu-piece-count');
+                if (el) el.textContent = String(p.revealed);
+            }
+        });
+
+        // Compartment packing: render the cardboard partition grid between
+        // the cells (Pack Studio "Partitions" — the carton that separates
+        // each piece). The server reports the cell pitch + layer pitch so
+        // the walls and shelves sit exactly where pieces are placed.
+        if (job.compartment && job.compartment.cellL && job.compartment.cellW) {
+            state.sceneManager.addPartitions({
+                boxL: values.boxL,
+                boxW: values.boxW,
+                boxH: values.boxH,
+                cellL: job.compartment.cellL,
+                cellW: job.compartment.cellW,
+                nLayers: job.compartment.nLayers || 1,
+                layerPitch: job.compartment.layerPitch || null,
+            });
+        }
 
         // Store in history for comparison
         const run = {
@@ -1897,11 +2195,12 @@ async function handleGPUCalculate(calcStartTime) {
             const rows = gpuHistory.map(r => {
                 const isCurrent = r.id === run.id;
                 const best = gpuHistory.reduce((a, b) => b.pieces > a.pieces ? b : a, gpuHistory[0]);
-                const marker = r.pieces === best.pieces && r.id === best.id ? ' 🏆' : '';
-                return `<tr${isCurrent ? ' class="current-run"' : ''}>
+                const isBest = r.pieces === best.pieces && r.id === best.id;
+                const cls = [isCurrent ? 'current-run' : '', isBest ? 'best-run' : ''].filter(Boolean).join(' ');
+                return `<tr${cls ? ` class="${cls}"` : ''}>
                     <td>${r.timestamp}</td>
                     <td>${r.cellSize}mm</td>
-                    <td><strong>${r.pieces}${marker}</strong></td>
+                    <td><strong>${r.pieces}</strong></td>
                     <td>${r.fillPct}%</td>
                     <td>${r.timeS}s</td>
                     <td>${r.boxL}×${r.boxW}×${r.boxH}</td>
@@ -1909,7 +2208,7 @@ async function handleGPUCalculate(calcStartTime) {
             }).join('');
             comparisonHtml = `
                 <details open class="gpu-comparison">
-                    <summary>📊 ${mainText('gpuComparison') || 'Comparació de resultats'}</summary>
+                    <summary>${mainText('gpuComparison') || 'Comparació de resultats'}</summary>
                     <table class="comparison-table">
                         <tr><th>Hora</th><th>Cel·la</th><th>Peces</th><th>Fill</th><th>Temps</th><th>Caixa</th></tr>
                         ${rows}
@@ -1918,9 +2217,10 @@ async function handleGPUCalculate(calcStartTime) {
         }
 
         const clampedFill = Math.max(0, Math.min(100, job.fill_pct || 0));
+        const isStacking = gpuMethod === 'stacking';
         elements.results.innerHTML = `
             <div class="results-hero">
-                <div class="hero-number">${job.pieces}</div>
+                <div class="hero-number" id="gpu-piece-count" data-total="${job.pieces}">0</div>
                 <div class="hero-label">${mainText('pieces')}</div>
             </div>
             <div class="results-cards">
@@ -1942,13 +2242,60 @@ async function handleGPUCalculate(calcStartTime) {
                 </div>
             </div>
             <div class="results-actions">
-                <a class="report-link" href="${stlUrl}" target="_blank">⬇ ${mainText('modeGPUStlUrl')}</a>
-                <button class="reoptimize-btn" onclick="document.querySelector('#calculate-btn').click()">🔄 ${mainText('reoptimize')}</button>
+                <a class="report-link" href="${stlUrl}" target="_blank">${mainText('modeGPUStlUrl')}</a>
+                <button class="replay-btn" id="replay-animation-btn" onclick="window.replayGPUAnimation()">${mainText('gpuReplayAnimation')}</button>
+                <button class="reoptimize-btn" onclick="window.askReoptimize()">${mainText('reoptimize')}</button>
+            </div>
+            <div id="reoptimize-chooser" class="reoptimize-chooser" style="display: none;">
+                ${isStacking ? `
+                    <div class="reopt-horizontal" id="reopt-horizontal-group">
+                        <span class="reopt-horizontal-label">Rotació horitzontal:</span>
+                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 0)">0°</button>
+                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 45)">45°</button>
+                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 90)">90°</button>
+                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 135)">135°</button>
+                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', null)">Auto</button>
+                    </div>
+                ` : ''}
+                <button class="reopt-option" onclick="window.reoptimizeGPU('accurate')">${mainText('reoptAccurate')}</button>
+                <button class="reopt-option" onclick="window.reoptimizeGPU('fast')">${mainText('reoptFast')}</button>
+                <button class="reopt-option" onclick="window.reoptimizeGPU('reseed')">${mainText('reoptReseed')}</button>
             </div>
             ${comparisonHtml}
         `;
 
         setCalcProgress(false, 0, '', 0);
+
+        // Store results for the report generator. Planar stacking/compartment
+        // keep state.mode = 'fast', so the report labels them as Planar.
+        const meshVolume = state.stlGeometry ? computeMeshVolume(state.stlGeometry) : 0;
+        const matDensity = values.materialDensity || 0;
+        let estPieceWeight = 0;
+        if (matDensity > 0) {
+            if (values.solidPiece) {
+                const volForWeight = meshVolume > 0 ? meshVolume : (values.objL * values.objW * values.objH);
+                estPieceWeight = (volForWeight / 1e9) * matDensity;
+            } else {
+                const wallT = values.wallThickness || 2;
+                const saForWeight = (state.stlGeometry ? computeSurfaceArea(state.stlGeometry) : 0) || 2 * (values.objL * values.objW + values.objL * values.objH + values.objW * values.objH);
+                estPieceWeight = (saForWeight * wallT / 1e9) * matDensity;
+            }
+        }
+        state.lastResults = {
+            pieceDims: { l: values.objL, w: values.objW, h: values.objH },
+            boxDims: { length: values.boxL, width: values.boxW, height: values.boxH },
+            pieceCount: job.pieces,
+            pieceWeight: values.objWeight,
+            maxWeight: values.maxWeight,
+            mode: state.mode,
+            stlFileName: state.stlFileName || null,
+            meshVolume: meshVolume || 0,
+            materialDensity: matDensity,
+            estimatedPieceWeight: estPieceWeight,
+            estimatedTotalWeight: estPieceWeight * job.pieces
+        };
+        state.displayCount = job.pieces;
+        if (elements.reportButtons) elements.reportButtons.style.display = 'block';
 
         // Clear comparison when switching modes
         document.querySelectorAll('.mode-btn').forEach(btn => {
@@ -1964,6 +2311,75 @@ async function handleGPUCalculate(calcStartTime) {
 }
 
 /**
+ * Replay the staggered appearance animation without re-packing.
+ * Used by the "Reproduir animació" button in the GPU results panel.
+ */
+window.replayGPUAnimation = () => {
+    state.sceneManager?.replayReveal();
+};
+
+/**
+ * Show the auto-mode explanation popup when the user enables it.
+ */
+function showAutoModePopup() {
+    const popup = document.getElementById('auto-mode-popup');
+    if (popup) popup.style.display = 'flex';
+}
+
+/**
+ * Confirm the bulk start popup: apply the chosen mode and start the sim.
+ */
+function confirmBulkStartPopup() {
+    const popup = document.getElementById('bulk-start-popup');
+    const selected = document.querySelector('input[name="bulk-mode"]:checked');
+    const fixedInput = document.getElementById('bulk-fixed-pieces');
+
+    if (selected && selected.value === 'auto') {
+        state._programmaticBulkChange = true;
+        if (elements.autoCapacity) elements.autoCapacity.checked = true;
+        if (elements.autoCapacity) elements.autoCapacity.dispatchEvent(new Event('change'));
+        state._programmaticBulkChange = false;
+    } else {
+        state._programmaticBulkChange = true;
+        if (elements.autoCapacity) elements.autoCapacity.checked = false;
+        if (elements.autoCapacity) elements.autoCapacity.dispatchEvent(new Event('change'));
+        state._programmaticBulkChange = false;
+        if (fixedInput && elements.maxPieces) {
+            const n = Math.max(1, parseInt(fixedInput.value) || 100);
+            elements.maxPieces.value = n;
+        }
+    }
+    state.bulkConfigSet = true;
+    if (popup) popup.style.display = 'none';
+    startSimulation();
+}
+
+/**
+ * Show the re-optimize chooser (accurate / fast / different seed).
+ */
+window.askReoptimize = () => {
+    const chooser = document.getElementById('reoptimize-chooser');
+    if (chooser) chooser.style.display = chooser.style.display === 'none' ? 'flex' : 'none';
+};
+
+/**
+ * Re-run the GPU calculation with the chosen accuracy/randomizer option.
+ * `option` may be 'accurate' | 'fast' | 'reseed' | 'horizontal'; for
+ * 'horizontal' the second argument is the requested in-plane rotation angle
+ * (0/45/90/135°) or null for the automatic best.
+ */
+window.reoptimizeGPU = (option, angle = null) => {
+    const chooser = document.getElementById('reoptimize-chooser');
+    if (chooser) chooser.style.display = 'none';
+    const calcStartTime = performance.now();
+    if (option === 'horizontal') {
+        handleGPUCalculate(calcStartTime, { horizontalAngle: angle });
+        return;
+    }
+    handleGPUCalculate(calcStartTime, { accuracy: option });
+};
+
+/**
  * Handle calculate button click (optimized mode)
  */
 async function handleCalculate() {
@@ -1975,11 +2391,25 @@ async function handleCalculate() {
 
     const calcStartTime = performance.now();
 
-    // ── GPU Voxel Mode ──
+    // ── GPU Voxel Mode (Bulk → Optimitzat) ──
     if (state.mode === 'gpu') {
         await handleGPUCalculate(calcStartTime);
         return;
     }
+
+    // ── Planar stacking — server-side voxel packer. Reuse the GPU handler
+    // (same /api/pack flow + placements rendering).
+    if (state.mode === 'fast' && state.planarVariant === 'stacking') {
+        await handleGPUCalculate(calcStartTime, { method: 'stacking' });
+        return;
+    }
+
+    // ── Planar compartment — fast client-side grid + cardboard partitions.
+    // Packing the box as a simple grid (same math as Graella, with the
+    // cardboard thickness as the inter-piece gap) is instant and the cells
+    // are exactly where the dividers go. Falls through to the grid path
+    // below, then renders the partitions from the grid layout.
+    const isCompartment = state.mode === 'fast' && state.planarVariant === 'compartment';
 
     console.time('[PackAssist] Càlcul total');
     setCalcProgress(true, 1, 'Iniciant càlcul...', calcStartTime);
@@ -2016,6 +2446,29 @@ async function handleCalculate() {
                 elements.objHeight.value = state.stlDimensions.height.toFixed(2);
             }
             orientationOverrides = buildOrientationOverrides(state.stlGeometry, values.allowRotation);
+        }
+
+        // Compartment mode: count cells with the cardboard thickness as the
+        // inter-piece gap, and only the user's chosen pose (no auto-rotation).
+        if (isCompartment) {
+            const card = Math.max(0, values.cardboardMm || 0);
+            values.packingGap = card;
+            let poseGeom = null;
+            if (state.selectedOrientations?.size === 1 && state.stlStableOrientations?.length) {
+                const sel = [...state.selectedOrientations][0];
+                poseGeom = state.stlStableOrientations[sel]?.geometry || null;
+            }
+            if (poseGeom) {
+                const dims = extractDimensions(poseGeom);
+                values.objL = dims.length;
+                values.objW = dims.width;
+                values.objH = dims.height;
+                orientationOverrides = [{
+                    dims: [dims.length, dims.width, dims.height],
+                    perm: [0, 1, 2],
+                    name: 'Orientació seleccionada',
+                }];
+            }
         }
 
         // Compute real mesh volume and surface area if STL is loaded
@@ -2078,31 +2531,85 @@ async function handleCalculate() {
                 setCalcProgress(true, 6, 'Provant orientacions...', calcStartTime);
                 await nextFrame();
                 if (state.stlGeometry) {
-                    if (state.mode === 'fast') {
+                    if (state.mode === 'fast' && isCompartment) {
+                        // ── Compartment: strict grid in the chosen pose, with
+                        // the cardboard thickness as the gap, then render the
+                        // cardboard divider walls/shelves at the exact cells.
+                        setCalcProgress(true, 8, 'Generant compartiment (graella + cartró)...', calcStartTime);
+                        await nextFrame();
+
+                        const card = Math.max(0, values.cardboardMm || 0);
+                        let poseGeom = null;
+                        if (state.selectedOrientations?.size === 1 && state.stlStableOrientations?.length) {
+                            const sel = [...state.selectedOrientations][0];
+                            poseGeom = state.stlStableOrientations[sel]?.geometry || null;
+                        }
+                        const orientedGeometry = (poseGeom || state.stlGeometry).clone();
+                        recenterGeometry(orientedGeometry);
+                        orientedGeometry.computeVertexNormals();
+
+                        // getDistribution returns [fitL, fitW, fitH] = [X, Z, Y]
+                        // as [nx, ny, nz] (ny = Z count, nz = Y layers), but
+                        // addPackedSTLPieces expects [nx=X, ny=Y, nz=Z].
+                        drawn = state.sceneManager.addPackedSTLPieces({
+                            stlGeometry: orientedGeometry,
+                            pieceL, pieceW, pieceH,
+                            nx: nx, ny: nz, nz: ny,
+                            maxDraw: 500,
+                            packingGap: card,
+                            colorCount: values.colorCount,
+                            boxL: values.boxL,
+                            boxW: values.boxW,
+                            boxH: values.boxH,
+                            strictGeometryCheck: true
+                        });
+
+                        if (drawn && drawn.count > 0 && nx > 0 && ny > 0 && nz > 0) {
+                            state.sceneManager.addPartitions({
+                                boxL: values.boxL,
+                                boxW: values.boxW,
+                                boxH: values.boxH,
+                                cellL: pieceL + card,
+                                cellW: pieceW + card,
+                                nLayers: nz,   // nz = layer count (Y)
+                                layerPitch: pieceH + card,
+                                thickness: Math.max(0.5, card),
+                            });
+                            // L×W×H order for the summary (nx=L, ny=W, nz=H)
+                            realDistributionText = `${nx}×${ny}×${nz}`;
+                        }
+                    } else if (state.mode === 'fast') {
                         setCalcProgress(true, 8, 'Avaluant orientacions (Graella Optima)...', calcStartTime);
                         await nextFrame();
 
-                        const baseGeometry = state.stlGeometry.clone();
-                        alignToStableBase(baseGeometry);
+                        const selectedSet = state.selectedOrientations;
+                        const hasExplicitSelection = selectedSet && selectedSet.size === 1;
 
                         const yawAngles = values.allowRotation ? [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330] : [0];
                         const orientationPool = [];
 
-                        for (const yaw of yawAngles) {
-                            if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
-                            const g = baseGeometry.clone();
-                            applyYawToGeometry(g, yaw);
-                            recenterGeometry(g);
-                            g.computeBoundingBox();
-                            const bb = g.boundingBox;
-                            const sx = bb.max.x - bb.min.x;
-                            const sy = bb.max.y - bb.min.y;
-                            const sz = bb.max.z - bb.min.z;
-                            if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
-                            orientationPool.push({ geometry: g, yaw, name: `${yaw} deg` });
+                        if (!hasExplicitSelection) {
+                            const baseGeometry = state.stlGeometry.clone();
+                            alignToStableBase(baseGeometry);
+
+                            for (const yaw of yawAngles) {
+                                if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
+                                const g = baseGeometry.clone();
+                                applyYawToGeometry(g, yaw);
+                                recenterGeometry(g);
+                                g.computeBoundingBox();
+                                const bb = g.boundingBox;
+                                const sx = bb.max.x - bb.min.x;
+                                const sy = bb.max.y - bb.min.y;
+                                const sz = bb.max.z - bb.min.z;
+                                if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
+                                orientationPool.push({ geometry: g, yaw, name: `${yaw} deg` });
+                            }
                         }
 
-                        for (const stableBase of (state.stlStableOrientations || [])) {
+                        for (let bi = 0; bi < (state.stlStableOrientations || []).length; bi++) {
+                            if (hasExplicitSelection && !selectedSet.has(bi)) continue;
+                            const stableBase = state.stlStableOrientations[bi];
                             if (!stableBase.geometry) continue;
                             for (const yaw of yawAngles) {
                                 if (abortSignal.aborted) throw new DOMException('Aborted', 'AbortError');
@@ -2173,6 +2680,7 @@ async function handleCalculate() {
 
                         const baseSources = [];
                         const selectedSet = state.selectedOrientations;
+                        const hasExplicitSelection = selectedSet && selectedSet.size === 1;
                         if (state.stlStableOrientations && state.stlStableOrientations.length > 0) {
                             for (let i = 0; i < state.stlStableOrientations.length; i++) {
                                 const sb = state.stlStableOrientations[i];
@@ -2187,26 +2695,31 @@ async function handleCalculate() {
                             baseSources.push(fallback);
                         }
 
-                        const perms = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
-                        for (const perm of perms) {
-                            const g = state.stlGeometry.clone();
-                            applyPermutation(g, perm);
-                            recenterGeometry(g);
-                            g.computeBoundingBox();
-                            const bb = g.boundingBox;
-                            const sx = bb.max.x - bb.min.x;
-                            const sy = bb.max.y - bb.min.y;
-                            const sz = bb.max.z - bb.min.z;
-                            if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
-                            const isDup = baseSources.some(bs => {
-                                bs.computeBoundingBox();
-                                const pb = bs.boundingBox;
-                                const psx = pb.max.x - pb.min.x;
-                                const psy = pb.max.y - pb.min.y;
-                                const psz = pb.max.z - pb.min.z;
-                                return Math.abs(psx - sx) < 0.5 && Math.abs(psy - sy) < 0.5 && Math.abs(psz - sz) < 0.5;
-                            });
-                            if (!isDup) baseSources.push(g);
+                        // Only explore axis permutations when the user has not
+                        // explicitly picked one orientation — the user's
+                        // selection must be respected.
+                        if (!hasExplicitSelection) {
+                            const perms = [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]];
+                            for (const perm of perms) {
+                                const g = state.stlGeometry.clone();
+                                applyPermutation(g, perm);
+                                recenterGeometry(g);
+                                g.computeBoundingBox();
+                                const bb = g.boundingBox;
+                                const sx = bb.max.x - bb.min.x;
+                                const sy = bb.max.y - bb.min.y;
+                                const sz = bb.max.z - bb.min.z;
+                                if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
+                                const isDup = baseSources.some(bs => {
+                                    bs.computeBoundingBox();
+                                    const pb = bs.boundingBox;
+                                    const psx = pb.max.x - pb.min.x;
+                                    const psy = pb.max.y - pb.min.y;
+                                    const psz = pb.max.z - pb.min.z;
+                                    return Math.abs(psx - sx) < 0.5 && Math.abs(psy - sy) < 0.5 && Math.abs(psz - sz) < 0.5;
+                                });
+                                if (!isDup) baseSources.push(g);
+                            }
                         }
 
                         for (const baseGeom of baseSources) {
@@ -2340,7 +2853,7 @@ async function handleCalculate() {
             
             // ... Result handling ...
             const drawnCount = typeof drawn === 'number' ? drawn : drawn.count;
-            if (typeof drawn === 'object' && drawn?.distributionText) {
+            if (typeof drawn === 'object' && drawn?.distributionText && !isCompartment) {
                 realDistributionText = drawn.distributionText;
             }
             
@@ -2388,7 +2901,7 @@ async function handleCalculate() {
             });
             elements.results.innerHTML = finalSummary + `
                 <button class="reoptimize-btn" onclick="document.querySelector('#calculate-btn').click()">
-                    🔄 ${mainText('reoptimize') || 'Re-optimitzar'}
+                    ${mainText('reoptimize') || 'Re-optimitzar'}
                 </button>
             `;
             elements.results.classList.add('fade-in');
@@ -2734,6 +3247,28 @@ async function saveCalculationToHistory(results) {
  * Start bulk simulation
  */
 async function startSimulation() {
+    // If the user hasn't configured pieces/auto mode yet, ask first
+    if (!state.bulkConfigSet) {
+        const popup = document.getElementById('bulk-start-popup');
+        if (popup) {
+            const fixedGroup = document.getElementById('bulk-fixed-pieces-group');
+            const autoRadio = document.querySelector('input[name="bulk-mode"][value="auto"]');
+            const fixedRadio = document.querySelector('input[name="bulk-mode"][value="fixed"]');
+            // Default to the current advanced config
+            if (elements.autoCapacity?.checked && autoRadio) {
+                autoRadio.checked = true;
+                if (fixedGroup) fixedGroup.style.display = 'none';
+            } else if (fixedRadio) {
+                fixedRadio.checked = true;
+                if (fixedGroup) fixedGroup.style.display = 'block';
+                const fixedInput = document.getElementById('bulk-fixed-pieces');
+                if (fixedInput) fixedInput.value = elements.maxPieces?.value || 100;
+            }
+            popup.style.display = 'flex';
+            return;
+        }
+    }
+
     // If already simulating or has results, reset first
     if (state.bulkSimulation && (state.bulkSimulation.isRunning || state.bulkSimulation.droppedCount > 0)) {
         await resetSimulation();
@@ -2803,7 +3338,7 @@ function stopSimulation() {
         
         updateSimulationStatus({
             status: 'paused',
-            message: '⏸️ Simulació pausada'
+            message: 'Simulació pausada'
         });
     }
 }
@@ -2933,11 +3468,9 @@ async function applyLanguage() {
     document.title = t.pageTitle;
     
     // Header
-    const headerH1 = document.querySelector('.header h1');
-    const headerP = document.querySelector('.header p');
+    const headerSubtitleEl = document.querySelector('.app-bar-subtitle');
     const navLink = document.querySelector('.nav-link');
-    if (headerH1) headerH1.textContent = t.headerTitle;
-    if (headerP) headerP.textContent = t.headerSubtitle;
+    if (headerSubtitleEl) headerSubtitleEl.textContent = t.headerSubtitle;
     if (navLink) navLink.textContent = t.historyLink;
     
     // Mode buttons
@@ -2945,27 +3478,44 @@ async function applyLanguage() {
     modeBtns.forEach(btn => {
         const mode = btn.dataset.mode;
         const desc = btn.querySelector('.mode-desc');
-        if (mode === 'optimized') {
-            btn.childNodes[0].textContent = t.modeOptimized + '\n';
-            if (desc) desc.textContent = t.modeOptimizedDesc;
-        } else if (mode === 'fast') {
-            btn.childNodes[0].textContent = t.modeFast + '\n';
-            if (desc) desc.textContent = t.modeFastDesc;
+        if (mode === 'fast') {
+            btn.childNodes[0].textContent = t.modePlanar + '\n';
+            if (desc) {
+                if (state.planarVariant === 'grid') desc.textContent = t.planarGridDesc;
+                else if (state.planarVariant === 'stacking') desc.textContent = t.planarStackingDesc;
+                else if (state.planarVariant === 'compartment') desc.textContent = t.planarCompartmentDesc;
+                else desc.textContent = t.modePlanarDesc;
+            }
         } else if (mode === 'bulk') {
             btn.childNodes[0].textContent = t.modeBulk + '\n';
             if (desc) desc.textContent = t.modeBulkDesc;
-        } else if (mode === 'gpu') {
-            btn.childNodes[0].textContent = t.modeGPU + '\n';
-            if (desc) desc.textContent = t.modeGPUDesc;
+        }
+    });
+
+    // Bulk variant sub-selector labels
+    document.querySelectorAll('#bulk-variant-selector .variant-btn').forEach(btn => {
+        const variant = btn.dataset.variant;
+        if (variant === 'gravity') {
+            btn.textContent = t.modeBulkGravity;
+        } else if (variant === 'optimized') {
+            btn.textContent = t.modeBulkOptimized;
+        }
+    });
+
+    // Planar variant sub-selector labels (Graella / Apilat / Compartiment)
+    document.querySelectorAll('#planar-variant-selector .variant-btn').forEach(btn => {
+        const variant = btn.dataset.variant;
+        if (variant === 'grid') {
+            btn.textContent = t.planarGrid;
+        } else if (variant === 'stacking') {
+            btn.textContent = t.planarStacking;
+        } else if (variant === 'compartment') {
+            btn.textContent = t.planarCompartment;
         }
     });
     
     // Section titles
-    const objSection = document.querySelector('.object-section .section-header h2');
-    const boxSummary = document.querySelector('details.box-section > summary');
     const bulkSection = document.querySelector('.bulk-section > h2');
-    if (objSection) objSection.textContent = t.objectTitle;
-    if (boxSummary) boxSummary.textContent = t.boxTitle;
     if (bulkSection) bulkSection.textContent = t.bulkTitle;
     
     // Input labels (by associated input id)
@@ -3049,41 +3599,23 @@ async function applyLanguage() {
     }
 
     const optColorsLabel = document.querySelector('label[for="opt-piece-colors"]');
-    if (optColorsLabel) {
-        optColorsLabel.innerHTML = `${t.colorCount} <span id="opt-piece-colors-value">${elements.optPieceColorsValue.textContent}</span>`;
-    }
+    if (optColorsLabel) optColorsLabel.textContent = t.colorCount;
     const packingGapLabel = document.querySelector('label[for="packing-gap"]');
-    if (packingGapLabel) {
-        packingGapLabel.innerHTML = `${t.packingGap} <span id="packing-gap-value">${elements.packingGapValue.textContent}</span> mm`;
-    }
+    if (packingGapLabel) packingGapLabel.textContent = t.packingGap;
     const dropHeightLabel = document.querySelector('label[for="drop-height"]');
-    if (dropHeightLabel) {
-        dropHeightLabel.innerHTML = `${t.dropHeight} <span id="drop-height-value">${elements.dropHeightValue.textContent}</span>mm`;
-    }
+    if (dropHeightLabel) dropHeightLabel.textContent = t.dropHeight;
     const maxPiecesLabel = document.querySelector('label[for="max-pieces"]');
-    if (maxPiecesLabel) {
-        maxPiecesLabel.innerHTML = `${t.maxPieces} <span id="max-pieces-value">${elements.maxPiecesValue.textContent}</span>`;
-    }
+    if (maxPiecesLabel) maxPiecesLabel.textContent = t.maxPieces;
     const dropIntervalLabel = document.querySelector('label[for="drop-interval"]');
-    if (dropIntervalLabel) {
-        dropIntervalLabel.innerHTML = `${t.dropInterval} <span id="drop-interval-value">${elements.dropIntervalValue.textContent}</span>`;
-    }
+    if (dropIntervalLabel) dropIntervalLabel.textContent = t.dropInterval;
     const vibrationFrequencyLabel = document.querySelector('label[for="vibration-frequency"]');
-    if (vibrationFrequencyLabel) {
-        vibrationFrequencyLabel.innerHTML = `${t.vibFreq} <span id="vibration-frequency-value">${elements.vibrationFrequencyValue.textContent}</span> Hz`;
-    }
+    if (vibrationFrequencyLabel) vibrationFrequencyLabel.textContent = t.vibFreq;
     const vibrationAmplitudeLabel = document.querySelector('label[for="vibration-amplitude"]');
-    if (vibrationAmplitudeLabel) {
-        vibrationAmplitudeLabel.innerHTML = `${t.vibAmp} <span id="vibration-amplitude-value">${elements.vibrationAmplitudeValue.textContent}</span> mm`;
-    }
+    if (vibrationAmplitudeLabel) vibrationAmplitudeLabel.textContent = t.vibAmp;
     const vibrationNoiseLabel = document.querySelector('label[for="vibration-noise"]');
-    if (vibrationNoiseLabel) {
-        vibrationNoiseLabel.innerHTML = `${t.vibNoise} <span id="vibration-noise-value">${elements.vibrationNoiseValue.textContent}</span> mm`;
-    }
+    if (vibrationNoiseLabel) vibrationNoiseLabel.textContent = t.vibNoise;
     const pieceColorsLabel = document.querySelector('label[for="piece-colors"]');
-    if (pieceColorsLabel) {
-        pieceColorsLabel.innerHTML = `${t.colorCount} <span id="piece-colors-value">${elements.pieceColorsValue.textContent}</span>`;
-    }
+    if (pieceColorsLabel) pieceColorsLabel.textContent = t.colorCount;
     
     // Buttons
     elements.calculateBtn.textContent = t.calculateBtn;
@@ -3126,6 +3658,14 @@ async function openReportModal() {
         return;
     }
     
+    // Keep the report color count consistent with the piece color slider
+    // (the report renders the current scene, so it must match the scene colors).
+    const mainColorCount = parseInt(elements.optPieceColors?.value) || 10;
+    if (elements.colorCount && elements.colorCountValue) {
+        elements.colorCount.value = String(mainColorCount);
+        elements.colorCountValue.textContent = String(mainColorCount);
+    }
+    
     elements.reportModal.style.display = 'flex';
     elements.reportPreviewFrame.innerHTML = '<p class="loading-text">Carregant previsualització...</p>';
     
@@ -3154,7 +3694,7 @@ async function updateReportPreview() {
         // Create iframe with content
         const iframe = document.createElement('iframe');
         iframe.style.width = '100%';
-        iframe.style.height = '450px';
+        iframe.style.height = '1123px'; // A4 at 96dpi, one sheet
         iframe.style.border = 'none';
         
         elements.reportPreviewFrame.innerHTML = '';
@@ -3207,8 +3747,11 @@ async function generateReport(language) {
     }
 }
 
+// Box Options ("Comparar caixes") — ranked cost-per-part comparison
+initBoxOptions();
+
 // Initialize app on DOM ready
 document.addEventListener('DOMContentLoaded', init);
 
 // Export for debugging
-window.PackAssist = { state, elements };
+window.PackAssist = { state, elements, THREE };

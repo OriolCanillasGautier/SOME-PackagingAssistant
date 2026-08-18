@@ -19,269 +19,174 @@
 </head>
 <body>
     <div class="app-container">
-        <!-- Header -->
-        <header class="header">
-            <div class="header-content">
-                <div class="lang-toggle-wrapper">
-                    <button id="lang-toggle" class="lang-toggle" title="Canviar idioma / Switch language">
-                        <span class="lang-active">CA</span>
-                        <span class="lang-sep">/</span>
-                        <span class="lang-inactive">EN</span>
-                    </button>
+        <!-- App Bar -->
+        <header class="app-bar">
+            <div class="app-bar-brand">
+                <h1 class="app-logo">PackAssist</h1>
+                <span class="app-version">v0.0.5</span>
+            </div>
+            <div class="app-bar-subtitle">Càlcul optimitzat de capacitat amb física real</div>
+            <nav class="mode-selector">
+                <button class="mode-btn active" data-mode="fast">
+                    Planar
+                    <span class="mode-desc">Capes regulars de peces</span>
+                </button>
+                <div class="planar-variant-selector" id="planar-variant-selector" style="display: none;">
+                    <button class="variant-btn active" data-variant="grid">Graella</button>
+                    <button class="variant-btn" data-variant="stacking">Apilat</button>
+                    <button class="variant-btn" data-variant="compartment">Compartiment</button>
                 </div>
-                <h1>Calculadora de Capacitat de Peces</h1>
-                <p>Càlcul optimitzat + Mode a Granel amb Física Real</p>
-                <nav class="header-nav">
-                    <a href="historial.html" class="nav-link">Historial de Càlculs</a>
-                </nav>
+                <button class="mode-btn" data-mode="bulk">
+                    Bulk
+                    <span class="mode-desc">Peces a granel</span>
+                </button>
+                <div class="bulk-variant-selector" id="bulk-variant-selector" style="display: none;">
+                    <button class="variant-btn active" data-variant="gravity">Gravetat</button>
+                    <button class="variant-btn" data-variant="optimized">Optimitzat</button>
+                </div>
+            </nav>
+            <div class="app-bar-actions">
+                <button id="lang-toggle" class="lang-toggle" title="Canviar idioma / Switch language">
+                    <span class="lang-active">CA</span>
+                    <span class="lang-sep">/</span>
+                    <span class="lang-inactive">EN</span>
+                </button>
+                <a href="historial.html" class="nav-link">Historial de Càlculs</a>
             </div>
         </header>
 
         <main class="main-content">
-            <!-- Mode Selector -->
-            <div class="mode-selector">
-                <button class="mode-btn active" data-mode="optimized">
-                    Mode Optimitzat
-                    <span class="mode-desc">Nidificació amb heightmap BVH</span>
-                </button>
-                <button class="mode-btn" data-mode="fast">
-                    Optimitzador Ràpid
-                    <span class="mode-desc">Graella regular amb densitat màxima</span>
-                </button>
-                <button class="mode-btn" data-mode="bulk">
-                    Mode a Granel
-                    <span class="mode-desc">Simulació amb gravetat</span>
-                </button>
-                <button class="mode-btn" data-mode="gpu">
-                    GPU Voxel
-                    <span class="mode-desc">Servidor CUDA — màxima precisió</span>
-                </button>
-            </div>
+            <!-- Left Panel: Inputs -->
+            <aside class="sidebar">
+                <!-- Step 1: PEÇA -->
+                <section class="step-section" data-step="1">
+                    <div class="step-header">
+                        <span class="step-number">1</span>
+                        <h2>Peça</h2>
+                    </div>
+                    <div class="section-header">
+                        <label class="stl-upload-btn">
+                            <input type="file" id="stl-upload" accept=".stl,.STL,.obj,.OBJ" hidden>
+                            <span>3D</span>
+                        </label>
+                    </div>
+                    <div id="stl-status" class="stl-status"></div>
 
-            <div class="content-grid">
-                <!-- Left Panel: Inputs -->
-                <aside class="input-panel">
-                    <!-- Object Section -->
-                    <section class="input-section object-section">
-                        <div class="section-header">
-                            <h2>Dimensions de l'Objecte</h2>
-                            <label class="stl-upload-btn">
-                                <input type="file" id="stl-upload" accept=".stl,.STL,.obj,.OBJ" hidden>
-                                <span>3D</span>
-                            </label>
-                        </div>
-                        <div id="stl-status" class="stl-status"></div>
-                        
-                        <!-- Orientation Modal (shown after STL upload) -->
-                        <div id="orientation-modal" class="modal-overlay" style="display:none;">
-                            <div class="modal-content orientation-modal-content">
-                                <h3>Selecciona l'orientació estable</h3>
-                                <p class="modal-subtitle">Marca les orientacions a empaquetar (checkbox). Clica una targeta per inspeccionar-la al visor.</p>
-                                <div class="orientation-layout">
-                                    <div id="orientation-options" class="orientation-options">
-                                        <!-- Populated by JS with 3D previews -->
-                                    </div>
-                                    <div class="orientation-viewer-panel">
-                                        <div id="orientation-viewer" class="orientation-viewer">
-                                            <canvas id="orientation-viewer-canvas"></canvas>
-                                        </div>
-                                        <p class="orientation-viewer-hint">🖱️ Arrossega per girar · Scroll per fer zoom</p>
-                                    </div>
+                    <!-- Orientation Modal (shown after STL upload) -->
+                    <div id="orientation-modal" class="modal-overlay" style="display:none;">
+                        <div class="modal-content orientation-modal-content">
+                            <h3>Selecciona l'orientació estable</h3>
+                            <p class="modal-subtitle">Selecciona l'orientació amb què es col·locaran les peces.</p>
+                            <div class="orientation-layout">
+                                <div id="orientation-options" class="orientation-options">
+                                    <!-- Populated by JS with 3D previews -->
                                 </div>
-                                <button id="orientation-confirm" class="btn-primary">Confirmar</button>
+                                <div class="orientation-viewer-panel">
+                                    <div id="orientation-viewer" class="orientation-viewer">
+                                        <canvas id="orientation-viewer-canvas"></canvas>
+                                    </div>
+                                    <p class="orientation-viewer-hint">Arrossega per girar · Scroll per fer zoom</p>
+                                </div>
                             </div>
+                            <button id="orientation-confirm" class="btn-primary">Confirmar</button>
                         </div>
+                    </div>
 
-                        <!-- STL History (inline, max 5) -->
-                        <div class="stl-history-inline" id="stl-history-inline">
-                            <div class="stl-history-list" id="stl-history-list">
-                                <!-- Items will be populated by JS -->
-                            </div>
+                    <!-- STL History (inline, max 5) -->
+                    <div class="stl-history-inline" id="stl-history-inline">
+                        <div class="stl-history-list" id="stl-history-list">
+                            <!-- Items will be populated by JS -->
                         </div>
-                        
-                        <details class="collapsible-section" id="object-dims-section">
-                            <summary>Dimensions de l'Objecte</summary>
-                        <div class="input-group">
-                            <label for="obj-length">Llargada (mm)</label>
-                            <input type="number" id="obj-length" value="50" min="0.01" step="0.1">
-                        </div>
-                        <div class="input-group">
-                            <label for="obj-width">Amplada (mm)</label>
-                            <input type="number" id="obj-width" value="67" min="0.01" step="0.1">
-                        </div>
-                        <div class="input-group">
-                            <label for="obj-height">Alçada (mm)</label>
-                            <input type="number" id="obj-height" value="50" min="0.01" step="0.1">
-                        </div>
-                        <div class="input-group">
-                            <label for="obj-weight">Pes (kg)</label>
-                            <input type="number" id="obj-weight" value="0.100" min="0.001" step="0.001">
-                        </div>
-                        <div class="input-group">
-                            <label for="material-density">Material (densitat)</label>
-                            <select id="material-density">
-                                <option value="0">— No estimar pes —</option>
-                                <option value="2700">Alumini (2 700 kg/m³)</option>
-                                <option value="7850" selected>Acer (7 850 kg/m³)</option>
-                                <option value="1200">Plàstic (1 200 kg/m³)</option>
-                                <option value="8940">Coure (8 940 kg/m³)</option>
-                                <option value="custom">Personalitzat...</option>
-                            </select>
-                        </div>
-                        <div class="input-group" id="custom-density-group" style="display:none;">
-                            <label for="custom-density">Densitat personalitzada (kg/m³)</label>
-                            <input type="number" id="custom-density" value="1000" min="1" step="1">
-                        </div>
-                        <div class="input-group checkbox-group">
-                            <input type="checkbox" id="solid-piece" checked>
-                            <label for="solid-piece">Peça sòlida (pes = volum × densitat)</label>
-                        </div>
-                        <div class="input-group" id="wall-thickness-group" style="display:none;">
-                            <label for="wall-thickness">Gruix de paret (mm)</label>
-                            <input type="number" id="wall-thickness" value="2" min="0.1" step="0.1">
-                        </div>
-                        <div class="input-group checkbox-group">
-                            <input type="checkbox" id="allow-rotation" checked>
-                            <label for="allow-rotation">Permet girar l'objecte (explorar orientacions)</label>
-                        </div>
-                        </details>
-                        
-                        <details class="collapsible-section" id="placement-options-section" open>
-                            <summary>Opcions de Col·locació</summary>
-                        <div class="placement-options" id="placement-options">
-                            <div class="input-group">
-                            <h3 id="placement-options-title">Opcions de Col·locació STL</h3>
-                            <div class="input-group">
-                                <label for="placement-strategy">Estratègia de col·locació</label>
-                                <select id="placement-strategy">
-                                    <option value="stable-contact" selected>Contacte estable</option>
-                                    <option value="physics-assisted">Assistit per física</option>
-                                    <option value="legacy">Llegat</option>
-                                </select>
-                            </div>
-                            <div class="input-group">
-                                <label for="placement-search-effort">Esforç de cerca</label>
-                                <select id="placement-search-effort">
-                                    <option value="fast">Ràpid</option>
-                                    <option value="balanced" selected>Equilibrat</option>
-                                    <option value="dense">Dens</option>
-                                </select>
-                            </div>
-                            <div class="input-group">
-                                <label for="stacking-quality">Qualitat d'apilat</label>
-                                <select id="stacking-quality">
-                                    <option value="1">1 — Contacte màxim (possible solapament lleu)</option>
-                                    <option value="2" selected>2 — Equilibrat (nidificació + col·lisió)</option>
-                                    <option value="3">3 — Segur (sense nidificació, gaps mínims)</option>
-                                </select>
-                            </div>
-                            <div class="input-group">
-                                <label for="placement-stability">Estabilitat del contacte</label>
-                                <select id="placement-stability">
-                                    <option value="strict">Estricta</option>
-                                    <option value="medium" selected>Equilibrada</option>
-                                    <option value="loose">Flexible</option>
-                                </select>
-                            </div>
-                            <div class="input-group checkbox-group">
-                                <input type="checkbox" id="placement-side-stacking" checked>
-                                <label for="placement-side-stacking">Permetre apilat lateral/vertical si és estable</label>
-                            </div>
-                            <div class="input-group checkbox-group">
-                                <input type="checkbox" id="placement-settle-check" checked>
-                                <label for="placement-settle-check">Verificar assentament de la peça</label>
-                            </div>
-                            <div class="input-group">
-                                <label for="placement-layer-separator">Separador entre capes (mm)</label>
-                                <input type="number" id="placement-layer-separator" value="0" min="0" max="50" step="0.5">
-                            </div>
-                            <p class="hint-text" id="placement-hint">Contacte estable: col·locació densa amb suport físic. Assistit per física: compacta amb gravetat post-col·locació.</p>
-                        </div>
-                        <div class="input-group slider-group">
-                            <label for="opt-piece-colors">Nombre de colors: <span id="opt-piece-colors-value">10</span></label>
-                            <input type="range" id="opt-piece-colors" min="2" max="20" value="10" step="1">
-                        </div>
-                        </div>
-                    </details>
-                    </section>
+                    </div>
+                </section>
 
-                    <!-- Box Section -->
-                    <details class="collapsible-section box-section" id="box-section" open>
-                        <summary>Dimensions de la Caixa</summary>
-                        <div class="box-presets">
-                            <button class="preset-btn active" onclick="setBoxPreset(160,160,160,this)">160³</button>
-                            <button class="preset-btn" onclick="setBoxPreset(200,200,200,this)">200³</button>
-                            <button class="preset-btn" onclick="setBoxPreset(300,200,200,this)">300×200</button>
-                            <button class="preset-btn" onclick="setBoxPreset(385,285,150,this)">385×285</button>
-                        </div>
-                        <div class="input-group">
-                            <label for="box-length">Llargada (mm)</label>
-                            <input type="number" id="box-length" value="160" min="0.1" step="1">
-                        </div>
-                        <div class="input-group">
-                            <label for="box-width">Amplada (mm)</label>
-                            <input type="number" id="box-width" value="160" min="0.1" step="1">
-                        </div>
-                        <div class="input-group">
-                            <label for="box-height">Alçada (mm)</label>
-                            <input type="number" id="box-height" value="160" min="0.1" step="1">
-                        </div>
-                        <div class="input-group">
-                            <label for="max-weight">Pes màxim (kg)</label>
-                            <input type="number" id="max-weight" value="20" min="0.1" step="0.1">
-                        </div>
-                        <div class="input-group slider-group">
-                            <label for="packing-gap">Espaiat entre peces: <span id="packing-gap-value">0</span> mm</label>
-                            <input type="range" id="packing-gap" min="0" max="50" value="0" step="1">
-                        </div>
-                    </details>
+                <!-- Step 2: CAIXA -->
+                <section class="step-section" data-step="2">
+                    <div class="step-header">
+                        <span class="step-number">2</span>
+                        <h2>Caixa</h2>
+                    </div>
+                    <div class="box-presets">
+                        <button class="preset-btn active" onclick="setBoxPreset(160,160,160,this)">160³</button>
+                        <button class="preset-btn" onclick="setBoxPreset(200,200,200,this)">200³</button>
+                        <button class="preset-btn" onclick="setBoxPreset(300,200,200,this)">300×200</button>
+                        <button class="preset-btn" onclick="setBoxPreset(385,285,150,this)">385×285</button>
+                    </div>
+                    <div class="input-group">
+                        <label for="box-length">Llargada (mm)</label>
+                        <input type="number" id="box-length" value="160" min="0.1" step="1">
+                    </div>
+                    <div class="input-group">
+                        <label for="box-width">Amplada (mm)</label>
+                        <input type="number" id="box-width" value="160" min="0.1" step="1">
+                    </div>
+                    <div class="input-group">
+                        <label for="box-height">Alçada (mm)</label>
+                        <input type="number" id="box-height" value="160" min="0.1" step="1">
+                    </div>
+                    <div class="input-group">
+                        <label for="max-weight">Pes màxim (kg)</label>
+                        <input type="number" id="max-weight" value="20" min="0.1" step="0.1">
+                    </div>
+                    <div class="input-group slider-group">
+                        <label for="packing-gap">Espaiat entre peces (mm)</label>
+                        <input type="number" id="packing-gap" min="0" max="50" value="0" step="1">
+                    </div>
+                </section>
 
-                    <!-- Bulk Mode Options (hidden by default) -->
-                    <section class="input-section bulk-section" id="bulk-options" style="display: none;">
-                        <h2>Opcions Mode a Granel</h2>
-                        <div class="input-group slider-group">
-                            <label for="drop-height">Alçada de caiguda: <span id="drop-height-value">300</span>mm</label>
-                            <input type="range" id="drop-height" min="100" max="1000" value="300" step="50">
-                        </div>
-                        <div class="input-group checkbox-group">
-                            <input type="checkbox" id="auto-capacity">
-                            <label for="auto-capacity">Mode automàtic (detecta capacitat i pes)</label>
-                        </div>
-                        <div class="input-group slider-group" id="max-pieces-group">
-                            <label for="max-pieces">Peces màximes: <span id="max-pieces-value">100</span></label>
-                            <input type="range" id="max-pieces" min="10" max="10000" value="100" step="10">
-                        </div>
-                        <div class="input-group slider-group">
-                            <label for="drop-interval">Interval (ms): <span id="drop-interval-value">100</span></label>
-                            <input type="range" id="drop-interval" min="20" max="500" value="100" step="10">
-                        </div>
-                        <div class="input-group slider-group">
-                            <label for="vibration-frequency">Freq. vibració: <span id="vibration-frequency-value">8.0</span> Hz</label>
-                            <input type="range" id="vibration-frequency" min="1" max="20" value="8" step="0.5">
-                        </div>
-                        <div class="input-group slider-group">
-                            <label for="vibration-amplitude">Amplitud vibració: <span id="vibration-amplitude-value">0.5</span> mm</label>
-                            <input type="range" id="vibration-amplitude" min="0" max="5" value="0.5" step="0.1">
-                        </div>
-                        <div class="input-group slider-group">
-                            <label for="vibration-noise">Soroll vibració: <span id="vibration-noise-value">0.15</span> mm</label>
-                            <input type="range" id="vibration-noise" min="0" max="1" value="0.15" step="0.05">
-                        </div>
-                        <div class="input-group slider-group">
-                            <label for="piece-colors">Nombre de colors: <span id="piece-colors-value">10</span></label>
-                            <input type="range" id="piece-colors" min="2" max="20" value="10" step="1">
-                        </div>
-                        <div class="input-group checkbox-group">
-                            <input type="checkbox" id="random-rotation" checked>
-                            <label for="random-rotation">Rotació aleatòria en caiguda</label>
-                        </div>
-                        <p class="hint-text" id="auto-mode-hint" style="display: none;">
-                            En mode automàtic, la simulació pararà quan:
-                            <br>• S'assoleixi el pes màxim (si s'especifica pes/peça i pes màxim)
-                            <br>• La caixa estigui plena (peces caient fora)
-                            <br>• Després de 30s d'estabilització
-                        </p>
-                    </section>
+                <!-- Step 3: OPCIONS -->
+                <section class="step-section" data-step="3">
+                    <div class="step-header">
+                        <span class="step-number">3</span>
+                        <h2>Opcions</h2>
+                    </div>
+                    <div class="input-group">
+                        <label for="obj-length">Llargada (mm)</label>
+                        <input type="number" id="obj-length" value="50" min="0.01" step="0.1">
+                    </div>
+                    <div class="input-group">
+                        <label for="obj-width">Amplada (mm)</label>
+                        <input type="number" id="obj-width" value="67" min="0.01" step="0.1">
+                    </div>
+                    <div class="input-group">
+                        <label for="obj-height">Alçada (mm)</label>
+                        <input type="number" id="obj-height" value="50" min="0.01" step="0.1">
+                    </div>
+                    <div class="input-group">
+                        <label for="obj-weight">Pes (kg)</label>
+                        <input type="number" id="obj-weight" value="0.100" min="0.001" step="0.001">
+                    </div>
+                    <div class="input-group">
+                        <label for="material-density">Material (densitat)</label>
+                        <select id="material-density">
+                            <option value="0">— No estimar pes —</option>
+                            <option value="2700">Alumini (2 700 kg/m³)</option>
+                            <option value="7850" selected>Acer (7 850 kg/m³)</option>
+                            <option value="1200">Plàstic (1 200 kg/m³)</option>
+                            <option value="8940">Coure (8 940 kg/m³)</option>
+                            <option value="custom">Personalitzat...</option>
+                        </select>
+                    </div>
+                    <div class="input-group" id="custom-density-group" style="display:none;">
+                        <label for="custom-density">Densitat personalitzada (kg/m³)</label>
+                        <input type="number" id="custom-density" value="1000" min="1" step="1">
+                    </div>
+                    <div class="input-group checkbox-group">
+                        <input type="checkbox" id="solid-piece" checked>
+                        <label for="solid-piece">Peça sòlida (pes = volum × densitat)</label>
+                    </div>
+                    <div class="input-group" id="wall-thickness-group" style="display:none;">
+                        <label for="wall-thickness">Gruix de paret (mm)</label>
+                        <input type="number" id="wall-thickness" value="2" min="0.1" step="0.1">
+                    </div>
+                    <div class="input-group checkbox-group">
+                        <input type="checkbox" id="allow-rotation" checked>
+                        <label for="allow-rotation">Permet girar l'objecte (explorar orientacions)</label>
+                    </div>
+                    <div class="input-group slider-group">
+                        <label for="opt-piece-colors">Nombre de colors</label>
+                        <input type="number" id="opt-piece-colors" min="2" max="20" value="10" step="1">
+                    </div>
 
                     <!-- GPU Voxel Options -->
                     <div id="gpu-options" style="display: none;" class="input-section">
@@ -289,8 +194,9 @@
                         <select id="gpu-method">
                             <option value="sparrow" selected>Sparrow — GPU ràpid (recomanat)</option>
                             <option value="voxel">Voxel — Màxima precisió (lent)</option>
+                            <option value="spectral">Spectral — Màxima densitat (FFT, 5 min)</option>
                         </select>
-                        <label for="gpu-cell-size" style="margin-top: 8px;">Resolució (només Voxel)</label>
+                        <label for="gpu-cell-size" style="margin-top: 8px;">Resolució (Voxel/Spectral)</label>
                         <select id="gpu-cell-size">
                             <option value="0.5">0.5 mm — Màxima qualitat (5+ min)</option>
                             <option value="1.0" selected>1.0 mm — Equilibri (~20s)</option>
@@ -299,72 +205,229 @@
                         </select>
                     </div>
 
-                    <!-- Floating Action Buttons -->
-                    <div class="floating-actions">
-                        <button id="calculate-btn" class="calculate-btn">
-                            CALCULAR CAPACITAT
-                        </button>
-                        <button id="start-simulation-btn" class="simulate-btn" style="display: none;">
-                            INICIAR SIMULACIÓ
-                        </button>
-                        <button id="stop-simulation-btn" class="stop-btn" style="display: none;">
-                            ATURAR
-                        </button>
-                        <button id="reset-simulation-btn" class="reset-btn" style="display: none;">
-                            REINICIAR
-                        </button>
-                    </div>
-                </aside>
+                    <!-- Bulk Mode Options (hidden by default) -->
+                    <section class="input-section bulk-section" id="bulk-options" style="display: none;">
+                        <h2>Opcions Mode a Granel</h2>
+                        <p class="hint-text">Escull el nombre de peces o el mode automàtic en iniciar la simulació.</p>
+                    </section>
+                </section>
 
-                <!-- Right Panel: 3D Viewer + Results -->
-                <div class="viewer-panel">
-                    <!-- 3D Viewer -->
-                    <div class="viewer-container">
-                        <div id="three-canvas" class="three-canvas"></div>
-                        <div class="viewer-controls">
-                            <button class="view-btn" data-view="iso" title="Vista Isomètrica">🧊</button>
-                            <button class="view-btn" data-view="top" title="Vista Superior">⬆️</button>
-                            <button class="view-btn" data-view="front" title="Vista Frontal">🧭</button>
-                            <button class="view-btn" data-view="left" title="Vista Esquerra">⬅️</button>
-                            <button class="view-btn" data-view="right" title="Vista Dreta">➡️</button>
-                            <button class="view-btn" data-view="back" title="Vista Darrere">⬇️</button>
-                            <button class="view-btn" data-view="fullscreen" title="Pantalla Completa">⛶</button>
-                        </div>
-                        <div id="simulation-status" class="simulation-status"></div>
+                <!-- Protective packaging overlays (Pack Studio) — visible in Planar/Stacking/Compartment, hidden in Bulk -->
+                <section class="input-section protective-section" id="protective-section">
+                    <h2 id="protect-title">Embalatge protector</h2>
+                    <div class="input-group checkbox-group">
+                        <input type="checkbox" id="protective-partitions" disabled>
+                        <label for="protective-partitions" id="protective-partitions-label">Separadors de cartró</label>
                     </div>
+                    <div class="input-group" id="cardboard-mm-group" style="display: none;">
+                        <label for="cardboard-mm" id="cardboard-mm-label">Gruix del cartró (mm)</label>
+                        <input type="number" id="cardboard-mm" value="2" min="0.5" max="20" step="0.5">
+                    </div>
+                    <div class="input-group checkbox-group">
+                        <input type="checkbox" id="protective-foam">
+                        <label for="protective-foam" id="protective-foam-label">Inserts d'escuma</label>
+                    </div>
+                    <div class="input-group checkbox-group">
+                        <input type="checkbox" id="protective-tray">
+                        <label for="protective-tray" id="protective-tray-label">Safata motllurada</label>
+                    </div>
+                </section>
 
-                    <!-- Calculation progress (shown on Calculate) -->
-                    <div id="calc-progress" class="calc-progress" style="display: none;">
-                        <div class="calc-progress-info">
-                            <span id="calc-progress-label" class="calc-progress-label"></span>
+                <!-- ADVANCED — collapsed, for testing only -->
+                <details class="advanced-section" id="advanced-section">
+                    <summary>Opcions avançades</summary>
+                    <div class="placement-options" id="placement-options">
+                        <h3 id="placement-options-title">Opcions de Col·locació STL</h3>
+                        <div class="input-group">
+                            <label for="placement-strategy">Estratègia de col·locació</label>
+                            <select id="placement-strategy">
+                                <option value="stable-contact" selected>Contacte estable</option>
+                                <option value="physics-assisted">Assistit per física</option>
+                                <option value="legacy">Llegat</option>
+                            </select>
                         </div>
-                        <div class="calc-progress-track">
-                            <div id="calc-progress-bar" class="calc-progress-bar" style="width: 0%;"></div>
+                        <div class="input-group">
+                            <label for="placement-search-effort">Esforç de cerca</label>
+                            <select id="placement-search-effort">
+                                <option value="fast">Ràpid</option>
+                                <option value="balanced" selected>Equilibrat</option>
+                                <option value="dense">Dens</option>
+                            </select>
                         </div>
-                        <button id="calc-cancel-btn" class="btn-secondary calc-cancel-btn" type="button" disabled>
-                            Cancel·lar
-                        </button>
+                        <div class="input-group">
+                            <label for="stacking-quality">Qualitat d'apilat</label>
+                            <select id="stacking-quality">
+                                <option value="1">1 — Contacte màxim (possible solapament lleu)</option>
+                                <option value="2" selected>2 — Equilibrat (nidificació + col·lisió)</option>
+                                <option value="3">3 — Segur (sense nidificació, gaps mínims)</option>
+                            </select>
+                        </div>
+                        <div class="input-group">
+                            <label for="placement-stability">Estabilitat del contacte</label>
+                            <select id="placement-stability">
+                                <option value="strict">Estricta</option>
+                                <option value="medium" selected>Equilibrada</option>
+                                <option value="loose">Flexible</option>
+                            </select>
+                        </div>
+                        <div class="input-group checkbox-group">
+                            <input type="checkbox" id="placement-side-stacking" checked>
+                            <label for="placement-side-stacking">Permetre apilat lateral/vertical si és estable</label>
+                        </div>
+                        <div class="input-group checkbox-group">
+                            <input type="checkbox" id="placement-settle-check" checked>
+                            <label for="placement-settle-check">Verificar assentament de la peça</label>
+                        </div>
+                        <div class="input-group">
+                            <label for="placement-layer-separator">Separador entre capes (mm)</label>
+                            <input type="number" id="placement-layer-separator" value="0" min="0" max="50" step="0.5">
+                        </div>
+                        <p class="hint-text" id="placement-hint">Contacte estable: col·locació densa amb suport físic. Assistit per física: compacta amb gravetat post-col·locació.</p>
                     </div>
+                    <h3>Mode a Granel</h3>
+                    <div class="input-group checkbox-group">
+                        <input type="checkbox" id="auto-capacity">
+                        <label for="auto-capacity">Mode automàtic (detecta capacitat i pes)</label>
+                    </div>
+                    <div class="input-group" id="max-pieces-group">
+                        <label for="max-pieces">Peces màximes</label>
+                        <input type="number" id="max-pieces" min="10" max="10000" value="100" step="10">
+                    </div>
+                    <p class="hint-text" id="auto-mode-hint" style="display: none;">
+                        En mode automàtic, la simulació pararà quan:
+                        <br>• S'assoleixi el pes màxim (si s'especifica pes/peça i pes màxim)
+                        <br>• La caixa estigui plena (peces caient fora)
+                        <br>• Després de 30s d'estabilització
+                    </p>
+                    <div class="input-group">
+                        <label for="drop-height">Alçada de caiguda (mm) — 0 = automàtica</label>
+                        <input type="number" id="drop-height" min="0" max="10000" value="0" step="10">
+                    </div>
+                    <div class="input-group">
+                        <label for="drop-interval">Interval entre peces (ms)</label>
+                        <input type="number" id="drop-interval" min="20" max="500" value="100" step="10">
+                    </div>
+                    <div class="input-group">
+                        <label for="vibration-frequency">Freqüència de vibració (Hz)</label>
+                        <input type="number" id="vibration-frequency" min="1" max="20" value="8" step="0.5">
+                    </div>
+                    <div class="input-group">
+                        <label for="vibration-amplitude">Amplitud de vibració (mm)</label>
+                        <input type="number" id="vibration-amplitude" min="0" max="5" value="0.5" step="0.1">
+                    </div>
+                    <div class="input-group">
+                        <label for="vibration-noise">Soroll de vibració (mm)</label>
+                        <input type="number" id="vibration-noise" min="0" max="1" value="0.15" step="0.05">
+                    </div>
+                    <div class="input-group">
+                        <label for="piece-colors">Nombre de colors (mode a granel)</label>
+                        <input type="number" id="piece-colors" min="2" max="20" value="10" step="1">
+                    </div>
+                    <div class="input-group checkbox-group">
+                        <input type="checkbox" id="random-rotation" checked>
+                        <label for="random-rotation">Rotació aleatòria en caiguda</label>
+                    </div>
+                </details>
 
-                    <!-- Results -->
-                    <div class="results-container">
-                        <div id="results" class="results-content">
-                            <p class="placeholder-text">Introdueix les dades i fes clic a Calcular</p>
-                        </div>
+                <!-- Floating Action Buttons -->
+                <div class="floating-actions">
+                    <button id="calculate-btn" class="calculate-btn">
+                        CALCULAR CAPACITAT
+                    </button>
+                    <button id="compare-boxes-btn" class="compare-boxes-btn" style="display: none;">
+                        Comparar caixes
+                    </button>
+                    <button id="start-simulation-btn" class="simulate-btn" style="display: none;">
+                        INICIAR SIMULACIÓ
+                    </button>
+                    <button id="stop-simulation-btn" class="stop-btn" style="display: none;">
+                        ATURAR
+                    </button>
+                    <button id="reset-simulation-btn" class="reset-btn" style="display: none;">
+                        REINICIAR
+                    </button>
+                </div>
+            </aside>
+
+            <!-- Right Panel: 3D Viewer + Results -->
+            <div class="viewer-panel">
+                <!-- 3D Viewer -->
+                <div class="viewer-container">
+                    <div id="three-canvas" class="three-canvas"></div>
+                    <div class="viewer-controls">
+                        <button class="view-btn" data-view="iso" title="Vista Isomètrica">ISO</button>
+                        <button class="view-btn" data-view="top" title="Vista Superior">SUP</button>
+                        <button class="view-btn" data-view="front" title="Vista Frontal">DAV</button>
+                        <button class="view-btn" data-view="left" title="Vista Esquerra">ESQ</button>
+                        <button class="view-btn" data-view="right" title="Vista Dreta">DRE</button>
+                        <button class="view-btn" data-view="back" title="Vista Darrere">POS</button>
+                        <button class="view-btn" data-view="fullscreen" title="Pantalla Completa">PC</button>
                     </div>
-                    
-                    <!-- Floating Report Button -->
-                    <div class="floating-report" id="report-buttons" style="display: none;">
-                        <button id="apply-gravity-btn" class="report-float-btn" title="Aplicar gravetat a les peces col·locades" style="display: none;">
-                            ⚙️ Aplicar Gravetat
-                        </button>
-                        <button id="report-preview-btn" class="report-float-btn" title="Previsualitzar i configurar informe">
-                            📄 Previsualitzar Informe
-                        </button>
+                    <div id="simulation-status" class="simulation-status"></div>
+                </div>
+
+                <!-- Calculation progress (shown on Calculate) -->
+                <div id="calc-progress" class="calc-progress" style="display: none;">
+                    <div class="calc-progress-info">
+                        <span id="calc-progress-label" class="calc-progress-label"></span>
                     </div>
+                    <div class="calc-progress-track">
+                        <div id="calc-progress-bar" class="calc-progress-bar" style="width: 0%;"></div>
+                    </div>
+                    <button id="calc-cancel-btn" class="btn-secondary calc-cancel-btn" type="button" disabled>
+                        Cancel·lar
+                    </button>
+                </div>
+
+                <!-- Results -->
+                <div class="results-container">
+                    <div id="results" class="results-content">
+                        <p class="placeholder-text">Introdueix les dades i fes clic a Calcular</p>
+                    </div>
+                </div>
+
+                <!-- Box Options: ranked cost-per-part comparison -->
+                <div id="box-options-container" class="box-options-container"></div>
+
+                <!-- Floating Report Button -->
+                <div class="floating-report" id="report-buttons" style="display: none;">
+                    <button id="apply-gravity-btn" class="report-float-btn" title="Aplicar gravetat a les peces col·locades" style="display: none;">
+                        Aplicar Gravetat
+                    </button>
+                    <button id="report-preview-btn" class="report-float-btn" title="Previsualitzar i configurar informe">
+                        Previsualitzar Informe
+                    </button>
                 </div>
             </div>
         </main>
+
+        <!-- Bulk Start Popup -->
+        <div id="bulk-start-popup" class="modal-overlay" style="display: none;">
+            <div class="modal-content bulk-start-popup">
+                <h3>Configuració de la simulació</h3>
+                <p class="modal-subtitle">Com vols omplir la caixa?</p>
+                <div class="radio-group">
+                    <label><input type="radio" name="bulk-mode" value="auto"> Mode automàtic (detecta capacitat i pes)</label>
+                    <label><input type="radio" name="bulk-mode" value="fixed" checked> Nombre de peces:</label>
+                </div>
+                <div class="input-group" id="bulk-fixed-pieces-group">
+                    <label for="bulk-fixed-pieces">Peces</label>
+                    <input type="number" id="bulk-fixed-pieces" min="1" max="10000" value="100" step="10">
+                </div>
+                <div class="bulk-popup-actions">
+                    <button id="bulk-start-confirm" class="btn-primary">Començar simulació</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Auto Mode Popup -->
+        <div id="auto-mode-popup" class="modal-overlay" style="display: none;">
+            <div class="modal-content auto-mode-popup">
+                <h3>Mode automàtic</h3>
+                <p class="modal-subtitle">El mode automàtic detecta la capacitat de la caixa i el pes màxim per si sol. No cal definir un límit de peces: la simulació s'aturarà quan la caixa estigui plena o s'assoleixi el pes màxim.</p>
+                <button id="auto-mode-confirm" class="btn-primary">Entès</button>
+            </div>
+        </div>
 
         <!-- Report Preview Modal -->
         <div id="report-modal" class="modal" style="display: none;">
@@ -409,6 +472,106 @@
     </div>
 
     <!-- Main Script -->
-    <script type="module" src="js/main.js?v=multi_orient_v1"></script>
+    <script type="module" src="js/main.js?v=live_pack_v1"></script>
+    <script type="module">
+        // ── Protective packaging overlays (Pack Studio) wiring ──
+        // Connects the 3 checkboxes to SceneManager.setProtectiveOverlay and
+        // keeps the section hidden in Bulk/GPU modes. Additive — does not touch main.js.
+        (() => {
+            const section = document.getElementById('protective-section');
+            const cbPartitions = document.getElementById('protective-partitions');
+            const cbFoam = document.getElementById('protective-foam');
+            const cbTray = document.getElementById('protective-tray');
+
+            const OVERLAY_BY_ID = {
+                'protective-partitions': 'partitions',
+                'protective-foam': 'foam',
+                'protective-tray': 'tray'
+            };
+
+            const sm = () => window.__sceneManager;
+            const state = () => (window.PackAssist && window.PackAssist.state) || null;
+
+            function isProtectableMode(mode) {
+                // Planar / Stacking / Compartment: visible. Bulk / GPU: hidden.
+                return mode !== 'bulk' && mode !== 'gpu';
+            }
+
+            function setSectionVisible(visible) {
+                if (section) section.style.display = visible ? 'block' : 'none';
+            }
+
+            function syncModeVisibility() {
+                const st = state();
+                setSectionVisible(!st || isProtectableMode(st.mode));
+            }
+
+            // Partitions checkbox is enabled only when a compartment grid is available.
+            function syncPartitionsAvailability() {
+                const mgr = sm();
+                const hasGrid = !!mgr && !!(mgr._compartmentData || (mgr.lastPlacement && mgr.lastPlacement.boxDims));
+                if (cbPartitions) cbPartitions.disabled = !hasGrid;
+            }
+
+            function applyLabels() {
+                const t = state() && state().locale && state().locale.main;
+                if (!t) return;
+                const title = document.getElementById('protect-title');
+                if (title) title.textContent = t.protectTitle || 'Protective packaging';
+                const l1 = document.getElementById('protective-partitions-label');
+                if (l1) l1.textContent = t.partitionsLabel || 'Cardboard separators';
+                const l2 = document.getElementById('protective-foam-label');
+                if (l2) l2.textContent = t.foamLabel || 'Foam inserts';
+                const l3 = document.getElementById('protective-tray-label');
+                if (l3) l3.textContent = t.trayLabel || 'Molded tray';
+            }
+
+            function onToggle(ev) {
+                const cb = ev.target;
+                const type = OVERLAY_BY_ID[cb && cb.id];
+                if (!type || !sm()) return;
+                sm().setProtectiveOverlay(type, cb.checked);
+            }
+
+            function init() {
+                [cbPartitions, cbFoam, cbTray].forEach(cb => {
+                    if (cb) cb.addEventListener('change', onToggle);
+                });
+
+                // Hide the section when entering Bulk / GPU (mode buttons + bulk variants)
+                document.querySelectorAll('.mode-btn').forEach(btn => {
+                    btn.addEventListener('click', () => setSectionVisible(isProtectableMode(btn.dataset.mode)));
+                });
+                document.querySelectorAll('.variant-btn').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        // Gravetat -> bulk (hidden), Optimitzat -> gpu (hidden)
+                        setSectionVisible(false);
+                    });
+                });
+
+                // A new calculation clears the overlays -> reset the checkboxes
+                const calcBtn = document.getElementById('calculate-btn');
+                if (calcBtn) calcBtn.addEventListener('click', () => {
+                    [cbPartitions, cbFoam, cbTray].forEach(cb => { if (cb) cb.checked = false; });
+                });
+
+                // Language toggle re-labels after main.js's applyLanguage() runs
+                const langToggle = document.getElementById('lang-toggle');
+                if (langToggle) langToggle.addEventListener('click', () => setTimeout(applyLabels, 50));
+
+                syncModeVisibility();
+                syncPartitionsAvailability();
+                setInterval(() => { syncPartitionsAvailability(); applyLabels(); }, 1000);
+                applyLabels();
+                setTimeout(applyLabels, 500);
+            }
+
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', init);
+            } else {
+                init();
+            }
+        })();
+    </script>
 </body>
 </html>

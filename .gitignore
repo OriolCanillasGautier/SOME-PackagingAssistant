@@ -66,3 +66,6 @@ obj/
 project.assets.json
 project.nuget.cache
 *.cacheoutput/
+
+# Generated packing run artifacts (info.txt logs reference the part path)
+output/

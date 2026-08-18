@@ -124,10 +124,10 @@ python packer_gpu.py --yaw 4 200 200 150 5
 ### Real part (thin bracket)
 ```bash
 # Target: 320-350 pieces in 385x285x150 box
-python packer_gpu.py "stl/6683688_reduit.stl" 385 285 150 5
+python packer_gpu.py "stl/part.stl" 385 285 150 5
 ```
 
 ### Interpreting results
-- **Fill %**: Volume of placed pieces / box volume. The maximum is the piece's AABB fill ratio (6.1% for 6683688)
+- **Fill %**: Volume of placed pieces / box volume. The maximum is the piece's AABB fill ratio (6.1% for part)
 - **Overlaps**: If the verification step reports collisions, the GPU SAT approximations missed them (try reducing `--yres`)
 - **Performance**: If too slow, increase `scan_mm` to 10 or 15 for faster (but less dense) results

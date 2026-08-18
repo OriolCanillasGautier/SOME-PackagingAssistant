@@ -12,7 +12,7 @@ import numpy as np
 import trimesh
 
 BASE = "http://127.0.0.1:8787"
-STL = os.path.join(os.path.dirname(__file__), "..", "physics-engine", "stl", "6683688_simp0.1pct.stl")
+STL = os.path.join(os.path.dirname(__file__), "..", "physics-engine", "stl", "part.stl")
 
 def submit(job):
     with open(STL, "rb") as f:

@@ -72,7 +72,7 @@ function getCalculatorLabels(custom = {}) {
         boundingBoxLabel: 'Bounding box',
         fillRatioLabel: 'Ratio ompliment',
         theoreticalVolumeMaxLabel: 'Màx. teòric (volum)',
-        weightLimitWarning: '⚠️ Factor limitant: PES (no dimensions)',
+        weightLimitWarning: 'Factor limitant: PES (no dimensions)',
         orientationComparisonTitle: "Comparació d'Orientacions",
         orientationColumn: 'Orientació',
         unitsColumn: 'Unitats',

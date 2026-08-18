@@ -203,6 +203,7 @@ def _voxel_pack_kernel(
     box_hm,
     box_nx, box_ny, box_nz,
     y_res,
+    y_limit,
 ):
     idx = cuda.grid(1)
     if idx >= candidates.shape[0]:
@@ -235,7 +236,18 @@ def _voxel_pack_kernel(
         base_vox = 0
 
     max_y = box_ny - sy
-    for try_y in range(base_vox, max_y + 1):
+    if base_vox > max_y:
+        return
+
+    # Scan from y=0 up to min(base_vox, y_limit): the height map only bounds the
+    # solid top of each column, so a piece may nest into a cavity/valley below it
+    # (the base_vox "resting" height is a conservative overestimate).  When a
+    # nested fit is found below base_vox we take it — this fills interior gaps
+    # the plain falling-sand scan would leave behind.
+    limit = y_limit
+    if base_vox < limit:
+        limit = base_vox
+    for try_y in range(0, limit + 1):
         collides = False
         for ii in range(off_start, off_end):
             px = all_sparse[ii, 0]
@@ -248,6 +260,12 @@ def _voxel_pack_kernel(
             candidates[idx, 3] = try_y * y_res
             candidates[idx, 4] = 1.0
             return
+
+    # No nested fit within the sweep window: rest on top of the terrain.
+    # base_vox is guaranteed collision-free (every piece voxel sits at or above
+    # its column's height map, which is the max occupied +1).
+    candidates[idx, 3] = base_vox * y_res
+    candidates[idx, 4] = 1.0
 
 
 # ═══════════════════════════════════════════════
@@ -1135,7 +1153,7 @@ class BestPacker:
         w = World(cell_size=self.scan_step * 4, gravity=(0, -9810, 0),
                   vibration_amplitude=0.8, vibration_frequency=120.0)
 
-        stl_path = str(Path(__file__).resolve().parent / "stl" / "6683688_simp0.1pct.stl")
+        stl_path = str(Path(__file__).resolve().parent / "stl" / "part.stl")
         for pi, (x, y, z, oi, name) in enumerate(placed):
             w.add_body(stl_path, position=(x, y + 5.0, z), mass=0.01, name=f"p{pi}")
 
@@ -1293,14 +1311,15 @@ class BestPacker:
 
     # ── Sparrow: GPU-accelerated voxel packing ──
 
-    def _gpu_voxel_scan_all(self, box_occ, box_hm, nx_vox, ny_vox, nz_vox, step_vox=1):
+    def _gpu_voxel_scan_all(self, box_occ, box_hm, nx_vox, ny_vox, nz_vox, step_vox=1,
+                            y_limit=64, x_offset=0, z_offset=0):
         cand_parts = []
         for oi, vd in enumerate(self._sparrow_voxel_data):
             sx_v, sy_v, sz_v = vd['shape']
             if sy_v > ny_vox:
                 continue
-            xs = np.arange(0, nx_vox - sx_v + 1, step_vox, dtype=np.float64)
-            zs = np.arange(0, nz_vox - sz_v + 1, step_vox, dtype=np.float64)
+            xs = np.arange(x_offset, nx_vox - sx_v + 1, step_vox, dtype=np.float64)
+            zs = np.arange(z_offset, nz_vox - sz_v + 1, step_vox, dtype=np.float64)
             nx, nz = len(xs), len(zs)
             if nx == 0 or nz == 0:
                 continue
@@ -1332,13 +1351,17 @@ class BestPacker:
             d_box_hm,
             nx_vox, ny_vox, nz_vox,
             self._sparrow_cell_size,
+            y_limit,
         )
         cuda.synchronize()
         return d_cand.copy_to_host()
 
-    def pack_sparrow(self, max_pieces=500, n_workers=4, n_iterations=200, cell_size=None, verbose=True):
+    def pack_sparrow(self, max_pieces=500, n_workers=4, n_iterations=200, cell_size=None, verbose=True,
+                     progress_callback=None, beam_width=8, seed=None):
         if cell_size is None:
-            cell_size = 1.5
+            cell_size = 1.0
+        if seed is not None:
+            random.seed(seed)
         source = getattr(self, '_source_mesh', None)
         if source is None:
             if verbose:
@@ -1393,6 +1416,16 @@ class BestPacker:
         ny_vox = int(math.ceil(self.box_h / cell_size))
         nz_vox = int(math.ceil(self.box_w / cell_size))
 
+        # Nesting scan window (voxels): base_vox is the falling-sand resting height,
+        # but scanning y from 0..min(base_vox, y_limit) also finds cavity/valley fits
+        # below the height map, filling interior gaps. 40% of box height (~64mm in a
+        # 160mm box) was empirically the sweet spot for the falling-sand terrain.
+        nest_y_limit = max(4, int(round(0.4 * self.box_h / cell_size)))
+        # How many lowest-Y candidates to place per GPU scan. Each scan is the
+        # expensive step, so placing a small batch of mutually non-overlapping
+        # pieces per scan keeps the total scan count low without hurting quality.
+        batch_size = 6
+
         for worker in range(n_workers):
             box_occ = np.zeros((nx_vox, ny_vox, nz_vox), dtype=np.uint8)
             box_hm = np.zeros((nx_vox, nz_vox), dtype=np.int32)
@@ -1400,45 +1433,66 @@ class BestPacker:
             meshes_w = []
             consecutive = 0
             iter_count = 0
+            # Deterministic per-worker candidate-grid offset so repeated workers
+            # probe slightly different arrangements (best-of-N kept below).
+            x_offset = worker % 2
+            z_offset = (worker // 2) % 2
 
             while len(placed_w) < n_items and consecutive < 30 and iter_count < n_iterations:
                 iter_count += 1
 
-                results = self._gpu_voxel_scan_all(box_occ, box_hm, nx_vox, ny_vox, nz_vox, 1)
+                results = self._gpu_voxel_scan_all(box_occ, box_hm, nx_vox, ny_vox, nz_vox, 1,
+                                                   y_limit=nest_y_limit,
+                                                   x_offset=x_offset, z_offset=z_offset)
                 valid = results[:, 4] > 0.5
                 if not valid.any():
                     consecutive += 1
                     continue
-
-                valid_results = results[valid]
-                best_idx = np.argmin(valid_results[:, 3])
-                best = valid_results[best_idx]
-                best_x, best_oi, best_z, best_y_vox = int(best[0]), int(best[1]), int(best[2]), best[3]
-                best_y_mm = best_y_vox
-
-                vd = sparrow_oris[best_oi]
-                sp = vd['sparse']
-                world_sp = sp + np.array([best_x, int(best_y_mm / cell_size), best_z])
-                box_occ[world_sp[:, 0], world_sp[:, 1], world_sp[:, 2]] = 1
-
-                for p in sp:
-                    wx, wy, wz = best_x + p[0], int(best_y_mm / cell_size) + p[1], best_z + p[2]
-                    if wy + 1 > box_hm[wx, wz]:
-                        box_hm[wx, wz] = wy + 1
-
-                x_mm = best_x * cell_size
-                z_mm = best_z * cell_size
-                cm = vd['mesh'].copy()
-                cm.apply_translation([x_mm, best_y_mm, z_mm])
-                meshes_w.append(cm)
-                placed_w.append((x_mm, best_y_mm, z_mm, best_oi, vd['name']))
                 consecutive = 0
 
-                if verbose and len(placed_w) % 50 == 0:
-                    elapsed = time.time() - t0
-                    fill = box_occ.sum() * cell_size**3 / (self.box_l * self.box_w * self.box_h) * 100
-                    print(f"  [Worker {worker+1}] {len(placed_w)} pieces, {fill:.1f}% fill, {elapsed:.0f}s",
-                          flush=True)
+                # Place up to `batch_size` lowest-Y candidates from this scan in
+                # one go. Candidates are mutually checked against the updated
+                # occupancy grid, so a batch never overlaps itself or the box.
+                order = np.argsort(results[valid][:, 3])
+                valid_results = results[valid]
+                placed_batch = 0
+                for bi in order:
+                    if placed_batch >= batch_size:
+                        break
+                    best = valid_results[bi]
+                    best_x, best_oi, best_z, best_y_vox = int(best[0]), int(best[1]), int(best[2]), best[3]
+                    best_y_mm = best_y_vox
+
+                    vd = sparrow_oris[best_oi]
+                    sp = vd['sparse']
+                    by_vox = int(best_y_mm / cell_size)
+                    world_sp = sp + np.array([best_x, by_vox, best_z])
+                    if box_occ[world_sp[:, 0], world_sp[:, 1], world_sp[:, 2]].any():
+                        continue
+
+                    box_occ[world_sp[:, 0], world_sp[:, 1], world_sp[:, 2]] = 1
+
+                    for p in sp:
+                        wx, wy, wz = best_x + p[0], by_vox + p[1], best_z + p[2]
+                        if wy + 1 > box_hm[wx, wz]:
+                            box_hm[wx, wz] = wy + 1
+
+                    x_mm = best_x * cell_size
+                    z_mm = best_z * cell_size
+                    cm = vd['mesh'].copy()
+                    cm.apply_translation([x_mm, best_y_mm, z_mm])
+                    meshes_w.append(cm)
+                    placed_w.append((x_mm, best_y_mm, z_mm, best_oi, vd['name']))
+                    placed_batch += 1
+
+                    if progress_callback and len(placed_w) % 5 == 0:
+                        progress_callback(max(best_count, len(placed_w)), time.time() - t0, list(placed_w))
+
+                    if verbose and len(placed_w) % 50 == 0:
+                        elapsed = time.time() - t0
+                        fill = box_occ.sum() * cell_size**3 / (self.box_l * self.box_w * self.box_h) * 100
+                        print(f"  [Worker {worker+1}] {len(placed_w)} pieces, {fill:.1f}% fill, {elapsed:.0f}s",
+                              flush=True)
 
             if len(placed_w) > best_count:
                 best_count = len(placed_w)
@@ -1457,13 +1511,440 @@ class BestPacker:
             print(f"  [Sparrow] DONE: {best_count} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
         return best_placed, best_meshes
 
+    # ── Shared voxel setup for Stacking / Compartment ──
+
+    def _prepare_voxel_orients(self, cell_size, verbose=False):
+        """Generate sparrow-style voxel orientations and upload GPU buffers.
+        Sets self._sparrow_voxel_data / self._sparrow_cell_size (read by
+        server.py for placement data). Returns the orientation list or None.
+        When self._fixed_orientation is set, only in-plane spins of the
+        user's chosen pose are generated (the mesh is already pre-rotated to
+        the chosen pose; the piece keeps resting on the same face but can
+        rotate freely in the floor plane, which is what real nesting needs).
+        When self._horizontal_angle is set, only the spin closest to that
+        angle is kept (used by the re-optimize "ask horizontal orientation"
+        flow, e.g. force the 90° arrangement)."""
+        source = getattr(self, '_source_mesh', None)
+        if source is None:
+            return None
+        t0 = time.time()
+        if getattr(self, '_fixed_orientation', False):
+            n_yaw = 1
+            n_roll = 1
+            n_pitch = 8
+        else:
+            n_yaw, n_roll, n_pitch = 8, 4, 4
+        oris = generate_sparrow_voxel_orientations(
+            source, cell_size, n_yaw=n_yaw, n_roll=n_roll, n_pitch=n_pitch,
+            box_dims=(self.box_l, self.box_w, self.box_h),
+        )
+        if verbose:
+            print(f"  {len(oris)} orientations ({time.time()-t0:.1f}s)", flush=True)
+        if not oris:
+            return None
+        ha = getattr(self, '_horizontal_angle', None)
+        if ha is not None:
+            best_oi = min(range(len(oris)),
+                          key=lambda i: abs(float(oris[i]['name'].split('P')[-1]) - ha))
+            oris = [oris[best_oi]]
+            if verbose:
+                print(f"  horizontal_angle={ha}° -> {oris[0]['name']}", flush=True)
+        self._sparrow_voxel_data = oris
+        self._sparrow_cell_size = cell_size
+
+        all_sparse_list = [d['sparse'] for d in oris]
+        all_hm_list = [d['hm'].flatten() for d in oris]
+        all_shapes = np.array([d['shape'] for d in oris], dtype=np.int32)
+        all_offsets = np.zeros(len(oris) + 1, dtype=np.int32)
+        all_hm_offsets = np.zeros(len(oris) + 1, dtype=np.int32)
+        for i in range(len(oris)):
+            all_offsets[i + 1] = all_offsets[i] + len(all_sparse_list[i])
+            all_hm_offsets[i + 1] = all_hm_offsets[i] + len(all_hm_list[i])
+        self._d_sparrow_sparse = cuda.to_device(np.concatenate(all_sparse_list).astype(np.int32))
+        self._d_sparrow_offsets = cuda.to_device(all_offsets)
+        self._d_sparrow_hm = cuda.to_device(np.concatenate(all_hm_list).astype(np.int32))
+        self._d_sparrow_hm_offsets = cuda.to_device(all_hm_offsets)
+        self._d_sparrow_shapes = cuda.to_device(all_shapes)
+        return oris
+
+    @staticmethod
+    def _pick_min_footprint_ori(oris, nx_vox, ny_vox, nz_vox):
+        """Smallest (size_x × size_z) orientation that still fits in the voxel box."""
+        best_oi, best_fp = -1, float('inf')
+        for oi, o in enumerate(oris):
+            sx, sy, sz = o['shape']
+            if sx > nx_vox or sy > ny_vox or sz > nz_vox:
+                continue
+            fp = o['size'][0] * o['size'][2]
+            if fp < best_fp:
+                best_fp, best_oi = fp, oi
+        return best_oi
+
+    @staticmethod
+    def _pick_stack_ori(oris, nx_vox, ny_vox, nz_vox):
+        """Pick the orientation that packs the MOST pieces per full column:
+        score = (max layers per column) × (columns that fit on the floor)."""
+        best_oi, best_score = -1, -1.0
+        for oi, o in enumerate(oris):
+            sx, sy, sz = o['shape']
+            if sx > nx_vox or sy > ny_vox or sz > nz_vox:
+                continue
+            layers = max(1, ny_vox // max(1, sy))
+            cols_x = max(1, nx_vox // max(1, sx))
+            cols_z = max(1, nz_vox // max(1, sz))
+            score = layers * cols_x * cols_z
+            if score > best_score:
+                best_score, best_oi = score, oi
+        return best_oi
+
+    @staticmethod
+    def _pick_compartment_ori(oris, box_l, box_h, box_w, cell_size):
+        """Pick the orientation that maximizes the compartment grid:
+        score = (cells along L) × (cells along W) × (max layers in H).
+        Fills the box far better than min-footprint alone."""
+        best_oi, best_score = -1, -1.0
+        for oi, o in enumerate(oris):
+            sx_mm, sy_mm, sz_mm = o['size']
+            if sx_mm > box_l + 0.01 or sy_mm > box_h + 0.01 or sz_mm > box_w + 0.01:
+                continue
+            gap = cell_size
+            step_l = sx_mm + gap
+            step_w = sz_mm + gap
+            n_cells_l = max(1, int((box_l - sx_mm + 0.01) // step_l) + 1)
+            n_cells_w = max(1, int((box_w - sz_mm + 0.01) // step_w) + 1)
+            n_layers = max(1, int(box_h // max(0.01, sy_mm + gap)))
+            score = n_cells_l * n_cells_w * n_layers
+            if score > best_score:
+                best_score, best_oi = score, oi
+        return best_oi
+
+    # ── Stacking: columns that nest, tiled across the box ──
+
+    def pack_stacking(self, max_pieces=500, cell_size=None, verbose=True, progress_callback=None):
+        if cell_size is None:
+            cell_size = 1.5
+        oris = self._prepare_voxel_orients(cell_size, verbose)
+        if oris is None:
+            if verbose:
+                print("[Stacking] No source/orientations, falling back to greedy")
+            return self.pack_greedy(max_pieces, verbose)
+
+        nx_vox = int(math.ceil(self.box_l / cell_size))
+        ny_vox = int(math.ceil(self.box_h / cell_size))
+        nz_vox = int(math.ceil(self.box_w / cell_size))
+
+        # Pick the orientation that packs the most pieces per full column
+        # (max layers × columns that fit the floor), then valley-nest within
+        # that single orientation. With the user's chosen pose this runs over
+        # the in-plane spins of that pose, so the piece rests on the same
+        # face but the longest axis is turned to fill the box best.
+        best_oi = self._pick_stack_ori(oris, nx_vox, ny_vox, nz_vox)
+        if best_oi < 0:
+            if verbose:
+                print("[Stacking] No orientation fits the box, falling back to greedy")
+            return self.pack_greedy(max_pieces, verbose)
+        vd = oris[best_oi]
+        sp = vd['sparse']
+        sx_v, sy_v, sz_v = vd['shape']
+        px, py, pz = sp[:, 0], sp[:, 1], sp[:, 2]
+
+        box_occ = np.zeros((nx_vox, ny_vox, nz_vox), dtype=np.uint8)
+        box_hm = np.zeros((nx_vox, nz_vox), dtype=np.int32)
+        placed, meshes = [], []
+        t0 = time.time()
+
+        if verbose:
+            print(f"[Stacking] cell={cell_size}mm, orientation '{vd['name']}' "
+                  f"footprint {vd['size'][0]:.0f}x{vd['size'][2]:.0f}, height {vd['size'][1]:.0f}",
+                  flush=True)
+
+        # Scan every voxel position (concave parts interleave in adjacent
+        # columns). For each position, stack pieces with valley nesting until
+        # no more fit, then move on.
+        for gx in range(0, nx_vox - sx_v + 1):
+            if len(placed) >= max_pieces:
+                break
+            for gz in range(0, nz_vox - sz_v + 1):
+                if len(placed) >= max_pieces:
+                    break
+                cx, cz = gx + px, gz + pz
+                while len(placed) < max_pieces:
+                    # Rim height (top of the tallest column of the stack below)
+                    rim = int((box_hm[cx, cz] - py).max())
+                    if rim < 0:
+                        rim = 0
+                    if rim + sy_v > ny_vox:
+                        break
+                    # Valley nesting: scan from y=0 up to the rim and take the
+                    # LOWEST collision-free position — pieces drop into the
+                    # concave cavity of the piece below instead of resting on
+                    # the rim. Cap at rim so we never float.
+                    base = None
+                    for try_y in range(0, rim + 1):
+                        wy = try_y + py
+                        if not box_occ[cx, wy, cz].any():
+                            base = try_y
+                            break
+                    if base is None:
+                        break
+                    wy = base + py
+                    box_occ[cx, wy, cz] = 1
+                    box_hm[gx:gx + sx_v, gz:gz + sz_v] = np.maximum(
+                        box_hm[gx:gx + sx_v, gz:gz + sz_v], base + vd['hm'])
+                    x_mm = gx * cell_size
+                    y_mm = base * cell_size
+                    z_mm = gz * cell_size
+                    cm = vd['mesh'].copy()
+                    cm.apply_translation([x_mm, y_mm, z_mm])
+                    placed.append((x_mm, y_mm, z_mm, best_oi, vd['name']))
+                    meshes.append(cm)
+                    if progress_callback and len(placed) % 5 == 0:
+                        progress_callback(len(placed), time.time() - t0, list(placed))
+                    if verbose and len(placed) % 100 == 0:
+                        fill = box_occ.sum() * cell_size**3 / (self.box_l * self.box_w * self.box_h) * 100
+                        print(f"  {len(placed)} pieces, {fill:.1f}% fill, {time.time()-t0:.0f}s", flush=True)
+
+        elapsed = time.time() - t0
+        vol = sum(m.volume for m in meshes)
+        fill = vol / (self.box_l * self.box_w * self.box_h) * 100
+        if verbose:
+            print(f"  [Stacking] DONE: {len(placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
+        return placed, meshes
+
+    # ── Compartment: one part per clean grid cell ──
+
+    def pack_compartment(self, max_pieces=500, cell_size=None, verbose=True, progress_callback=None):
+        if cell_size is None:
+            cell_size = 1.5
+        oris = self._prepare_voxel_orients(cell_size, verbose)
+        if oris is None:
+            if verbose:
+                print("[Compartment] No source/orientations, falling back to greedy")
+            return self.pack_greedy(max_pieces, verbose)
+
+        nx_vox = int(math.ceil(self.box_l / cell_size))
+        ny_vox = int(math.ceil(self.box_h / cell_size))
+        nz_vox = int(math.ceil(self.box_w / cell_size))
+
+        best_oi = self._pick_compartment_ori(oris, self.box_l, self.box_h, self.box_w, cell_size)
+        if best_oi < 0:
+            if verbose:
+                print("[Compartment] No orientation fits the box, falling back to greedy")
+            return self.pack_greedy(max_pieces, verbose)
+        vd = oris[best_oi]
+        sp = vd['sparse']
+        sx_mm, sy_mm, sz_mm = vd['size']
+        sx_v, sy_v, sz_v = vd['shape']
+        px, py, pz = sp[:, 0], sp[:, 1], sp[:, 2]
+
+        gap = cell_size
+        step_x = max(sx_v, int(round((sx_mm + gap) / cell_size)))
+        step_z = max(sz_v, int(round((sz_mm + gap) / cell_size)))
+        n_layers = max(1, int(self.box_h // max(0.01, sy_mm + gap)))
+        if n_layers > 12:
+            n_layers = 12  # practical cap: shelves get impractically thin above
+
+        box_occ = np.zeros((nx_vox, ny_vox, nz_vox), dtype=np.uint8)
+        box_hm = np.zeros((nx_vox, nz_vox), dtype=np.int32)
+        placed, meshes = [], []
+        t0 = time.time()
+
+        if verbose:
+            print(f"[Compartment] cell={cell_size}mm, gap={gap}mm, "
+                  f"footprint {sx_mm:.0f}x{sz_mm:.0f}, height {sy_mm:.0f}, {n_layers} layer(s)",
+                  flush=True)
+
+        for gx in range(0, nx_vox - sx_v + 1, step_x):
+            if len(placed) >= max_pieces:
+                break
+            for gz in range(0, nz_vox - sz_v + 1, step_z):
+                if len(placed) >= max_pieces:
+                    break
+                for layer in range(n_layers):
+                    if len(placed) >= max_pieces:
+                        break
+                    base = layer * sy_v
+                    wy = base + py
+                    cx, cz = gx + px, gz + pz
+                    if box_occ[cx, wy, cz].any():
+                        break
+                    box_occ[cx, wy, cz] = 1
+                    box_hm[gx:gx + sx_v, gz:gz + sz_v] = np.maximum(
+                        box_hm[gx:gx + sx_v, gz:gz + sz_v], base + vd['hm'])
+                    x_mm = gx * cell_size
+                    y_mm = base * cell_size
+                    z_mm = gz * cell_size
+                    cm = vd['mesh'].copy()
+                    cm.apply_translation([x_mm, y_mm, z_mm])
+                    placed.append((x_mm, y_mm, z_mm, best_oi, vd['name']))
+                    meshes.append(cm)
+                    if progress_callback and len(placed) % 5 == 0:
+                        progress_callback(len(placed), time.time() - t0, list(placed))
+                    if verbose and len(placed) % 100 == 0:
+                        fill = box_occ.sum() * cell_size**3 / (self.box_l * self.box_w * self.box_h) * 100
+                        print(f"  {len(placed)} pieces, {fill:.1f}% fill, {time.time()-t0:.0f}s", flush=True)
+
+        elapsed = time.time() - t0
+        vol = sum(m.volume for m in meshes)
+        fill = vol / (self.box_l * self.box_w * self.box_h) * 100
+        # Record the cell grid (mm pitch + layers) so the frontend can render
+        # the cardboard partition grid that compartment packing implies.
+        self._compartment_cell = (step_x * cell_size, step_z * cell_size, n_layers, sy_v * cell_size)
+        if verbose:
+            print(f"  [Compartment] DONE: {len(placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
+        return placed, meshes
+
+    # ── Spectral packing (FFT-based, Inkbit paper) ──
+
+    def pack_spectral(self, max_pieces=500, cell_size=None, verbose=True,
+                      progress_callback=None, seed=None):
+        """FFT-based spectral packing (Cui et al., ACM TOG 2023).
+
+        For each orientation: one FFT correlation yields the collision metric
+        (overlap count) at EVERY voxel offset, and another yields the proximity
+        metric (fit tightness via distance transform). The best offset is the
+        minimum of cost = proximity + height-penalty among collision-free
+        offsets. Greedy placement of the (single) part type.
+        """
+        from scipy import ndimage as _ndi
+        from scipy.fft import rfftn as _rfftn, irfftn as _irfftn
+
+        if seed is not None:
+            random.seed(seed)
+        source = getattr(self, '_source_mesh', None)
+        if source is None:
+            return self.pack_greedy(max_pieces, verbose)
+        if cell_size is None:
+            cell_size = 2.0
+
+        oris = self._prepare_voxel_orients(cell_size, verbose=verbose)
+        if not oris:
+            return self.pack_greedy(max_pieces, verbose)
+
+        nx_vox = max(2, int(math.ceil(self.box_l / cell_size)))
+        ny_vox = max(2, int(math.ceil(self.box_h / cell_size)))
+        nz_vox = max(2, int(math.ceil(self.box_w / cell_size)))
+
+        # Padded grid for linear (non-circular) correlation
+        PX, PY, PZ = 2 * nx_vox, 2 * ny_vox, 2 * nz_vox
+        s_omega = np.zeros((PX, PY, PZ), dtype=np.float32)
+
+        # Tray walls: mark the interior boundary as occupied so objects
+        # cannot be placed sticking out of the tray.
+        s_omega[0, :, :] = 1
+        s_omega[nx_vox - 1, :, :] = 1
+        s_omega[:, 0, :] = 1
+        s_omega[:, ny_vox - 1, :] = 1
+        s_omega[:, :, 0] = 1
+        s_omega[:, :, nz_vox - 1] = 1
+
+        # Precompute orientation voxel grids + their FFTs (constant across
+        # placements). Limit to a handful of orientations — FFTs dominate cost.
+        ori_info = []
+        for oi, o in enumerate(oris):
+            sx, sy, sz = o['shape']
+            if sx > nx_vox - 2 or sy > ny_vox - 2 or sz > nz_vox - 2:
+                continue
+            sp = o['sparse']
+            s_a = np.zeros((PX, PY, PZ), dtype=np.float32)
+            s_a[sp[:, 0], sp[:, 1], sp[:, 2]] = 1
+            f_a = _rfftn(s_a, axes=(0, 1, 2), workers=-1)
+            ori_info.append((oi, o, (sx, sy, sz), f_a))
+            if len(ori_info) >= 6:
+                break
+        if not ori_info:
+            return self.pack_greedy(max_pieces, verbose)
+
+        placed, meshes = [], []
+        t0 = time.time()
+        height_penalty_p = 0.05
+        consecutive = 0
+        axes = (0, 1, 2)
+        shape = (PX, PY, PZ)
+
+        while len(placed) < max_pieces and consecutive < 10:
+            # FFT of occupancy (with walls + pieces) and of its distance transform
+            f_omega = _rfftn(s_omega, axes=axes, workers=-1)
+            phi = _ndi.distance_transform_edt(s_omega == 0).astype(np.float32)
+            f_phi = _rfftn(phi, axes=axes, workers=-1)
+
+            best_cost = float('inf')
+            best = None  # (oi, qx, qy, qz)
+
+            for oi, o, (sx, sy, sz), f_a in ori_info:
+                # Collision metric: overlap count at every offset
+                zeta = _irfftn(np.conj(f_a) * f_omega, s=shape, axes=axes, workers=-1)
+                # Proximity metric: distance sum at every offset
+                rho = _irfftn(np.conj(f_a) * f_phi, s=shape, axes=axes, workers=-1)
+
+                max_x = nx_vox - sx
+                max_y = ny_vox - sy
+                max_z = nz_vox - sz
+                if max_x <= 0 or max_y <= 0 or max_z <= 0:
+                    continue
+
+                zc = zeta[:max_x + 1, :max_y + 1, :max_z + 1]
+                rc = rho[:max_x + 1, :max_y + 1, :max_z + 1]
+
+                free = np.where(zc <= 0.5)
+                if free[0].size == 0:
+                    continue
+
+                # Height penalty: discourage tall stacks (y = height axis)
+                y_norm = free[1] / max(1.0, ny_vox)
+                cost = rc[free] + height_penalty_p * (y_norm ** 3)
+
+                k = int(np.argmin(cost))
+                c = float(cost[k])
+                if c < best_cost:
+                    best_cost = c
+                    best = (oi, int(free[0][k]), int(free[1][k]), int(free[2][k]))
+
+            if best is None:
+                consecutive += 1
+                continue
+
+            oi, qx, qy, qz = best
+            od = oris[oi]
+            sp = od['sparse']
+            # Mark occupancy
+            s_omega[qx + sp[:, 0], qy + sp[:, 1], qz + sp[:, 2]] = 1
+
+            x_mm = qx * cell_size
+            y_mm = qy * cell_size
+            z_mm = qz * cell_size
+            cm = od['mesh'].copy()
+            cm.apply_translation([x_mm, y_mm, z_mm])
+            meshes.append(cm)
+            placed.append((x_mm, y_mm, z_mm, oi, od['name']))
+            consecutive = 0
+
+            if progress_callback and len(placed) % 5 == 0:
+                progress_callback(len(placed), time.time() - t0, list(placed))
+            if verbose and len(placed) % 25 == 0:
+                fill = sum(m.volume for m in meshes) / (self.box_l * self.box_w * self.box_h) * 100
+                print(f"  [Spectral] {len(placed)} pieces, {fill:.1f}% fill, {time.time()-t0:.0f}s", flush=True)
+
+        elapsed = time.time() - t0
+        vol = sum(m.volume for m in meshes)
+        fill = vol / (self.box_l * self.box_w * self.box_h) * 100
+        if verbose:
+            print(f"  [Spectral] DONE: {len(placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
+        return placed, meshes
+
     # ── Full pipeline ──
 
-    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False, explore_local=False, sparrow_workers=4, voxel_cell=1.5):
+    def pack(self, method='backtrack', max_beams=8, max_pieces=500, compact=False, verbose=True, beam_width=5, hierarchical=False, explore_local=False, sparrow_workers=4, voxel_cell=1.0, progress_callback=None, seed=None):
         t0 = time.time()
 
         if method == 'sparrow':
-            placed, meshes = self.pack_sparrow(max_pieces, n_workers=sparrow_workers, n_iterations=max_pieces * 40, cell_size=voxel_cell, verbose=verbose)
+            placed, meshes = self.pack_sparrow(max_pieces, n_workers=sparrow_workers, n_iterations=max_pieces * 40, cell_size=voxel_cell, verbose=verbose, progress_callback=progress_callback, seed=seed)
+        elif method == 'spectral':
+            placed, meshes = self.pack_spectral(max_pieces, cell_size=voxel_cell, verbose=verbose, progress_callback=progress_callback, seed=seed)
+        elif method == 'stacking':
+            placed, meshes = self.pack_stacking(max_pieces, cell_size=voxel_cell, verbose=verbose, progress_callback=progress_callback)
+        elif method == 'compartment':
+            placed, meshes = self.pack_compartment(max_pieces, cell_size=voxel_cell, verbose=verbose, progress_callback=progress_callback)
         elif method == 'greedy':
             placed, meshes = self.pack_greedy(max_pieces, verbose, beam_width=beam_width, hierarchical=hierarchical, explore_local=explore_local)
         elif method == 'layers':
@@ -1653,7 +2134,7 @@ def main():
     p.add_argument("--yaw", type=int, default=8)
     p.add_argument("--yres", type=float, default=2.0)
     p.add_argument("--shrink", type=float, default=0.4, help="Hull shrink factor (0.4=aggressive, 1.0=full hull)")
-    p.add_argument("--method", type=str, default="backtrack", choices=["greedy", "backtrack", "layers", "sparrow"])
+    p.add_argument("--method", type=str, default="backtrack", choices=["greedy", "backtrack", "layers", "sparrow", "stacking", "compartment", "spectral"])
     p.add_argument("--compact", action="store_true")
     p.add_argument("--beam-width", type=int, default=5, help="Top-K candidates for random selection (1=lowest-Y, 5=explore)")
     p.add_argument("--hierarchical", action="store_true", help="Coarse-to-fine candidate search")
@@ -1752,7 +2233,7 @@ def main():
             f"Explore local: {args.explore_local}",
             f"Compact: {args.compact}",
             f"Sparrow workers: {args.sparrow_workers if args.method == 'sparrow' else 'N/A'}",
-            f"Voxel cell: {args.voxel_cell if args.method == 'sparrow' else 'N/A'}mm",
+            f"Voxel cell: {args.voxel_cell if args.method in ('sparrow', 'stacking', 'compartment') else 'N/A'}mm",
             f"Seed: {args.seed}",
             f"",
             f"Result: {len(placed)} pieces, {sum(m.volume for m in meshes)/(box_dims[0]*box_dims[1]*box_dims[2])*100:.1f}% fill",

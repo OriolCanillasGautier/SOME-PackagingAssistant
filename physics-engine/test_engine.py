@@ -70,10 +70,10 @@ def make_sphere(radius=5):
 # Module: hull
 # ═══════════════════════════════════════════════
 
-@test("hull: compute from STL file (6683688)")
+@test("hull: compute from STL file (part)")
 def test_hull_from_stl():
     from engine import hull_from_stl
-    h = hull_from_stl(STL_DIR / "6683688_simp0.1pct.stl")
+    h = hull_from_stl(STL_DIR / "part.stl")
     assert_true(h.vertex_count > 0, "zero vertices")
     assert_true(h.face_count > 0, "zero faces")
     assert_true(h.volume > 0, "zero volume")
@@ -126,7 +126,7 @@ def test_hull_normals_unit():
 @test("hull: two different STLs give different hulls")
 def test_hull_different_stls():
     from engine import hull_from_stl
-    h1 = hull_from_stl(STL_DIR / "6683688_simp0.1pct.stl")
+    h1 = hull_from_stl(STL_DIR / "part.stl")
     h2 = hull_from_stl(STL_DIR / "test.stl")
     # test.stl is tiny: should have different volume
     assert_true(abs(h1.volume - h2.volume) > 10, "volumes too similar for different meshes")
@@ -221,7 +221,7 @@ def test_collision_diff_size():
 @test("collision: STL hulls (real mesh)")
 def test_collision_stl_hulls():
     from engine import hull_from_stl, CollisionDetector
-    h = hull_from_stl(STL_DIR / "6683688_simp0.1pct.stl")
+    h = hull_from_stl(STL_DIR / "part.stl")
     cd = CollisionDetector([h, h])
     pos = np.array([[0, 0, 0], [0, 0, 0]], dtype=np.float64)
     quat = np.array([[0, 0, 0, 1], [0, 0, 0, 1]], dtype=np.float64)
@@ -467,7 +467,7 @@ def test_dynamics_multi_iter():
 def test_world_add_step():
     from engine import World
     w = World(cell_size=50)
-    idx = w.add_body(str(STL_DIR / "6683688_simp0.1pct.stl"), position=(0, 100, 0), mass=0.01, name="piece")
+    idx = w.add_body(str(STL_DIR / "part.stl"), position=(0, 100, 0), mass=0.01, name="piece")
     assert_true(idx == 0)
     w.step(dt=1/240)
     s = w.get_state()
@@ -479,8 +479,8 @@ def test_world_add_step():
 def test_world_two_collide():
     from engine import World
     w = World(cell_size=50, gravity=(0, -9810, 0))
-    w.add_body(str(STL_DIR / "6683688_simp0.1pct.stl"), position=(0, 100, 0), mass=0.01, name="top")
-    w.add_body(str(STL_DIR / "6683688_simp0.1pct.stl"), position=(0, 80, 0), mass=0.01, name="bottom")
+    w.add_body(str(STL_DIR / "part.stl"), position=(0, 100, 0), mass=0.01, name="top")
+    w.add_body(str(STL_DIR / "part.stl"), position=(0, 80, 0), mass=0.01, name="bottom")
 
     for _ in range(2):
         w.step(dt=1/240, n_solver_iterations=4, baumgarte=0.4)
@@ -504,7 +504,7 @@ def test_world_two_collide():
 def test_world_settle():
     from engine import World
     w = World(cell_size=50, gravity=(0, -9810, 0))
-    w.add_body(str(STL_DIR / "6683688_simp0.1pct.stl"), position=(0, 50, 0), mass=0.01, name="piece")
+    w.add_body(str(STL_DIR / "part.stl"), position=(0, 50, 0), mass=0.01, name="piece")
 
     for _ in range(2):
         w.step(dt=1/240, n_solver_iterations=4, baumgarte=0.4)

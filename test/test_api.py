@@ -15,7 +15,7 @@ import numpy as np
 from collections import defaultdict
 
 BASE = "http://127.0.0.1:8787"
-STL_PATH = os.path.join(os.path.dirname(__file__), "..", "physics-engine", "stl", "6683688_simp0.1pct.stl")
+STL_PATH = os.path.join(os.path.dirname(__file__), "..", "physics-engine", "stl", "part.stl")
 
 # ── helpers ──
 def submit_stl(stl_path, box_l, box_w, box_h, cell=0.5, yaw=8, roll=4, pitch=4,

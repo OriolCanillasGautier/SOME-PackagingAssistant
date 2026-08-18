@@ -382,6 +382,15 @@ export class SceneManager {
         this.gridHelper = null;
         this.lastPlacement = null;
         this.boxFloor = null;
+        this._revealAnimId = null;
+        this._revealData = null;
+        this._lastReveal = null;
+        this._partialState = null; // live (in-progress) packing preview state
+
+        // Protective packaging overlays (Pack Studio): partitions, foam inserts, molded tray
+        this.protectivePackaging = null;
+        this.protectiveMeshes = []; // [{ type: 'partitions'|'foam'|'tray', mesh }]
+        this._compartmentData = null; // { boxL, boxW, boxH, cellL, cellW } for grid overlays
         
         // 20 distinct colors for pieces - matching physics-world.js
         this.pieceColors = [
@@ -414,7 +423,7 @@ export class SceneManager {
     init() {
         // Scene
         this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x1a1a2e);
+        this.scene.background = new THREE.Color(0x1e1e1f);
 
         // Camera
         const containerW = this.container.clientWidth || 1;
@@ -447,8 +456,20 @@ export class SceneManager {
         // Grid
         this.setupGrid();
 
+        // Protective packaging group — holds partitions / foam / tray overlays
+        this.protectivePackaging = new THREE.Group();
+        this.protectivePackaging.name = 'protectivePackaging';
+        this.scene.add(this.protectivePackaging);
+
         // Handle resize
         window.addEventListener('resize', () => this.onResize());
+        // Container size changes (results appearing, sidebar expanding) don't
+        // fire window resize — observe the container directly to keep the
+        // camera aspect ratio in sync and avoid a stretched view.
+        if (typeof ResizeObserver !== 'undefined') {
+            this._resizeObserver = new ResizeObserver(() => this.onResize());
+            this._resizeObserver.observe(this.container);
+        }
 
         // Start render loop
         this.animate();
@@ -550,6 +571,9 @@ export class SceneManager {
      * Clear all pieces from the scene
      */
     clearPieces() {
+        this.cancelReveal();
+        this.clearProtectivePackaging();
+        this._compartmentData = null;
         for (const piece of this.pieces) {
             this.scene.remove(piece);
             if (piece.geometry) piece.geometry.dispose();
@@ -560,8 +584,325 @@ export class SceneManager {
                     piece.material.dispose();
                 }
             }
+            if (typeof piece.dispose === 'function') piece.dispose();
         }
         this.pieces = [];
+        this._lastReveal = null;
+        this._partialState = null;
+    }
+
+    // ═══════════════ PROTECTIVE PACKAGING OVERLAYS (Pack Studio) ═══════════════
+
+    /**
+     * Remove every protective overlay mesh (partitions / foam / tray) and
+     * dispose their GPU resources. Called automatically from clearPieces().
+     */
+    clearProtectivePackaging() {
+        if (!this.protectivePackaging) return;
+        for (const entry of this.protectiveMeshes) {
+            const mesh = entry.mesh;
+            this.protectivePackaging.remove(mesh);
+            if (mesh.geometry) mesh.geometry.dispose();
+            const mat = mesh.material;
+            if (mat) {
+                if (Array.isArray(mat)) mat.forEach(m => m.dispose());
+                else mat.dispose();
+            }
+        }
+        this.protectiveMeshes = [];
+    }
+
+    /**
+     * Add a mesh to the protective packaging group, tagged by overlay type.
+     * @private
+     */
+    _addProtectiveMesh(mesh, type) {
+        if (!this.protectivePackaging) {
+            this.protectivePackaging = new THREE.Group();
+            this.protectivePackaging.name = 'protectivePackaging';
+            this.scene.add(this.protectivePackaging);
+        }
+        mesh.userData.protectiveType = type;
+        this.protectivePackaging.add(mesh);
+        this.protectiveMeshes.push({ type, mesh });
+    }
+
+    /**
+     * Remove only the overlays of a given type ('partitions' | 'foam' | 'tray').
+     * @private
+     */
+    _removeProtectiveOverlay(type) {
+        const remaining = [];
+        for (const entry of this.protectiveMeshes) {
+            const mesh = entry.mesh;
+            if (entry.type === type) {
+                this.protectivePackaging.remove(mesh);
+                if (mesh.geometry) mesh.geometry.dispose();
+                const mat = mesh.material;
+                if (mat) {
+                    if (Array.isArray(mat)) mat.forEach(m => m.dispose());
+                    else mat.dispose();
+                }
+            } else {
+                remaining.push(entry);
+            }
+        }
+        this.protectiveMeshes = remaining;
+    }
+
+    /**
+     * Toggle a protective packaging overlay on/off. The overlay is (re)built
+     * from the current scene state (last placement + compartment grid).
+     * @param {'partitions'|'foam'|'tray'} type
+     * @param {boolean} enabled
+     */
+    setProtectiveOverlay(type, enabled = true) {
+        if (enabled) {
+            this._buildProtectiveOverlay(type);
+        } else {
+            this._removeProtectiveOverlay(type);
+        }
+        return this;
+    }
+
+    /**
+     * Rebuild the overlay of a given type from current scene state.
+     * @private
+     */
+    _buildProtectiveOverlay(type) {
+        this._removeProtectiveOverlay(type);
+        if (type === 'partitions') {
+            this.addPartitions(this._getCompartmentData());
+        } else if (type === 'foam') {
+            const lp = this.lastPlacement;
+            if (!lp || !lp.boxDims) return;
+            const placements = this._extractPlacements(lp);
+            const base = (lp.orientations && lp.orientations[0] && lp.orientations[0].geometry)
+                ? lp.orientations[0].geometry
+                : (lp.geometry || null);
+            this.addFoamInserts(placements, base, 0xd1d5db);
+        } else if (type === 'tray') {
+            this.addMoldedTray(this._getCompartmentData());
+        }
+    }
+
+    /**
+     * Extract a uniform [{x,y,z}, ...] list from a lastPlacement object.
+     * Supports Vector3 positions, items with .position, and raw placements.
+     * @private
+     */
+    _extractPlacements(lp) {
+        const out = [];
+        if (lp.items && lp.items.length) {
+            for (const it of lp.items) {
+                const p = it.position || it;
+                out.push({ x: p.x, y: p.y, z: p.z });
+            }
+        } else if (lp.positions && lp.positions.length) {
+            for (const p of lp.positions) out.push({ x: p.x, y: p.y, z: p.z });
+        } else if (lp.placements && lp.placements.length) {
+            for (const p of lp.placements) out.push({ x: p.x, y: p.y, z: p.z });
+        }
+        return out;
+    }
+
+    /**
+     * Current compartment grid data (box + cell sizes). Falls back to the box
+     * dims alone if no grid was recorded.
+     * @private
+     */
+    _getCompartmentData() {
+        if (this._compartmentData) return this._compartmentData;
+        const lp = this.lastPlacement;
+        if (lp && lp.boxDims) {
+            const { l, w, h } = lp.boxDims;
+            return { boxL: l, boxW: w, boxH: h, cellL: l, cellW: w };
+        }
+        return null;
+    }
+
+    /**
+     * 1. Partitions — cardboard divider walls splitting the box floor into a
+     * grid of cells (compartment pack). Vertical sheets between rows/columns,
+     * plus a horizontal shelf under every stacked layer.
+     *
+     * Coordinate system: box X=length, Y=height(up), Z=width; bottom at y=0.
+     * Walls run at x = i*cellL (spanning Z) and z = j*cellW (spanning X),
+     * with height = stack height (nLayers × layerPitch), capped at boxH.
+     * Shelves sit at the top of each layer (l × layerPitch), exactly where
+     * the pieces of the upper layer rest.
+     *
+     * @param {Object} opts
+     * @param {number} opts.boxL - Box length (mm, X)
+     * @param {number} opts.boxW - Box width (mm, Z)
+     * @param {number} opts.boxH - Box height (mm, Y)
+     * @param {number} opts.cellL - Cell length (mm)
+     * @param {number} opts.cellW - Cell width (mm)
+     * @param {number} [opts.nLayers=1] - Number of stacked layers
+     * @param {number} [opts.layerPitch] - Height of one layer (mm); shelves
+     *        and wall height derive from it (default boxH/nLayers)
+     * @param {number} [opts.height] - Wall height override (default stack height)
+     * @param {number} [opts.thickness] - Cardboard thickness override (mm)
+     * @returns {number} Number of divider walls created
+     */
+    addPartitions({ boxL, boxW, boxH, cellL, cellW, height, nLayers = 1, layerPitch = null, thickness = null }) {
+        if (!boxL || !boxW || !boxH || !cellL || !cellW) return 0;
+        const cols = Math.max(1, Math.round(boxL / cellL));
+        const rows = Math.max(1, Math.round(boxW / cellW));
+        const pitch = (layerPitch != null && layerPitch > 0) ? layerPitch : boxH / Math.max(1, nLayers);
+        // Cardboard dividers reach the top of the stacked layers (or a
+        // provided height), never exceed the box interior.
+        const stackH = nLayers * pitch;
+        const wallH = (height != null && height > 0)
+            ? height
+            : Math.min(boxH * 0.98, Math.max(pitch * 1.05, stackH));
+        // Cardboard: a few mm thick, relative to the cell pitch (or explicit)
+        const thicknessMm = (thickness != null && thickness > 0)
+            ? thickness
+            : Math.max(2, Math.min(cellL, cellW) * 0.05);
+        const t = thicknessMm;
+
+        const material = new THREE.MeshPhongMaterial({
+            color: 0xc8a86e, // cardboard brown
+            opacity: 0.55,
+            transparent: true,
+            side: THREE.DoubleSide,
+            flatShading: true,
+            specular: 0x222222,
+            shininess: 8
+        });
+
+        let count = 0;
+        // Vertical walls spanning Z between columns at x = i*cellL
+        for (let i = 1; i < cols; i++) {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(t, wallH, boxW), material);
+            mesh.position.set(i * cellL, wallH / 2, boxW / 2);
+            this._addProtectiveMesh(mesh, 'partitions');
+            count++;
+        }
+        // Vertical walls spanning X between rows at z = j*cellW
+        for (let j = 1; j < rows; j++) {
+            const mesh = new THREE.Mesh(new THREE.BoxGeometry(boxL, wallH, t), material);
+            mesh.position.set(boxL / 2, wallH / 2, j * cellW);
+            this._addProtectiveMesh(mesh, 'partitions');
+            count++;
+        }
+        // Horizontal shelves between stacked layers: one per layer boundary
+        // at the exact height the upper layer rests (l × layerPitch).
+        if (nLayers > 1 && pitch > 0) {
+            for (let l = 1; l < nLayers; l++) {
+                const shelfY = l * pitch;
+                // Shelf = thin cardboard sheet spanning the whole box interior
+                const shelf = new THREE.Mesh(
+                    new THREE.BoxGeometry(boxL - t * 2, t, boxW - t * 2),
+                    material
+                );
+                shelf.position.set(boxL / 2, shelfY, boxW / 2);
+                this._addProtectiveMesh(shelf, 'partitions');
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * 2. Foam inserts — small light-grey foam pads under every piece resting
+     * on the floor (base at y≈0). Each pad is slightly larger than the piece's
+     * footprint and ~5mm tall.
+     *
+     * @param {Array<{x:number,y:number,z:number}>} placements - Placement list
+     * @param {THREE.BufferGeometry} [baseGeometry] - Piece geometry (footprint source)
+     * @param {number} [color] - Foam color (default light grey 0xd1d5db)
+     * @returns {number} Number of foam pads created
+     */
+    addFoamInserts(placements, baseGeometry, color = 0xd1d5db) {
+        if (!placements || placements.length === 0) return 0;
+        const padH = 5;
+        let sizeX = 30, sizeZ = 30;
+        if (baseGeometry) {
+            baseGeometry.computeBoundingBox();
+            if (baseGeometry.boundingBox) {
+                sizeX = Math.max(0.1, baseGeometry.boundingBox.max.x - baseGeometry.boundingBox.min.x);
+                sizeZ = Math.max(0.1, baseGeometry.boundingBox.max.z - baseGeometry.boundingBox.min.z);
+            }
+        } else if (this.lastPlacement && this.lastPlacement.dims) {
+            sizeX = Math.max(0.1, this.lastPlacement.dims.l);
+            sizeZ = Math.max(0.1, this.lastPlacement.dims.w);
+        }
+        const margin = Math.max(1, Math.min(sizeX, sizeZ) * 0.08);
+        const padX = sizeX + 2 * margin;
+        const padZ = sizeZ + 2 * margin;
+
+        const material = new THREE.MeshPhongMaterial({
+            color,
+            opacity: 0.6,
+            transparent: true,
+            flatShading: true
+        });
+        const geometry = new THREE.BoxGeometry(padX, padH, padZ);
+
+        let count = 0;
+        for (const p of placements) {
+            const x = typeof p.x === 'number' ? p.x : (p.position ? p.position.x : 0);
+            const y = typeof p.y === 'number' ? p.y : (p.position ? p.position.y : 0);
+            const z = typeof p.z === 'number' ? p.z : (p.position ? p.position.z : 0);
+            if (y > 0.5) continue; // only pieces whose base rests on the floor
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(x, padH / 2, z);
+            this._addProtectiveMesh(mesh, 'foam');
+            count++;
+        }
+        return count;
+    }
+
+    /**
+     * 3. Molded tray — a single grey slab (~8mm) covering the floor with a
+     * slightly darker recessed rectangle per cell drawn as a flat plane on top.
+     *
+     * @param {Object} opts
+     * @param {number} opts.boxL - Box length (mm, X)
+     * @param {number} opts.boxW - Box width (mm, Z)
+     * @param {number} opts.cellL - Cell length (mm)
+     * @param {number} opts.cellW - Cell width (mm)
+     * @returns {number} Number of meshes created (slab + recessed cells)
+     */
+    addMoldedTray({ boxL, boxW, cellL, cellW }) {
+        if (!boxL || !boxW || !cellL || !cellW) return 0;
+        const trayH = 8;
+
+        const slabMat = new THREE.MeshPhongMaterial({
+            color: 0xd1d5db,
+            opacity: 0.55,
+            transparent: true,
+            flatShading: true
+        });
+        const slab = new THREE.Mesh(new THREE.BoxGeometry(boxL, trayH, boxW), slabMat);
+        slab.position.set(boxL / 2, trayH / 2, boxW / 2);
+        this._addProtectiveMesh(slab, 'tray');
+
+        const cols = Math.max(1, Math.round(boxL / cellL));
+        const rows = Math.max(1, Math.round(boxW / cellW));
+        const recessMat = new THREE.MeshPhongMaterial({
+            color: 0x9ca3af, // slightly darker grey
+            opacity: 0.85,
+            transparent: true,
+            side: THREE.DoubleSide
+        });
+        const topY = trayH + 0.2;
+        const inset = 1.5;
+        let count = 1;
+        for (let i = 0; i < cols; i++) {
+            for (let j = 0; j < rows; j++) {
+                const w = Math.max(0.5, cellL - inset);
+                const d = Math.max(0.5, cellW - inset);
+                const recess = new THREE.Mesh(new THREE.PlaneGeometry(w, d), recessMat);
+                recess.rotation.x = -Math.PI / 2;
+                recess.position.set(i * cellL + cellL / 2, topY, j * cellW + cellW / 2);
+                this._addProtectiveMesh(recess, 'tray');
+                count++;
+            }
+        }
+        return count;
     }
 
     /**
@@ -652,6 +993,11 @@ export class SceneManager {
                 ? { l: boxL, w: boxW, h: boxH }
                 : null
         };
+
+        // Grid overlays (partitions / molded tray) use the cell pitch
+        if (boxL !== null && boxW !== null && boxH !== null) {
+            this._compartmentData = { boxL, boxW, boxH, cellL: pieceL + packingGap, cellW: pieceW + packingGap };
+        }
 
         return index; // Return actual count drawn (may be less if pieces were skipped)
     }
@@ -836,6 +1182,11 @@ export class SceneManager {
                 ? { l: boxL, w: boxW, h: boxH }
                 : null
         };
+
+        // Grid overlays (partitions / molded tray) use the cell pitch
+        if (boxL !== null && boxW !== null && boxH !== null) {
+            this._compartmentData = { boxL, boxW, boxH, cellL: spacingX, cellW: spacingZ };
+        }
 
         return {
             count: index,
@@ -1632,6 +1983,15 @@ export class SceneManager {
             await maybeYield(true);
         }
 
+        // Compartment-style grid from the Phase 1 layout (partitions / molded tray)
+        if (bestGridLayout) {
+            this._compartmentData = {
+                boxL, boxW, boxH,
+                cellL: bestGridLayout.stepX,
+                cellW: bestGridLayout.stepZ
+            };
+        }
+
         // ═══════════════ PHASE 2: UPPER LAYERS — greedy heightmap scan ═══════════════
         const _tPhase2Start = performance.now();
         // Q1: integer stepping (legacy). Q2/Q3: sub-cell stepping.
@@ -2082,6 +2442,9 @@ export class SceneManager {
             boxDims: { l: boxL, w: boxW, h: boxH }
         };
 
+        // Compartment-style grid: cell pitch = grid step, used by partitions / molded tray
+        this._compartmentData = { boxL, boxW, boxH, cellL: grid.stepX, cellW: grid.stepZ };
+
         return {
             count: placed,
             gridInfo: {
@@ -2122,6 +2485,333 @@ export class SceneManager {
         this.pieces.push(mesh);
 
         return mesh;
+    }
+
+    /**
+     * Render individual packed pieces from server placements.
+     *
+     * Each placement: { x, y, z, orientation, name, rotation: [[3x3]] }.
+     * Server convention: X = box length, Y = box height (up), Z = box width.
+     * Placements are grouped by orientation; each group's geometry is the
+     * source mesh rotated by the group's rotation matrix and normalized so its
+     * min corner sits at the origin (matching the server's `-bmin` translation).
+     * Instances are then translated to (x, y, z) — the world position where the
+     * server placed the piece's min corner.
+     *
+     * Pieces are revealed progressively (staggered appearance) in pack order.
+     *
+     * @param {Object} params
+     * @param {Array} params.placements - Placement list from the job
+     * @param {THREE.BufferGeometry} params.baseGeometry - Geometry matching the STL bytes that were sent
+     * @param {number} params.boxL - Box length (mm)
+     * @param {number} params.boxW - Box width (mm)
+     * @param {number} params.boxH - Box height (mm)
+     * @param {number} [params.colorCount] - Number of palette colors to cycle
+     * @param {number} [params.fillPct] - Fill percentage for the stats overlay
+     * @param {(p:{revealed:number,total:number,pct:number})=>void} [params.onProgress]
+     */
+    addPackedPlacements({ placements, baseGeometry, boxL, boxW, boxH, colorCount = null, fillPct = 0, onProgress = null }) {
+        this.clearPieces();
+
+        if (!placements || placements.length === 0) {
+            if (onProgress) onProgress({ revealed: 0, total: 0, pct: fillPct || 0 });
+            return { count: 0 };
+        }
+
+        const numColors = Math.max(1, Math.min(colorCount || this.colorCount, this.pieceColors.length));
+
+        // Group placements by orientation index, keeping global pack order.
+        const groups = new Map();
+        placements.forEach((p, globalIdx) => {
+            const oi = p.orientation ?? 0;
+            if (!groups.has(oi)) groups.set(oi, []);
+            groups.get(oi).push({ p, globalIdx });
+        });
+
+        const meshes = [];
+        const revealOrder = [];
+
+        for (const [oi, group] of groups) {
+            const rot = group[0].p.rotation;
+            const geometry = baseGeometry.clone();
+            geometry.computeVertexNormals();
+
+            // Bake the group's rotation into the geometry (no per-instance rotation).
+            // rotation is a 3x3 list-of-rows (row-major); build a Matrix4 whose
+            // upper-left block equals it so M·v = rot·v.
+            if (rot) {
+                const r = rot.flat();
+                const m4 = new THREE.Matrix4().set(
+                    r[0], r[1], r[2], 0,
+                    r[3], r[4], r[5], 0,
+                    r[6], r[7], r[8], 0,
+                    0, 0, 0, 1
+                );
+                geometry.applyMatrix4(m4);
+            }
+
+            // Normalize: translate so the min corner is at the origin — this
+            // mirrors the server's mesh.apply_translation(-bmin), and the
+            // placement (x,y,z) is exactly where that min corner lands.
+            geometry.computeBoundingBox();
+            const bbox = geometry.boundingBox;
+            geometry.translate(-bbox.min.x, -bbox.min.y, -bbox.min.z);
+
+            const material = new THREE.MeshPhongMaterial({
+                color: 0xffffff,
+                opacity: 0.92,
+                transparent: true,
+                flatShading: false,
+                shininess: 60,
+                specular: 0x444444
+            });
+
+            const mesh = new THREE.InstancedMesh(geometry, material, group.length);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            mesh.frustumCulled = false;
+            mesh.count = 0; // hidden until revealed
+
+            const dummy = new THREE.Object3D();
+            group.forEach(({ p, globalIdx }, localIdx) => {
+                dummy.position.set(p.x, p.y, p.z);
+                dummy.rotation.set(0, 0, 0);
+                dummy.updateMatrix();
+                mesh.setMatrixAt(localIdx, dummy.matrix);
+                mesh.setColorAt(localIdx, new THREE.Color(this.pieceColors[globalIdx % numColors]));
+                revealOrder.push({ mesh, idx: localIdx });
+            });
+            mesh.instanceMatrix.needsUpdate = true;
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+
+            this.scene.add(mesh);
+            this.pieces.push(mesh);
+            meshes.push(mesh);
+        }
+
+        this.lastPlacement = {
+            type: 'placements',
+            placements,
+            boxDims: { l: boxL, w: boxW, h: boxH },
+            pieces: meshes
+        };
+
+        this._lastReveal = { meshes, revealOrder, fillPct, onProgress };
+        this.revealPlacements(meshes, revealOrder, fillPct, onProgress);
+
+        return { count: placements.length };
+    }
+
+    /**
+     * Incrementally render placements while the server is still packing
+     * (live "watch the box fill" preview). Unlike addPackedPlacements this does
+     * NOT clear the scene or rebuild InstancedMeshes: it only appends the NEW
+     * placements (those past the previously-rendered count) to the existing
+     * per-orientation meshes, creating a mesh on first use of an orientation.
+     *
+     * Placements must arrive in pack order (as the server's placements_partial
+     * does), share the exact shape of final placements, and be a prefix of the
+     * final list so the color assignment (globalIdx % numColors) stays stable.
+     *
+     * Instances appear immediately — the act of the server placing them IS the
+     * animation. The final full render (addPackedPlacements) still runs its
+     * staggered reveal when the job completes.
+     *
+     * @param {Object} params
+     * @param {Array} params.placements - Growing placement list (prefix)
+     * @param {THREE.BufferGeometry} params.baseGeometry - Geometry matching the STL bytes sent
+     * @param {number} params.boxL - Box length (mm)
+     * @param {number} params.boxW - Box width (mm)
+     * @param {number} params.boxH - Box height (mm)
+     * @param {number} [params.colorCount] - Number of palette colors to cycle
+     * @param {(p:{revealed:number,total:number})=>void} [params.onProgress]
+     */
+    addPackedPlacementsPartial({ placements, baseGeometry, boxL, boxW, boxH, colorCount = null, onProgress = null }) {
+        if (!placements || placements.length === 0) return { count: 0, added: 0 };
+
+        const numColors = Math.max(1, Math.min(colorCount || this.colorCount, this.pieceColors.length));
+
+        if (!this._partialState) {
+            this._partialState = {
+                addedCount: 0,
+                capacity: Math.max(placements.length, 500),
+                meshes: new Map(),
+                baseGeometry,
+                boxDims: { l: boxL, w: boxW, h: boxH },
+                numColors
+            };
+        }
+
+        const st = this._partialState;
+        const startIdx = st.addedCount;
+        if (placements.length <= startIdx) return { count: placements.length, added: 0 };
+
+        // Group the NEW placements by orientation index, keeping global pack order.
+        const groups = new Map();
+        for (let globalIdx = startIdx; globalIdx < placements.length; globalIdx++) {
+            const p = placements[globalIdx];
+            const oi = p.orientation ?? 0;
+            if (!groups.has(oi)) groups.set(oi, []);
+            groups.get(oi).push({ p, globalIdx });
+        }
+
+        const dummy = new THREE.Object3D();
+        for (const [oi, group] of groups) {
+            let mesh = st.meshes.get(oi);
+            if (!mesh) {
+                // First placement for this orientation → create its InstancedMesh.
+                // Capacity is fixed at 500 (sparrow max) so the live preview never
+                // outgrows a mesh mid-run.
+                const rot = group[0].p.rotation;
+                const geometry = baseGeometry.clone();
+                geometry.computeVertexNormals();
+
+                if (rot) {
+                    const r = rot.flat();
+                    const m4 = new THREE.Matrix4().set(
+                        r[0], r[1], r[2], 0,
+                        r[3], r[4], r[5], 0,
+                        r[6], r[7], r[8], 0,
+                        0, 0, 0, 1
+                    );
+                    geometry.applyMatrix4(m4);
+                }
+
+                geometry.computeBoundingBox();
+                const bbox = geometry.boundingBox;
+                geometry.translate(-bbox.min.x, -bbox.min.y, -bbox.min.z);
+
+                const material = new THREE.MeshPhongMaterial({
+                    color: 0xffffff,
+                    opacity: 0.92,
+                    transparent: true,
+                    flatShading: false,
+                    shininess: 60,
+                    specular: 0x444444
+                });
+
+                mesh = new THREE.InstancedMesh(geometry, material, st.capacity);
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                mesh.frustumCulled = false;
+                mesh.count = 0;
+
+                this.scene.add(mesh);
+                this.pieces.push(mesh);
+                st.meshes.set(oi, mesh);
+            }
+
+            let localIdx = mesh.count;
+            group.forEach(({ p, globalIdx }) => {
+                dummy.position.set(p.x, p.y, p.z);
+                dummy.rotation.set(0, 0, 0);
+                dummy.updateMatrix();
+                mesh.setMatrixAt(localIdx, dummy.matrix);
+                mesh.setColorAt(localIdx, new THREE.Color(this.pieceColors[globalIdx % numColors]));
+                localIdx++;
+            });
+            mesh.count = localIdx;
+            mesh.instanceMatrix.needsUpdate = true;
+            if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+        }
+
+        st.addedCount = placements.length;
+        if (onProgress) onProgress({ revealed: placements.length, total: placements.length });
+
+        return { count: placements.length, added: placements.length - startIdx };
+    }
+
+    /**
+     * Reveal placed instances progressively (staggered appearance animation).
+     * Pieces appear in pack order; all are visible within ~60 frames.
+     * @param {THREE.InstancedMesh[]} meshes
+     * @param {Array<{mesh:THREE.InstancedMesh,idx:number}>} revealOrder
+     * @param {number} [fillPct]
+     * @param {(p:{revealed:number,total:number,pct:number})=>void} [onProgress]
+     */
+    revealPlacements(meshes, revealOrder, fillPct = 0, onProgress = null) {
+        this.cancelReveal();
+
+        const total = revealOrder.length;
+        if (total === 0) {
+            if (onProgress) onProgress({ revealed: 0, total: 0, pct: fillPct || 0 });
+            return;
+        }
+
+        const perMesh = new Map();
+        // Duration-based reveal: advance by elapsed wall time so the animation
+        // completes in bounded time even where timers are throttled (headless
+        // browsers, background tabs).
+        const duration = Math.min(1800, Math.max(400, total * 6));
+        const start = performance.now();
+        const rd = {
+            meshes,
+            revealOrder,
+            total,
+            revealed: 0,
+            duration,
+            start,
+            fillPct,
+            onProgress,
+            perMesh
+        };
+        this._revealData = rd;
+
+        if (onProgress) onProgress({ revealed: 0, total, pct: fillPct || 0 });
+
+        const advance = () => {
+            this._revealAnimId = null;
+            if (this._revealData !== rd) return;
+            const elapsed = performance.now() - rd.start;
+            // Background/hidden tabs throttle timers to ~1/min, which would
+            // freeze the animation mid-way; finish instantly instead so the
+            // count is always correct when the user returns to the tab.
+            const hidden = typeof document !== 'undefined' && document.hidden;
+            const frac = hidden ? 1 : Math.min(1, elapsed / rd.duration);
+            const target = Math.max(rd.revealed + 1, Math.min(rd.total, Math.ceil(frac * rd.total)));
+            for (let g = rd.revealed; g < target; g++) {
+                const { mesh, idx } = rd.revealOrder[g];
+                if (idx + 1 > (rd.perMesh.get(mesh) || 0)) rd.perMesh.set(mesh, idx + 1);
+            }
+            rd.perMesh.forEach((count, mesh) => {
+                mesh.count = count;
+                mesh.instanceMatrix.needsUpdate = true;
+            });
+            rd.revealed = target;
+            if (rd.onProgress) {
+                rd.onProgress({ revealed: rd.revealed, total: rd.total, pct: rd.fillPct || 0 });
+            }
+            if (rd.revealed < rd.total && !hidden) {
+                this._revealAnimId = setTimeout(advance, Math.max(16, Math.min(250, rd.duration / 60)));
+            } else {
+                rd.perMesh.clear();
+            }
+        };
+        advance();
+    }
+
+    /**
+     * Cancel any in-flight reveal animation (also called by clearPieces).
+     */
+    cancelReveal() {
+        if (this._revealAnimId !== null && this._revealAnimId !== undefined) {
+            clearTimeout(this._revealAnimId);
+        }
+        this._revealAnimId = null;
+        this._revealData = null;
+    }
+
+    /**
+     * Re-run the staggered reveal animation without re-packing.
+     */
+    replayReveal() {
+        if (!this._lastReveal) return;
+        const { meshes, revealOrder, fillPct, onProgress } = this._lastReveal;
+        for (const mesh of meshes) {
+            mesh.count = 0;
+            mesh.instanceMatrix.needsUpdate = true;
+        }
+        this.revealPlacements(meshes, revealOrder, fillPct, onProgress);
     }
 
     /**
@@ -2239,6 +2929,10 @@ export class SceneManager {
         this.container.removeChild(this.renderer.domElement);
 
         window.removeEventListener('resize', this.onResize);
+        if (this._resizeObserver) {
+            this._resizeObserver.disconnect();
+            this._resizeObserver = null;
+        }
     }
 }
 

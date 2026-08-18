@@ -15,7 +15,7 @@ Endpoints:
     GET  /api/pack/<job_id>/png  — download preview PNG
     GET  /api/jobs               — list recent jobs
 """
-import sys, os, io, time, uuid, json, threading, tempfile, traceback
+import sys, os, io, time, uuid, json, threading, tempfile, traceback, itertools
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file, send_from_directory
@@ -116,6 +116,31 @@ def simplify_stl(input_bytes: bytes, target_ratio: float) -> bytes:
 # GPU packing job runner
 # ——————————————————————————————————————————————————————————————————————
 
+def format_placements(placed, orients):
+    """Build the frontend placement dicts from (x,y,z,oi,name) tuples.
+
+    Matches the exact shape the scene renderer consumes: x/y/z in mm, the
+    orientation index, the piece name, and the 3x3 row-major rotation matrix
+    from the orientation dict. Used both for the final `placements` result and
+    for the live `placements_partial` updates while a sparrow job is running.
+    """
+    placements = []
+    for (x, y, z, oi, name) in placed:
+        od = orients[oi]
+        rot = np.eye(4)
+        if "rotation" in od:
+            rot[:3, :3] = od["rotation"]
+        placements.append({
+            "x": round(float(x), 3),
+            "y": round(float(y), 3),
+            "z": round(float(z), 3),
+            "orientation": oi,
+            "name": name,
+            "rotation": rot[:3, :3].tolist(),
+        })
+    return placements
+
+
 def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
     try:
         with GPU_LOCK:
@@ -133,18 +158,70 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             pitch = params.get("pitch", 4)
             scan_vox = params.get("scan_vox", 1)
             method = params.get("method", "sparrow")
+            fixed_orientation = params.get("fixed_orientation", 0)
+
+            # Stacking/Compartment honor the user's chosen pose: when the
+            # client sends a pre-rotated STL, restrict to in-plane spins of
+            # that pose (the piece keeps resting on the chosen face).
+            if fixed_orientation and method in ("stacking", "compartment"):
+                yaw = roll = pitch = 1
+                packer_fixed_orientation = True
+            else:
+                packer_fixed_orientation = False
+
+            # Optional explicit in-plane rotation (horizontal-axis ask when
+            # re-calculating): 0/90/180/270° spin of the chosen pose. Restricts
+            # the spin pool to that exact angle so the user can force e.g. the
+            # 90° arrangement that packs ~30 more pieces in a long box.
+            horizontal_angle = params.get("horizontal_angle")
+            if horizontal_angle not in (None, ""):
+                try:
+                    horizontal_angle = float(horizontal_angle) % 180
+                except (TypeError, ValueError):
+                    horizontal_angle = None
 
             t0 = time.time()
 
-            if method == "sparrow":
+            if method in ("sparrow", "stacking", "compartment", "spectral"):
                 import random as _random
-                _random.seed(abs(hash(stl_data)) % (2**31))
+                seed = params.get("seed", 0) or abs(hash(stl_data)) % (2**31)
+                _random.seed(seed)
                 packer = BestPacker(box_dims)
+                packer._fixed_orientation = packer_fixed_orientation
+                if horizontal_angle is not None and packer_fixed_orientation:
+                    packer._horizontal_angle = horizontal_angle
                 packer.load_mesh_from_data(mesh, n_yaw=yaw)
-                placed_sparrow, placed_meshes = packer.pack_sparrow(
-                    max_pieces=500, n_workers=1, verbose=False)
+
+                def progress_cb(count, elapsed_s, partial_placements=None):
+                    job["pieces"] = count
+                    job["time_s"] = round(elapsed_s, 1)
+                    # Throttle live placement updates (every 10 pieces) so the
+                    # frontend isn't flooded with near-identical payloads.
+                    if partial_placements and len(partial_placements) % 10 == 0:
+                        job["placements_partial"] = format_placements(
+                            partial_placements, packer._sparrow_voxel_data)
+
+                vox_cell = params.get("cell", 1.0)
+                if method == "sparrow":
+                    placed_pieces, placed_meshes = packer.pack_sparrow(
+                        max_pieces=500, n_workers=4, cell_size=vox_cell, verbose=False,
+                        progress_callback=progress_cb, seed=seed)
+                elif method == "spectral":
+                    # Spectral: FFT-based, CPU — use a coarser cell for speed
+                    spectral_cell = max(vox_cell, 2.0)
+                    placed_pieces, placed_meshes = packer.pack_spectral(
+                        max_pieces=500, cell_size=spectral_cell, verbose=False,
+                        progress_callback=progress_cb, seed=seed)
+                elif method == "stacking":
+                    placed_pieces, placed_meshes = packer.pack_stacking(
+                        max_pieces=500, cell_size=vox_cell, verbose=False,
+                        progress_callback=progress_cb)
+                else:  # compartment
+                    placed_pieces, placed_meshes = packer.pack_compartment(
+                        max_pieces=500, cell_size=vox_cell, verbose=False,
+                        progress_callback=progress_cb)
                 elapsed = time.time() - t0
-                placed = placed_sparrow
+                placed = placed_pieces
             else:
                 orients = generate_orientations(mesh, cell, yaw, roll, pitch, box_dims)
 
@@ -191,21 +268,8 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             ok = verify(placed_meshes) if placed_meshes else True
 
             # Build placement data with orientation transforms
-            placements = []
-            orients_for_placements = packer._sparrow_voxel_data if method == "sparrow" else orients
-            for (x, y, z, oi, name), _ in zip(placed, placed_meshes):
-                od = orients_for_placements[oi]
-                rot = np.eye(4)
-                if "rotation" in od:
-                    rot[:3, :3] = od["rotation"]
-                placements.append({
-                    "x": round(float(x), 3),
-                    "y": round(float(y), 3),
-                    "z": round(float(z), 3),
-                    "orientation": oi,
-                    "name": name,
-                    "rotation": rot[:3, :3].tolist(),
-                })
+            orients_for_placements = packer._sparrow_voxel_data if method in ("sparrow", "stacking", "compartment", "spectral") else orients
+            placements = format_placements(placed, orients_for_placements)
 
             # Populate every result field BEFORE flipping status to "done" so
             # concurrent status polls never observe a partially-written result.
@@ -217,6 +281,142 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             job["png_path"] = str(png_out) if placed_meshes else ""
             job["verified"] = ok
             job["placements"] = placements
+
+            # Compartment packing implies a cardboard partition grid — expose
+            # the cell pitch + layer pitch so the frontend can render the
+            # dividers and shelves at the exact positions pieces are placed.
+            if method == "compartment" and getattr(packer, "_compartment_cell", None):
+                cell_l_mm, cell_w_mm, n_layers, layer_pitch_mm = packer._compartment_cell
+                job["compartment"] = {
+                    "cellL": round(float(cell_l_mm), 2),
+                    "cellW": round(float(cell_w_mm), 2),
+                    "nLayers": int(n_layers),
+                    "layerPitch": round(float(layer_pitch_mm), 2),
+                }
+            job["status"] = "done"
+
+    except Exception as e:
+        job["status"] = "error"
+        job["error_msg"] = f"{e}\n{traceback.format_exc()}"
+
+
+# ——————————————————————————————————————————————————————————————————————
+# Ranked Box Options ("Comparar caixes") — cost-per-part across box sizes
+# ——————————————————————————————————————————————————————————————————————
+
+def piece_fits_box(mesh, box_dims):
+    """Cheap fit check: does any axis-permutation of the part bbox fit the box?
+
+    Used to skip obviously-too-small boxes BEFORE launching an expensive packing
+    run. The packing engine explores more rotations than pure axis permutations,
+    so this is a heuristic guard, not an exact capacity test.
+    """
+    box_l, box_w, box_h = box_dims
+    b = mesh.bounds
+    dims = (b[1, 0] - b[0, 0], b[1, 1] - b[0, 1], b[1, 2] - b[0, 2])
+    if min(dims) > min(box_l, box_w, box_h) + 0.5:
+        return False
+    for (l, w, h) in set(itertools.permutations(dims)):
+        if l <= box_l + 0.5 and w <= box_w + 0.5 and h <= box_h + 0.5:
+            return True
+    return False
+
+
+def run_boxes_job(job: dict, stl_data: bytes, boxes: list, params: dict):
+    """Run the packing for every candidate box sequentially, rank by cost/part.
+
+    Uses the SAME packer machinery as /api/pack (BestPacker.pack_sparrow or the
+    GPU voxel packer) with coarse settings (cell 2.0) so each box stays well
+    under ~60s. The whole comparison holds GPU_LOCK for the full run.
+    """
+    try:
+        method = params.get("method", "sparrow")
+        cell = params.get("cell", 2.0)
+        piece_weight = params.get("piece_weight", 0.0)
+        box_cost = params.get("box_cost", 0.0)
+        packaging_cost = params.get("packaging_cost", 0.0)
+        freight_per_kg = params.get("freight_per_kg", 0.0)
+        freight_per_m3 = params.get("freight_per_m3", 0.0)
+
+        with GPU_LOCK:
+            job["status"] = "running"
+
+            mesh = trimesh.load(io.BytesIO(stl_data), file_type='stl', force='mesh')
+            if isinstance(mesh, trimesh.Scene):
+                mesh = trimesh.util.concatenate(
+                    [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)])
+
+            total = len(boxes)
+            results = []
+            for idx, (box_l, box_w, box_h) in enumerate(boxes):
+                job["progress"] = {"current": idx, "total": total}
+                job["current_box"] = [box_l, box_w, box_h]
+
+                def skip(reason):
+                    results.append({
+                        "box_l": box_l, "box_w": box_w, "box_h": box_h,
+                        "pieces": 0, "fill_pct": 0, "weight_kg": 0,
+                        "cost_per_part": None, "total_cost": 0,
+                        "skipped": True, "reason": reason,
+                    })
+
+                if not piece_fits_box(mesh, (box_l, box_w, box_h)):
+                    skip("too_small")
+                    continue
+
+                t0 = time.time()
+                try:
+                    if method == "sparrow":
+                        packer = BestPacker((box_l, box_w, box_h))
+                        packer.load_mesh_from_data(mesh, n_yaw=8)
+                        placed_sparrow, placed_meshes = packer.pack_sparrow(
+                            max_pieces=500, n_workers=4, cell_size=cell, verbose=False)
+                        placed_meshes = placed_meshes or []
+                    else:
+                        if not HAS_CUDA:
+                            raise RuntimeError("CUDA/GPU voxel packer not available")
+                        orients = generate_orientations(mesh, cell, 8, 4, 4, (box_l, box_w, box_h))
+                        placed_meshes, placed = pack(orients, (box_l, box_w, box_h), cell,
+                                                     scan_step_vox=2, verbose=False)
+                        placed_meshes = placed_meshes or []
+                except Exception:
+                    skip("error")
+                    continue
+
+                pieces = len(placed_meshes)
+                if pieces == 0:
+                    skip("no_fit")
+                    continue
+
+                box_vol = box_l * box_w * box_h
+                fill_pct = round(sum(m.volume for m in placed_meshes) / box_vol * 100, 1) if box_vol else 0
+                weight_kg = round(pieces * piece_weight, 3)
+
+                freight_total = 0.0
+                if freight_per_kg > 0:
+                    freight_total = weight_kg * freight_per_kg
+                elif freight_per_m3 > 0:
+                    freight_total = (box_vol / 1e9) * freight_per_m3
+
+                total_cost = round(box_cost + packaging_cost + freight_total, 3)
+                cost_per_part = round(total_cost / pieces, 4) if pieces else None
+                results.append({
+                    "box_l": box_l, "box_w": box_w, "box_h": box_h,
+                    "pieces": pieces,
+                    "fill_pct": fill_pct,
+                    "weight_kg": weight_kg,
+                    "cost_per_part": cost_per_part,
+                    "total_cost": total_cost,
+                    "time_s": round(time.time() - t0, 1),
+                    "skipped": False,
+                })
+
+            # Best first (ascending cost/part); skipped boxes fall to the end.
+            results.sort(key=lambda r: r["cost_per_part"] if r.get("cost_per_part") is not None else float('inf'))
+
+            job["boxes"] = results
+            job["progress"] = {"current": total, "total": total}
+            job["current_box"] = []
             job["status"] = "done"
 
     except Exception as e:
@@ -285,6 +485,9 @@ def submit_pack():
         "pitch": int(request.form.get("pitch", 4)),
         "scan_vox": int(request.form.get("scan_vox", 0)),
         "method": request.form.get("method", "sparrow"),
+        "seed": int(request.form.get("seed", 0)),
+        "fixed_orientation": int(request.form.get("fixed_orientation", 0)),
+        "horizontal_angle": request.form.get("horizontal_angle"),
     }
 
     # ── Adaptive resolution: prefer scan-step scaling over cell bumping ──
@@ -322,10 +525,19 @@ def submit_pack():
             params["cell_adjusted_from"] = requested_cell
 
     # ETA estimate based on final (adjusted) params
-    if method == "sparrow":
+    if method in ("sparrow", "stacking", "compartment"):
         box_vol = box_l * box_w * box_h
         eta_s = max(2, min(120, box_vol / 40000))
         eta_label = f"{eta_s:.0f}s"
+    elif method == "spectral":
+        # Spectral: ~3s per placement at 2mm cell, ~80-120 placements
+        box_vol = box_l * box_w * box_h
+        n_place = min(150, max(20, box_vol / (28 * 37 * 97) * 0.5))
+        eta_s = max(10, n_place * 2.5)
+        if eta_s > 60:
+            eta_label = f"{eta_s/60:.1f}min"
+        else:
+            eta_label = f"{eta_s:.0f}s"
     else:
         eta_s = max(2, estimate_eta_s(cell, params["scan_vox"]))
         if eta_s > 60:
@@ -344,6 +556,7 @@ def submit_pack():
         "stl_path": "",
         "png_path": "",
         "placements": [],
+        "placements_partial": [],
         "verified": False,
         "created": time.time(),
     }
@@ -390,10 +603,16 @@ def get_pack_status(job_id):
         "verified": job["verified"],
     }
 
-    if job["status"] == "done":
+    if job["status"] == "running":
+        # Live packing preview (sparrow only) — the partial placement list the
+        # frontend renders incrementally while the job is still packing.
+        result["placements_partial"] = job.get("placements_partial") or []
+    elif job["status"] == "done":
         result["stl_url"] = f"/api/pack/{job_id}/stl"
         result["png_url"] = f"/api/pack/{job_id}/png"
         result["placements"] = job["placements"]
+        if job.get("compartment"):
+            result["compartment"] = job["compartment"]
     elif job["status"] == "error":
         result["error"] = job.get("error_msg", "Unknown error")
 
@@ -417,16 +636,126 @@ def get_pack_png(job_id):
     return send_file(job["png_path"], mimetype="image/png")
 
 
+@app.route("/api/boxes", methods=["POST"])
+def submit_boxes():
+    """Ranked Box Options: pack the STL into MULTIPLE box sizes and rank by cost/part.
+
+    Form fields:
+        stl            — STL file (required)
+        boxes          — optional JSON array of [l, w, h] (mm). If omitted the
+                         legacy box_l/box_w/box_h fields are used.
+        method         — "sparrow" (default, coarse cell 2.0) or "voxel"
+        piece_weight   — kg per piece (from material) for freight weight
+        box_cost       — € per box (e.g. carton price)
+        packaging_cost — € per box (dunnage/tape)
+        freight_per_kg — € per kg of content (alternative to m3)
+        freight_per_m3 — € per m3 of box volume (alternative to kg)
+    """
+    if "stl" not in request.files:
+        return jsonify({"error": "Missing 'stl' file"}), 400
+
+    stl_data = request.files["stl"].read()
+
+    boxes = []
+    boxes_raw = request.form.get("boxes")
+    if boxes_raw:
+        try:
+            parsed = json.loads(boxes_raw)
+            for b in parsed:
+                if isinstance(b, dict):
+                    boxes.append([float(b.get("l", 0)), float(b.get("w", 0)), float(b.get("h", 0))])
+                elif len(b) == 3:
+                    boxes.append([float(b[0]), float(b[1]), float(b[2])])
+        except Exception as e:
+            return jsonify({"error": f"Invalid 'boxes' JSON: {e}"}), 400
+    if not boxes:
+        boxes = [[
+            float(request.form.get("box_l", 385)),
+            float(request.form.get("box_w", 285)),
+            float(request.form.get("box_h", 150)),
+        ]]
+    boxes = [b for b in boxes if b[0] > 0 and b[1] > 0 and b[2] > 0]
+    if not boxes:
+        return jsonify({"error": "No valid boxes provided"}), 400
+
+    try:
+        params = {
+            "method": request.form.get("method", "sparrow"),
+            "cell": float(request.form.get("cell", 2.0) or 2.0),
+            "piece_weight": float(request.form.get("piece_weight", 0) or 0),
+            "box_cost": float(request.form.get("box_cost", 0) or 0),
+            "packaging_cost": float(request.form.get("packaging_cost", 0) or 0),
+            "freight_per_kg": float(request.form.get("freight_per_kg", 0) or 0),
+            "freight_per_m3": float(request.form.get("freight_per_m3", 0) or 0),
+        }
+    except ValueError as e:
+        return jsonify({"error": f"Invalid cost/weight value: {e}"}), 400
+
+    job_id = str(uuid.uuid4())
+    job = {
+        "job_id": job_id,
+        "kind": "boxes",
+        "status": "queued",
+        "boxes": [],
+        "progress": {"current": 0, "total": len(boxes)},
+        "current_box": boxes[0],
+        "cost_config": {
+            "box_cost": params["box_cost"],
+            "packaging_cost": params["packaging_cost"],
+            "freight_per_kg": params["freight_per_kg"],
+            "freight_per_m3": params["freight_per_m3"],
+            "piece_weight": params["piece_weight"],
+            "method": params["method"],
+            "cell": params["cell"],
+        },
+        "created": time.time(),
+    }
+
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+
+    threading.Thread(target=run_boxes_job,
+                     args=(job, stl_data, boxes, params),
+                     daemon=True).start()
+
+    return jsonify({
+        "job_id": job_id,
+        "status": "queued",
+        "boxes_count": len(boxes),
+        "check_url": f"/api/boxes/{job_id}",
+    })
+
+
+@app.route("/api/boxes/<job_id>")
+def get_boxes_status(job_id):
+    job = JOBS.get(job_id)
+    if not job or job.get("kind") != "boxes":
+        return jsonify({"error": "Job not found"}), 404
+
+    result = {
+        "job_id": job["job_id"],
+        "status": job["status"],
+        "boxes": job.get("boxes") or [],
+        "progress": job.get("progress"),
+        "current_box": job.get("current_box"),
+        "cost_config": job.get("cost_config"),
+    }
+    if job["status"] == "error":
+        result["error"] = job.get("error_msg", "Unknown error")
+    return jsonify(result)
+
+
 @app.route("/api/jobs")
 def list_jobs():
     jobs_list = [{
         "job_id": j["job_id"][:8] + "...",
         "status": j["status"],
-        "pieces": j["pieces"],
-        "fill_pct": j["fill_pct"],
-        "time_s": j["time_s"],
-        "created": j["created"],
-    } for j in sorted(JOBS.values(), key=lambda j: -j["created"])[:20]]
+        "pieces": j.get("pieces", 0),
+        "fill_pct": j.get("fill_pct", 0),
+        "time_s": j.get("time_s", 0),
+        "created": j.get("created", 0),
+        "kind": j.get("kind", "pack"),
+    } for j in sorted(JOBS.values(), key=lambda j: -j.get("created", 0))[:20]]
     return jsonify({"jobs": jobs_list, "total": len(JOBS), "gpu_available": HAS_CUDA})
 
 

@@ -245,51 +245,60 @@ export class PhysicsWorld {
             return false; // Vibration finished
         }
         
-        // Calculate vibration offset using sine waves
+        // Calculate vibration offset using MULTI-FREQUENCY sine waves:
+        //  - a LOW-frequency, higher-amplitude "jostle" wave that knocks pieces
+        //    out of arches and into the low spots
+        //  - a HIGH-frequency, lower-amplitude "settle" wave that keeps the top
+        //    layer fluid so it slides into gaps
+        //  - a slow "thump" pulse that periodically punches the whole box to
+        //    break up any arch that forms mid-cycle
         const t = this.vibrationTime / 1000; // seconds
         const progress = this.vibrationTime / this.vibrationDuration; // 0 to 1
         const baseFreq = this.vibrationFrequency;
         const baseAmp = this.vibrationAmplitude;
         
-        // LID BOOST: keep neutral to avoid ejecting pieces
-        const lidBoost = 1.0;
-
-        // Amplitude factor: decrease over time UNLESS we are in lid boost phase
-        const ampFactor = lidBoost > 1.0 ? 1.0 : Math.max(0, 1.0 - progress);
+        // PROGRESSIVE AMPLITUDE ENVELOPE:
+        // Strong at the start (breaks arches), decaying smoothly to near zero
+        // so pieces settle into the low spots without being re-jostled at the end.
+        const env = Math.pow(1 - progress, 1.15);
         
-        // Multi-frequency vibration with stronger vertical component
-        const lateralFactor = (lidBoost > 1.0 || progress < 0.5) ? 1.0 : 0.5;
-        const verticalFactor = (lidBoost > 1.0 || progress < 0.5) ? 0.8 : 1.2;
+        // Slow ~0.5 Hz thump that periodically punches the box to break arches.
+        const thump = 0.6 + 0.4 * Math.sin(2 * Math.PI * 0.5 * t + Math.sin(2 * Math.PI * 0.5 * t + 1.7));
         
         // Apply offset to all walls
         for (let i = 0; i < this.wallBodies.length; i++) {
             const body = this.wallBodies[i];
             const orig = this.wallOriginalPositions[i];
             const phase = this.vibrationPhaseOffsets[i] || { px: 0, py: 0, pz: 0, freqScale: 1, ampScale: 1 };
-            const freq = baseFreq * phase.freqScale;
-            const amp = baseAmp * phase.ampScale * lidBoost;
-            const noise = (Math.random() * 2 - 1) * this.vibrationNoise;
+            
+            const fLow = baseFreq * phase.freqScale;
+            const fHigh = fLow * 3.7; // high-frequency settle component
+            const amp = baseAmp * phase.ampScale * env;
+            const noise = (Math.random() * 2 - 1) * this.vibrationNoise * env;
 
-            const offsetX = amp * ampFactor * lateralFactor * (
-                Math.sin(2 * Math.PI * freq * t + phase.px) +
-                0.5 * Math.sin(2 * Math.PI * freq * 2.3 * t + phase.px * 0.7)
-            ) + noise;
-            const offsetY = amp * ampFactor * verticalFactor * (
-                Math.sin(2 * Math.PI * freq * 1.5 * t + phase.py + 0.5) +
-                0.3 * Math.sin(2 * Math.PI * freq * 3.7 * t + phase.py * 0.9)
-            ) + noise * 0.5;
-            const offsetZ = amp * ampFactor * lateralFactor * (
-                Math.sin(2 * Math.PI * freq * 1.1 * t + phase.pz + 1.0) +
-                0.5 * Math.sin(2 * Math.PI * freq * 2.7 * t + phase.pz * 0.6)
-            ) + noise;
+            // Horizontal (X): full multi-frequency + thump
+            const jx = Math.sin(2 * Math.PI * fLow * t + phase.px) +
+                       0.5 * Math.sin(2 * Math.PI * fHigh * t + phase.px * 0.7) +
+                       thump * 0.6 * Math.sin(2 * Math.PI * fLow * 0.5 * t + phase.px * 1.3);
+            // Vertical (Y): softer so pieces lift-and-drop instead of launching;
+            // floor (index 0) only gets a light nudge (never enough to eject pieces)
+            const jy = Math.sin(2 * Math.PI * fLow * 1.3 * t + phase.py + 0.5) +
+                       0.4 * Math.sin(2 * Math.PI * fHigh * 0.9 * t + phase.py * 0.9) +
+                       thump * 0.4 * Math.sin(2 * Math.PI * fLow * 0.7 * t + phase.py * 1.1 + 0.5);
+            // Horizontal (Z): full multi-frequency + thump
+            const jz = Math.sin(2 * Math.PI * fLow * 1.1 * t + phase.pz + 1.0) +
+                       0.5 * Math.sin(2 * Math.PI * fHigh * t + phase.pz * 0.6) +
+                       thump * 0.6 * Math.sin(2 * Math.PI * fLow * 0.5 * t + phase.pz * 1.3 + 1.0);
+
+            const offsetX = amp * jx + noise;
+            const offsetZ = amp * jz + noise;
+            let offsetY = amp * jy + noise * 0.5;
+            if (i === 0) offsetY = amp * 0.35 * jy; // Floor: light vertical only
 
             if (body.isValid()) {
-                // EXCLUDE vertical vibration from floor (index 0) to prevent launching pieces
-                const actualOffsetY = (i === 0) ? 0 : offsetY;
-                
                 body.setNextKinematicTranslation({
                     x: orig.x + offsetX,
-                    y: orig.y + actualOffsetY,
+                    y: orig.y + offsetY,
                     z: orig.z + offsetZ
                 });
             }
@@ -611,9 +620,11 @@ export class PhysicsWorld {
             const significantlyAbove = pos.y > height + 20; 
             shouldRemove = completelyOutside || horizOutside || significantlyAbove;
         }
-        // Level 2: Strict - Final report cleanup
+        // Level 2: Strict - Final report cleanup (with small wall tolerance so
+        // pieces resting against the walls aren't over-removed)
         else if (strictness === 2) {
-            const horizOutside = maxX < 0 || minX > length || maxZ < 0 || minZ > width;
+            const wallTol = 5;
+            const horizOutside = maxX < -wallTol || minX > length + wallTol || maxZ < -wallTol || minZ > width + wallTol;
             const heightTolerance = pieceDims ? Math.min(20, pieceDims.h * 0.3) : 20;
             shouldRemove = completelyOutside || horizOutside || maxY > height + heightTolerance;
         }
@@ -769,14 +780,29 @@ export class PhysicsWorld {
                 }
                 break;
                 
-            case 'holding':
+            case 'holding': {
                 this.lidHoldTime += dtMs;
+                // MICRO-VIBRATION (shake-and-press): while the lid is pressing,
+                // give it small high-frequency lateral motions so the top layer
+                // vibrates into the gaps below instead of just being crushed.
+                // The shake tapers off over the hold so pieces settle in place.
+                const holdProgress = Math.min(1, this.lidHoldTime / 3000);
+                const shakeAmp = 1.6 * Math.max(0.25, 1 - holdProgress);
+                const shakeFreq = 16;
+                const sx = shakeAmp * Math.sin(2 * Math.PI * shakeFreq * this.lidHoldTime / 1000 + 0.7);
+                const sz = shakeAmp * Math.cos(2 * Math.PI * shakeFreq * 0.9 * this.lidHoldTime / 1000);
+                this.lidBody.setNextKinematicTranslation({
+                    x: this.boxDims.length / 2 + sx,
+                    y: pos.y,
+                    z: this.boxDims.width / 2 + sz
+                });
                 if (this.lidHoldTime > 3000) { // Hold 3 seconds
                     this.lidState = 'ascending';
                     this.stopVibration(); // Stop vibration when we start lifting
                     console.log('Lid ascending...');
                 }
                 break;
+            }
                 
             case 'ascending':
                 const startY = this.boxDims.height + 200;
@@ -971,12 +997,12 @@ export class BulkSimulation {
         // Saturation detection - stop if no new pieces enter box after X drops
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
-        this.maxStagnantDrops = 80; // Stop after 80 consecutive checks without increase
+        this.maxStagnantDrops = 8; // Stop after 8 consecutive checks without increase
         this.checkInterval = 30; // Check every 30 drops
         
         // Track pieces above box to detect overflow faster
         this.piecesAboveBox = 0;
-        this.maxPiecesAboveBox = 30; // If 30+ pieces are stuck above, box is full
+        this.maxPiecesAboveBox = 12; // If 12+ pieces are stuck above, box is full
         
         // 20 distinct colors for pieces - configurable
         this.pieceColors = [
@@ -1015,7 +1041,7 @@ export class BulkSimulation {
         
         // Refill cycles tracking
         this.currentCycle = 1;
-        this.maxRefillCycles = 3; // Up to 3 refill attempts (Total 4 cycles)
+        this.maxRefillCycles = 1; // Single refill, single final lid press
 
         // Enable lid press for compaction between cycles
         this.enableLidPress = true;
@@ -1046,13 +1072,13 @@ export class BulkSimulation {
         this.boxDims = boxDims;
         this.pieceDims = pieceDims;
         this.stlGeometry = stlGeometry;
-        this.maxPieces = autoMode ? 50000 : maxPieces; // Much higher limit in auto mode (50k)
+        this.maxPieces = autoMode ? 20000 : maxPieces; // High limit in auto mode (safety cap)
         this.dropHeight = dropHeight;
         this.dropIntervalMs = dropIntervalMs;
         this.randomRotation = randomRotation;
         this.droppedCount = 0;
         this.autoMode = autoMode;
-        this.maxOverflow = autoMode ? 100 : 20; // Allow more overflow in auto mode
+        this.maxOverflow = autoMode ? 12 : 20; // Stop soon after pieces start falling out
         this.overflowCount = 0;
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
@@ -1088,8 +1114,12 @@ export class BulkSimulation {
         // Setup settled callback (FINAL completion only)
         // Setup settled callback (FINAL completion only)
         this.physics.onSettled = (count) => {
-            // This is now only called via the manual check in the Lid callback
-            this.finishSimulation();
+            // Guard: only finish once the lid press is done and we are in the
+            // final settle phase — otherwise pieces settling briefly between
+            // drops (or during the compaction vibration) would end the sim early.
+            if (this.allDropped && this.hasPressedLid && this.physics.lidState === 'finished') {
+                this.finishSimulation();
+            }
         };
 
         // Create box visualization
@@ -1136,7 +1166,7 @@ export class BulkSimulation {
             this.onStatusUpdate({
                 status: 'running',
                 dropped: 0,
-                message: `▶️ Simulació iniciada... ${modeText}`
+                message: `Simulació iniciada... ${modeText}`
             });
         }
     }
@@ -1384,6 +1414,8 @@ export class BulkSimulation {
         
         clearInterval(this.dropInterval);
         this.dropInterval = null;
+        clearInterval(this.refillInterval);
+        this.refillInterval = null;
         
         const reasonText = reason === 'overflow' 
             ? `(caixa plena - ${this.maxOverflow} peces han caigut fora)`
@@ -1409,8 +1441,10 @@ export class BulkSimulation {
             });
         }
         
-        // 3. START CONCURRENT LID (after 1s delay) or finish after vibration
-        if (this.enableLidPress) {
+        // 3. Vibrate and press CONCURRENTLY — but press only on the FINAL
+        //    cycle so there is exactly one lid compression.
+        const isFinalCycle = this.currentCycle > this.maxRefillCycles;
+        if (this.enableLidPress && isFinalCycle) {
             setTimeout(() => {
                 if (!this.isRunning) return;
                 this.hasPressedLid = true;
@@ -1425,10 +1459,11 @@ export class BulkSimulation {
                 this.physics.startLidSequence(this.scene, () => {
                     this.vibrationPhase = false; // Ensure vibration phase flag is cleared
                     this.physics.stopVibration(); // Stop shaking immediately to speed up cycle
-                    this.finishSimulation();
+                    this.finalSettle();
                 });
             }, 1000); // 1 second headstart for vibration
         } else {
+            // Non-final cycle: vibrate only, then refill
             setTimeout(() => {
                 if (!this.isRunning) return;
                 this.vibrationPhase = false;
@@ -1449,6 +1484,45 @@ export class BulkSimulation {
     /**
      * Finalize simulation after Lid Press
      */
+    /**
+     * Post-lid settle phase: a short, gentle vibration to let the compacted
+     * pieces settle fully, then finish once everything is at rest.
+     * If the pieces never settle within the safety window we force-finish.
+     */
+    finalSettle(settleTimeoutMs = 10000) {
+        this.physics.settledCount = 0;
+        // Gentle tail: keep a modest amplitude so the top layer still has some
+        // freedom to settle, but drop the noise so it goes quiet at the end.
+        this.physics.vibrationAmplitude = Math.max(0.5, this.physics.vibrationAmplitude * 0.6);
+        this.physics.vibrationNoise = Math.min(this.physics.vibrationNoise, 0.05);
+        this.physics.startVibration(2000); // 2s gentle vibration
+        
+        // Wait for the pieces to reach equilibrium before finishing.
+        this.physics.onSettled = () => {
+            this.physics.stopVibration();
+            if (this.settlingTimeout) { clearTimeout(this.settlingTimeout); this.settlingTimeout = null; }
+            this.finishSimulation();
+        };
+        
+        // Safety: never block completion on a stuck pile.
+        this.settlingTimeout = setTimeout(() => {
+            if (this.isRunning) {
+                this.physics.stopVibration();
+                this.finishSimulation();
+            }
+        }, settleTimeoutMs);
+        
+        if (this.onStatusUpdate) {
+            this.onStatusUpdate({
+                status: 'settling',
+                message: 'Premsat finalitzat. Deixant assentir les peces...'
+            });
+        }
+    }
+
+    /**
+     * Force finish after timeout
+     */
     finishSimulation() {
         // Final Cleanup for this cycle (Relaxed Level 0)
         const semiRemoved = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 0);
@@ -1464,7 +1538,16 @@ export class BulkSimulation {
             // Calculate proactive refill amount
             // Estimate space for at least 80% of maxPieces or at least 50 pieces
             const proactiveAmount = Math.max(50, Math.floor(this.maxPieces * 0.8));
-            const refillCount = Math.max(proactiveAmount, semiRemoved + 20);
+            let refillCount = Math.max(proactiveAmount, semiRemoved + 20);
+            // In auto mode maxPieces is a huge safety cap (20000) — cap the refill
+            // to a sane multiple of the box's real volumetric capacity instead,
+            // so we don't try to "add 16000 pieces" to a near-full box.
+            if (this.autoMode && this.pieceDims) {
+                const pieceVol = Math.max(1, this.pieceDims.l * this.pieceDims.w * this.pieceDims.h);
+                const boxVol = Math.max(1, this.boxDims.length * this.boxDims.width * this.boxDims.height);
+                const approxCapacity = Math.max(1, Math.floor(boxVol / pieceVol));
+                refillCount = Math.min(refillCount, Math.max(50, approxCapacity * 2));
+            }
             
             if (this.onStatusUpdate) {
                 this.onStatusUpdate({
@@ -1547,6 +1630,19 @@ export class BulkSimulation {
         this.isRunning = false;
         this.physics.pause();
         this.physics.stopVibration(); // Stop any active vibration
+
+        // Remove the lid if it's still around (e.g. force-finished mid-press)
+        if (this.physics.lidBody) {
+            if (this.physics.lidBody.isValid()) this.physics.world.removeRigidBody(this.physics.lidBody);
+            this.physics.lidBody = null;
+        }
+        if (this.physics.lidMesh) {
+            if (this.physics.lidMesh.parent) this.physics.lidMesh.parent.remove(this.physics.lidMesh);
+            if (this.physics.lidMesh.geometry) this.physics.lidMesh.geometry.dispose();
+            if (this.physics.lidMesh.material) this.physics.lidMesh.material.dispose();
+            this.physics.lidMesh = null;
+        }
+        this.physics.lidState = 'idle';
         
         if (this.dropInterval) {
             clearInterval(this.dropInterval);
