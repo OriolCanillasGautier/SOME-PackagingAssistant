@@ -1740,16 +1740,17 @@ class BestPacker:
         return best_oi
 
     @staticmethod
-    def _pick_compartment_ori(oris, box_l, box_h, box_w, cell_size):
+    def _pick_compartment_ori(oris, box_l, box_h, box_w, cell_size, gap=None):
         """Pick the orientation that maximizes the compartment grid:
         score = (cells along L) × (cells along W) × (max layers in H).
         Fills the box far better than min-footprint alone."""
+        if gap is None:
+            gap = cell_size
         best_oi, best_score = -1, -1.0
         for oi, o in enumerate(oris):
             sx_mm, sy_mm, sz_mm = o['size']
             if sx_mm > box_l + 0.01 or sy_mm > box_h + 0.01 or sz_mm > box_w + 0.01:
                 continue
-            gap = cell_size
             step_l = sx_mm + gap
             step_w = sz_mm + gap
             n_cells_l = max(1, int((box_l - sx_mm + 0.01) // step_l) + 1)
@@ -1786,12 +1787,59 @@ class BestPacker:
                 print("[Stacking] No orientation fits the box, falling back to greedy")
             return self.pack_greedy(max_pieces, verbose)
         vd = oris[best_oi]
+
+        # Smart stacking: small in-plane rotation variants (±1°, ±2°) of the
+        # chosen orientation. A flat piece with a protuberance (e.g. a ring
+        # with a bump) nests tighter when the bump can rotate out of the way
+        # layer by layer — the packer tries every variant at each placement
+        # and takes the one that nests LOWEST (ties keep the base pose).
+        # Only for the fixed-pose path: free orientation already explores
+        # coarse angles, and the variants only make sense around one pose.
+        variants = None
+        if getattr(self, '_fixed_orientation', False) and getattr(self, '_smart_stack', True):
+            variants = [vd]
+            for ang in (1.0, -1.0, 2.0, -2.0):
+                var = _inplane_rotated_variant(vd, ang, cell_size)
+                if var is not None:
+                    variants.append(var)
+            # Register variants in the shared orientation list so placements,
+            # refinement and the final mesh rebuild all stay consistent.
+            self._sparrow_voxel_data = oris + variants[1:]
+            if verbose:
+                print(f"[Stacking] smart stacking: {len(variants)} in-plane variants", flush=True)
+
         sp = vd['sparse']
         sx_v, sy_v, sz_v = vd['shape']
         px, py, pz = sp[:, 0], sp[:, 1], sp[:, 2]
 
+        if variants is not None:
+            v_sparse = [v['sparse'] for v in variants]
+            v_px = [v['sparse'][:, 0] for v in variants]
+            v_py = [v['sparse'][:, 1] for v in variants]
+            v_pz = [v['sparse'][:, 2] for v in variants]
+            v_shape = [v['shape'] for v in variants]
+            v_hm = [v['hm'] for v in variants]
+            v_mesh = [v['mesh'] for v in variants]
+            v_name = [v['name'] for v in variants]
+            v_oi = [best_oi] + [len(oris) + k - 1 for k in range(1, len(variants))]
+            max_sy = max(s[1] for s in v_shape)
+            # Variants can be 1-2 voxels larger than the base after rotation
+            # re-gridding — scan bounds use the widest footprint so no
+            # variant ever indexes outside the box grid.
+            scan_sx = max(s[0] for s in v_shape)
+            scan_sz = max(s[2] for s in v_shape)
+        else:
+            scan_sx, scan_sz = sx_v, sz_v
+
         box_occ = np.zeros((nx_vox, ny_vox, nz_vox), dtype=np.uint8)
         box_hm = np.zeros((nx_vox, nz_vox), dtype=np.int32)
+        # Per-anchor cache of the last placement base. Occupancy only grows,
+        # so the lowest free y in a column is monotonic: a new piece can nest
+        # at most the piece's own height into the piece below. Scanning from
+        # base_prev - max_height instead of 0 keeps the valley scan O(piece
+        # height) instead of O(column depth) — the dominant cost for flat
+        # parts stacked dozens of layers deep.
+        base_cache = np.zeros((nx_vox, nz_vox), dtype=np.int32) if variants is None else {}
         placed, meshes = [], []
         t0 = time.time()
 
@@ -1803,10 +1851,10 @@ class BestPacker:
         # Scan every voxel position (concave parts interleave in adjacent
         # columns). For each position, stack pieces with valley nesting until
         # no more fit, then move on.
-        for gx in range(0, nx_vox - sx_v + 1):
+        for gx in range(0, nx_vox - scan_sx + 1):
             if len(placed) >= max_pieces:
                 break
-            for gz in range(0, nz_vox - sz_v + 1):
+            for gz in range(0, nz_vox - scan_sz + 1):
                 if len(placed) >= max_pieces:
                     break
                 cx, cz = gx + px, gz + pz
@@ -1815,30 +1863,74 @@ class BestPacker:
                     rim = int((box_hm[cx, cz] - py).max())
                     if rim < 0:
                         rim = 0
-                    if rim + sy_v > ny_vox:
-                        break
-                    # Valley nesting: scan from y=0 up to the rim and take the
-                    # LOWEST collision-free position — pieces drop into the
-                    # concave cavity of the piece below instead of resting on
-                    # the rim. Cap at rim so we never float.
-                    base = None
-                    for try_y in range(0, rim + 1):
-                        wy = try_y + py
-                        if not box_occ[cx, wy, cz].any():
-                            base = try_y
+                    if variants is not None:
+                        if rim + max_sy > ny_vox:
                             break
-                    if base is None:
+                    elif rim + sy_v > ny_vox:
                         break
-                    wy = base + py
-                    box_occ[cx, wy, cz] = 1
-                    box_hm[gx:gx + sx_v, gz:gz + sz_v] = np.maximum(
-                        box_hm[gx:gx + sx_v, gz:gz + sz_v], base + vd['hm'])
+                    # Valley nesting: scan from the cached lower bound up to
+                    # the rim and take the LOWEST collision-free position —
+                    # pieces drop into the concave cavity of the piece below
+                    # instead of resting on the rim. Cap at rim so we never
+                    # float. Occupancy only grows, so the lowest free y for a
+                    # GIVEN footprint is monotonic — but the cache must be
+                    # per variant: rotated variants have slightly different
+                    # footprints and can nest lower than the base pose's.
+                    if variants is None:
+                        scan_lo = int(base_cache[gx, gz])
+                        base = None
+                        for try_y in range(scan_lo, rim + 1):
+                            wy = try_y + py
+                            if not box_occ[cx, wy, cz].any():
+                                base = try_y
+                                break
+                        if base is None:
+                            break
+                        v_sel = 0
+                    else:
+                        base_v = None
+                        # A rotated variant must nest MEANINGFULLY lower to be
+                        # worth the pattern disruption: at least 25% of the
+                        # piece's voxel height (min 1 cell). Flat parts
+                        # (thin pieces) benefit hugely from a 1-cell win;
+                        # bulky parts would just get a noisier pattern.
+                        gain_required = max(1, v_shape[0][1] // 4)
+                        for vi in range(len(variants)):
+                            if rim + v_shape[vi][1] > ny_vox:
+                                continue
+                            scan_lo = int(base_cache.get((gx, gz, vi), 0))
+                            for try_y in range(scan_lo, rim + 1):
+                                wy = try_y + v_py[vi]
+                                if not box_occ[gx + v_px[vi], wy, gz + v_pz[vi]].any():
+                                    if (vi == 0 and (base_v is None or try_y < base_v[0])) or (
+                                        vi != 0 and (base_v is None
+                                                     or try_y + gain_required <= base_v[0])):
+                                        base_v = (try_y, vi)
+                                    break
+                        if base_v is None:
+                            break
+                        base, v_sel = base_v
+                    if variants is None:
+                        base_cache[gx, gz] = base
+                    else:
+                        base_cache[(gx, gz, v_sel)] = base
+                    wy = base + (py if variants is None else v_py[v_sel])
+                    cx_v = cx if variants is None else gx + v_px[v_sel]
+                    cz_v = cz if variants is None else gz + v_pz[v_sel]
+                    box_occ[cx_v, wy, cz_v] = 1
+                    hm_v = vd['hm'] if variants is None else v_hm[v_sel]
+                    sh_x = sx_v if variants is None else v_shape[v_sel][0]
+                    sh_z = sz_v if variants is None else v_shape[v_sel][2]
+                    box_hm[gx:gx + sh_x, gz:gz + sh_z] = np.maximum(
+                        box_hm[gx:gx + sh_x, gz:gz + sh_z], base + hm_v)
                     x_mm = gx * cell_size
                     y_mm = base * cell_size
                     z_mm = gz * cell_size
-                    cm = vd['mesh'].copy()
+                    oi_sel = best_oi if variants is None else v_oi[v_sel]
+                    name_sel = vd['name'] if variants is None else v_name[v_sel]
+                    cm = (vd['mesh'] if variants is None else v_mesh[v_sel]).copy()
                     cm.apply_translation([x_mm, y_mm, z_mm])
-                    placed.append((x_mm, y_mm, z_mm, best_oi, vd['name']))
+                    placed.append((x_mm, y_mm, z_mm, oi_sel, name_sel))
                     meshes.append(cm)
                     if progress_callback and len(placed) % 5 == 0:
                         progress_callback(len(placed), time.time() - t0, list(placed))
@@ -1853,11 +1945,100 @@ class BestPacker:
             print(f"  [Stacking] DONE: {len(placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
         return placed, meshes
 
+    # ── Bounding-box grid (Graella / Compartment) ──
+
+    def pack_bbox_grid(self, gap=0.0, verbose=True, progress_callback=None):
+        """Exact axis-aligned bounding-box grid — the same math as the
+        frontend's planar Graella: piece pitch = bounding box + gap, layers =
+        floor(boxH / (bbH + gap)). Tries the pose as-is and its 90° in-plane
+        swap. With gap 0 the boxes touch exactly; with the cardboard
+        thickness as gap the cells match the divider pitch.
+
+        Registers the two orientations (0° / 90°, mesh min-corner at origin)
+        in self._sparrow_voxel_data so placement formatting and the final
+        mesh rebuild work unchanged. Returns (placed, meshes) — the meshes
+        are already positioned; callers must NOT re-run voxel refinement."""
+        src = getattr(self, '_source_mesh', None)
+        if src is None:
+            if verbose:
+                print("[Grid] No source mesh, falling back to greedy")
+            return self.pack_greedy(5000, verbose)
+
+        def _norm(mesh):
+            b = mesh.bounds
+            mesh.apply_translation(-b[0])
+            return mesh
+
+        m0 = _norm(src.copy())
+        b0 = m0.bounds
+        d0 = (b0[1][0] - b0[0][0], b0[1][1] - b0[0][1], b0[1][2] - b0[0][2])
+        rot0 = np.eye(3)
+
+        m90 = src.copy()
+        tr = trimesh.transformations.rotation_matrix(math.pi / 2, [0, 1, 0],
+                                                     src.bounds.mean(axis=0))
+        m90.apply_transform(tr)
+        m90 = _norm(m90)
+        b90 = m90.bounds
+        d90 = (b90[1][0] - b90[0][0], b90[1][1] - b90[0][1], b90[1][2] - b90[0][2])
+        rot90 = trimesh.transformations.rotation_matrix(math.pi / 2, [0, 1, 0], [0, 0, 0])[:3, :3]
+
+        candidates = [(m0, rot0, d0, 'Graella 0°'), (m90, rot90, d90, 'Graella 90°')]
+        scored = []
+        for mesh, rot, (pl, pw, ph), name in candidates:
+            if pl > self.box_l + 0.01 or ph > self.box_h + 0.01 or pw > self.box_w + 0.01:
+                continue
+            nx = int((self.box_l - pl + 1e-6) // (pl + gap)) + 1
+            nz = int((self.box_w - pw + 1e-6) // (pw + gap)) + 1
+            ny = max(1, int(self.box_h // max(0.01, ph + gap)))
+            scored.append((nx * nz * ny, nx, nz, ny, mesh, rot, name, pl, pw, ph))
+        if not scored:
+            if verbose:
+                print("[Grid] Nothing fits, falling back to greedy")
+            return self.pack_greedy(5000, verbose)
+
+        scored.sort(key=lambda e: -e[0])
+        _score, nx, nz, ny, mesh, rot, name, pl, pw, ph = scored[0]
+
+        # Register the two grid orientations for the placement pipeline.
+        grid_oris = [
+            {'mesh': m0, 'rotation': rot0, 'name': 'Graella 0°', 'size': d0, 'shape': (1, 1, 1), 'sparse': None, 'hm': None},
+            {'mesh': m90, 'rotation': rot90, 'name': 'Graella 90°', 'size': d90, 'shape': (1, 1, 1), 'sparse': None, 'hm': None},
+        ]
+        self._sparrow_voxel_data = grid_oris
+        self._sparrow_cell_size = 1.0
+        used_oi = 0 if (pl, pw, ph) == d0 else 1
+
+        placed, meshes = [], []
+        t0 = time.time()
+        for k in range(ny):
+            for j in range(nz):
+                for i in range(nx):
+                    x = i * (pl + gap)
+                    y = k * (ph + gap)
+                    z = j * (pw + gap)
+                    cm = mesh.copy()
+                    cm.apply_translation([x, y, z])
+                    placed.append((round(x, 3), round(y, 3), round(z, 3), used_oi, name))
+                    meshes.append(cm)
+                    if progress_callback and len(placed) % 100 == 0:
+                        progress_callback(len(placed), time.time() - t0, list(placed))
+        self._compartment_cell = (pl + gap, pw + gap, ny, ph + gap)
+        if verbose:
+            print(f"  [Grid] DONE: {len(placed)} pieces ({nx}×{nz}×{ny}), gap={gap}mm, "
+                  f"{time.time() - t0:.1f}s", flush=True)
+        return placed, meshes
+
     # ── Compartment: one part per clean grid cell ──
 
-    def pack_compartment(self, max_pieces=500, cell_size=None, verbose=True, progress_callback=None):
+    def pack_compartment(self, max_pieces=500, cell_size=None, verbose=True, progress_callback=None, gap=None):
         if cell_size is None:
             cell_size = 1.5
+        # Inter-piece gap: contact (0) for the plain grid, the cardboard
+        # thickness for compartment packing, or one voxel by default so the
+        # voxel shells never touch.
+        if gap is None:
+            gap = cell_size
         oris = self._prepare_voxel_orients(cell_size, verbose)
         if oris is None:
             if verbose:
@@ -1868,7 +2049,7 @@ class BestPacker:
         ny_vox = int(math.ceil(self.box_h / cell_size))
         nz_vox = int(math.ceil(self.box_w / cell_size))
 
-        best_oi = self._pick_compartment_ori(oris, self.box_l, self.box_h, self.box_w, cell_size)
+        best_oi = self._pick_compartment_ori(oris, self.box_l, self.box_h, self.box_w, cell_size, gap)
         if best_oi < 0:
             if verbose:
                 print("[Compartment] No orientation fits the box, falling back to greedy")
@@ -1879,7 +2060,6 @@ class BestPacker:
         sx_v, sy_v, sz_v = vd['shape']
         px, py, pz = sp[:, 0], sp[:, 1], sp[:, 2]
 
-        gap = cell_size
         step_x = max(sx_v, int(round((sx_mm + gap) / cell_size)))
         step_z = max(sz_v, int(round((sz_mm + gap) / cell_size)))
         n_layers = max(1, int(self.box_h // max(0.01, sy_mm + gap)))
@@ -2165,6 +2345,60 @@ def _column_extents(sp, offset, axis):
     return dict(zip(cols, zip(mins, maxs)))
 
 
+def _inplane_rotated_variant(vd, angle_deg, cell_size):
+    """Rotate a voxel orientation's sparse shell by `angle_deg` around the
+    vertical (Y) axis and re-discretize onto the same voxel grid.
+
+    Cheap alternative to re-voxelizing a rotated mesh — accurate enough for
+    small angles (±1-2°) where the rotated shape shifts by a voxel or two.
+    Returns a new orientation dict (sparse/shape/hm/size/mesh/name/rotation)
+    compatible with the packing pipeline, or None on degenerate input.
+    """
+    sp = vd.get('sparse')
+    if sp is None or len(sp) < 3:
+        return None
+    th = math.radians(angle_deg)
+    c, s = math.cos(th), math.sin(th)
+    cx = (sp[:, 0].min() + sp[:, 0].max()) / 2.0
+    cz = (sp[:, 2].min() + sp[:, 2].max()) / 2.0
+    dx = sp[:, 0].astype(np.float64) - cx
+    dz = sp[:, 2].astype(np.float64) - cz
+    rx = c * dx - s * dz + cx
+    rz = s * dx + c * dz + cz
+    new = np.stack([np.rint(rx).astype(np.int32), sp[:, 1],
+                    np.rint(rz).astype(np.int32)], axis=1)
+    new -= new.min(axis=0)
+    new = np.unique(new, axis=0)
+    shape = tuple(int(v) + 1 for v in new.max(axis=0))
+    hm = np.zeros((shape[0], shape[2]), dtype=np.int32)
+    hm[new[:, 0], new[:, 2]] = np.maximum(hm[new[:, 0], new[:, 2]], new[:, 1])
+
+    mesh = None
+    if vd.get('mesh') is not None:
+        mesh = vd['mesh'].copy()
+        b = mesh.bounds
+        mx = (b[0][0] + b[1][0]) / 2.0
+        mz = (b[0][2] + b[1][2]) / 2.0
+        rot = trimesh.transformations.rotation_matrix(th, [0, 1, 0], [mx, 0, mz])
+        mesh.apply_transform(rot)
+
+    rotation = None
+    if vd.get('rotation') is not None:
+        rv = trimesh.transformations.rotation_matrix(th, [0, 1, 0], [0, 0, 0])[:3, :3]
+        rotation = (rv @ np.asarray(vd['rotation'])).tolist()
+
+    return {
+        'mesh': mesh,
+        'size': tuple(float(v) * cell_size for v in shape),
+        'name': f"{vd.get('name', 'variant')}{angle_deg:+.0f}d",
+        'sparse': new,
+        'n_occ': int(len(new)),
+        'hm': hm,
+        'shape': shape,
+        'rotation': rotation,
+    }
+
+
 def refine_subvoxel(placed, oris, cell_size, n_rounds=3, verbose=False):
     """Tighten voxel placements at sub-voxel precision.
 
@@ -2186,6 +2420,14 @@ def refine_subvoxel(placed, oris, cell_size, n_rounds=3, verbose=False):
     if n < 2:
         return list(placed)
 
+    # Large packings: refinement is O(n²) per round and the FCL safety pass
+    # builds a collision manager over every mesh. Beyond these sizes the
+    # sub-voxel tightening isn't worth the wait — the grid placements are
+    # already collision-free, just not fully tightened.
+    if n > 1000:
+        return list(placed)
+    if n > 600:
+        n_rounds = 1
     max_cell = float(cell_size)
     half = 0.5 * max_cell
     bbox = [None] * n  # global (xmin, xmax, ymin, ymax, zmin, zmax)
@@ -2285,7 +2527,7 @@ def refine_subvoxel(placed, oris, cell_size, n_rounds=3, verbose=False):
     # server's verify() uses.
     moves = [tuple(refined[i][a] - placed[i][a] for a in range(3))
              for i in range(n)]
-    if _FCL_AVAILABLE and any(any(abs(m) > 1e-9 for m in mv) for mv in moves):
+    if _FCL_AVAILABLE and n <= 800 and any(any(abs(m) > 1e-9 for m in mv) for mv in moves):
         has_mesh = all('mesh' in oris[placed[i][3]] for i in range(n))
         if has_mesh:
             def _colliding(k):
@@ -2313,6 +2555,108 @@ def refine_subvoxel(placed, oris, cell_size, n_rounds=3, verbose=False):
                 refined = [tuple(placed[i][a] + k * moves[i][a] for a in range(3))
                            + (placed[i][3], placed[i][4]) for i in range(n)]
     return refined
+
+
+def descent_stack_contact(placed, oris, max_drop=3.0, n_max=1200, verbose=False):
+    """Drop each piece straight down onto the pieces below it until EXACT
+    mesh contact (FCL), closing the residual voxel-shell gaps so stacked
+    pieces visually touch. Pieces are processed top-down; each piece only
+    moves downward and only until the first contact, so the result stays
+    collision-free by construction.
+
+    Uses a spatial hash over the XZ plane so each piece only tests the
+    pieces in its neighbourhood instead of the whole packing.
+
+    Returns a NEW placed list with refined y positions. Callers must rebuild
+    meshes from the returned positions.
+    """
+    n = len(placed)
+    if n < 2 or n > n_max:
+        return placed
+
+    if not _FCL_AVAILABLE:
+        return placed
+    try:
+        from trimesh.collision import CollisionManager
+    except Exception:
+        return placed
+
+    meshes = []
+    bounds = []
+    for (x, y, z, oi, _name) in placed:
+        m = oris[oi]['mesh'].copy()
+        m.apply_translation([x, y, z])
+        meshes.append(m)
+        bounds.append(m.bounds)
+
+    fx = float(np.median([(b[1][0] - b[0][0]) for b in bounds])) or 10.0
+    fz = float(np.median([(b[1][2] - b[0][2]) for b in bounds])) or 10.0
+    buckets = {}
+    for i, b in enumerate(bounds):
+        key = (int((b[0][0] + b[1][0]) / 2.0 // fx), int((b[0][2] + b[1][2]) / 2.0 // fz))
+        buckets.setdefault(key, []).append(i)
+
+    out = [list(p) for p in placed]
+    t0 = time.time()
+    moved = 0
+
+    for key, members in buckets.items():
+        cand_all = []
+        seen = set()
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for j in buckets.get((key[0] + dx, key[1] + dz), ()):
+                    if j not in seen:
+                        seen.add(j)
+                        cand_all.append(j)
+        members_sorted = sorted(members, key=lambda i: -out[i][1])
+        for i in members_sorted:
+            pi = out[i]
+            b = bounds[i]
+            cands = [j for j in cand_all
+                     if j != i and out[j][1] < pi[1] - 1e-6
+                     and bounds[j][0][0] < b[1][0] and b[0][0] < bounds[j][1][0]
+                     and bounds[j][0][2] < b[1][2] and b[0][2] < bounds[j][1][2]]
+            if not cands:
+                continue
+            # The contact is decided by the highest pieces below — keep the
+            # top 30 by y (exact: any piece lower than the 30th can only be
+            # reached after hitting one of these). Massively cheaper FCL.
+            if len(cands) > 30:
+                cands = sorted(cands, key=lambda j: -out[j][1])[:30]
+            # Already resting on the highest candidate → skip the probes.
+            support_top = max(bounds[j][1][1] for j in cands)
+            if support_top + 0.06 >= b[0][1]:
+                continue
+            cm = CollisionManager()
+            for j in cands:
+                cm.add_object(f'p{j}', meshes[j])
+            piece = oris[placed[i][3]]['mesh'].copy()
+            lo, hi = 0.0, min(max_drop, pi[1])
+            for _ in range(6):
+                mid = (lo + hi) / 2.0
+                pm = piece.copy()
+                pm.apply_translation([pi[0], pi[1] - mid, pi[2]])
+                try:
+                    hits = cm.in_collision_single(pm, return_names=False)
+                except Exception:
+                    hits = True
+                if hits:
+                    lo = mid
+                else:
+                    hi = mid
+            drop = max(0.0, hi - 0.02)
+            if drop > 0.03:
+                out[i][1] = pi[1] - drop
+                nm = meshes[i].copy()
+                nm.apply_translation([0, -drop, 0])
+                meshes[i] = nm
+                bounds[i] = nm.bounds
+                moved += 1
+
+    if verbose:
+        print(f"  [Contact] {moved}/{n} pieces tightened, {time.time()-t0:.1f}s", flush=True)
+    return [tuple(p) for p in out]
 
 
 def detect_interlocking(placed, oris, cell_size):

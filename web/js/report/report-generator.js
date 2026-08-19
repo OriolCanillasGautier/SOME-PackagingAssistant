@@ -227,8 +227,9 @@ export class ReportGenerator {
     }
 
     /**
-     * Capture a small orthographic-style view for the report.
-     * Uses a black wireframe box on a white background.
+     * Capture a true 2D orthographic view for the report (blueprint-style):
+     * top = plan view, front/side = elevations, with no perspective
+     * convergence. Uses a black wireframe box on a white background.
      * @param {string} viewType - 'front' | 'top' | 'side'
      * @param {number} width - Image width
      * @param {number} height - Image height
@@ -236,8 +237,43 @@ export class ReportGenerator {
      */
     captureView(viewType, width = 720, height = 480, framing = 1.2) {
         return this._withRenderState(() => {
-            this._frameCamera(viewType, framing);
-            this.scene.renderer.render(this.scene.scene, this.scene.camera);
+            if (!this.scene.boxMesh) return null;
+
+            const box = new THREE.Box3().setFromObject(this.scene.boxMesh);
+            const center = new THREE.Vector3();
+            const size = new THREE.Vector3();
+            box.getCenter(center);
+            box.getSize(size);
+
+            // View plane dims + look direction per view type.
+            // Scene axes: box L=x, H=y, W=z. Top = L×W plane from above,
+            // front = L×H elevation, side = W×H elevation.
+            const plane = {
+                top: { h: size.x, v: size.z, dir: new THREE.Vector3(0, 1, 0), up: new THREE.Vector3(0, 0, -1) },
+                front: { h: size.x, v: size.y, dir: new THREE.Vector3(0, 0, 1), up: new THREE.Vector3(0, 1, 0) },
+                side: { h: size.z, v: size.y, dir: new THREE.Vector3(1, 0, 0), up: new THREE.Vector3(0, 1, 0) }
+            }[viewType] || null;
+            if (!plane) return null;
+
+            // Orthographic frustum fitted to the box (framing margin around)
+            const aspect = width / height;
+            let hExtent = (plane.h * framing) / 2;
+            let vExtent = (plane.v * framing) / 2;
+            if (hExtent / vExtent > aspect) {
+                vExtent = hExtent / aspect;
+            } else {
+                hExtent = vExtent * aspect;
+            }
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const near = 0.1;
+            const far = maxDim * 6;
+            const camera = new THREE.OrthographicCamera(-hExtent, hExtent, vExtent, -vExtent, near, far);
+            camera.position.copy(center).addScaledVector(plane.dir, far / 2);
+            camera.up.copy(plane.up);
+            camera.lookAt(center);
+            camera.updateProjectionMatrix();
+
+            this.scene.renderer.render(this.scene.scene, camera);
             return this.scene.renderer.domElement.toDataURL('image/png');
         }, {
             width,
@@ -322,10 +358,10 @@ export class ReportGenerator {
      */
     async generatePDF(data) {
         const views = {
-            hero: this.captureHero(1400, 1050),
-            top: this.captureView('top', 720, 480),
-            front: this.captureView('front', 720, 480),
-            side: this.captureView('side', 720, 480)
+            hero: this.captureHero(1680, 640),
+            top: this.captureView('top', 820, 500),
+            front: this.captureView('front', 820, 500),
+            side: this.captureView('side', 820, 500)
         };
 
         return await this.createPDFDocument(data, views);

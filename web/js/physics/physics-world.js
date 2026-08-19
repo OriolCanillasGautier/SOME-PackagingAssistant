@@ -165,20 +165,45 @@ export class PhysicsWorld {
     /**
      * Add a ceiling to close the container (useful for gravity verification)
      * Keeps pieces from escaping above the visual box.
+     * `height` is the Y position of the ceiling top surface.
+     * Also raises the 4 side walls up to the ceiling: pieces are dropped from
+     * well above the box, and without tall walls they drift/tumble outside
+     * the box footprint before reaching the short visual walls.
      */
-    addCeiling({ length, width, height }) {
+    addCeiling({ length, width, height }, thickness = 100) {
         if (!this.world) return;
-        const wallThickness = 100;
+        const t = thickness;
+        const wallTop = height + t / 2;
+        const wallPlanes = [
+            { x: length / 2, z: -t / 2, hx: length / 2 + t, hz: t / 2 },          // back
+            { x: length / 2, z: width + t / 2, hx: length / 2 + t, hz: t / 2 },  // front
+            { x: -t / 2, z: width / 2, hx: t / 2, hz: width / 2 + t },           // left
+            { x: length + t / 2, z: width / 2, hx: t / 2, hz: width / 2 + t },   // right
+        ];
+        for (let i = 0; i < 4; i++) {
+            const old = this.wallBodies[1 + i];
+            if (old && typeof old.isValid === 'function' && old.isValid()) {
+                this.world.removeRigidBody(old);
+            }
+            const p = wallPlanes[i];
+            const body = this.createKinematicBox(
+                p.x, wallTop / 2, p.z,
+                p.hx, wallTop / 2 + t, p.hz
+            );
+            this.wallBodies[1 + i] = body;
+            this.wallOriginalPositions[1 + i] = { x: p.x, y: wallTop / 2, z: p.z };
+        }
+
         const ceiling = this.createKinematicBox(
             length / 2,
-            height + wallThickness / 2,
+            height - t / 2,
             width / 2,
-            length / 2 + wallThickness,
-            wallThickness / 2,
-            width / 2 + wallThickness
+            length / 2 + t,
+            t / 2,
+            width / 2 + t
         );
         this.wallBodies.push(ceiling);
-        this.wallOriginalPositions.push({ x: length / 2, y: height + wallThickness / 2, z: width / 2 });
+        this.wallOriginalPositions.push({ x: length / 2, y: height - t / 2, z: width / 2 });
     }
 
     /**
@@ -1099,6 +1124,17 @@ export class BulkSimulation {
 
         // Initialize physics world
         await this.physics.init(boxDims);
+
+        // Invisible ceiling above the drop point: pieces fall from well above
+        // the box walls and small/light pieces can bounce over them. The
+        // ceiling keeps everything inside so nothing is lost even with
+        // vibration disabled. Clearance includes the piece's own height so
+        // spawned pieces never overlap the ceiling.
+        this.physics.addCeiling({
+            length: boxDims.length,
+            width: boxDims.width,
+            height: boxDims.height + this.dropHeight + 200 + Math.max(0, this.pieceDims?.h || 0),
+        }, 100);
 
         // Apply vibration tuning if provided
         if (Number.isFinite(vibrationFrequency)) {

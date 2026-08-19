@@ -151,6 +151,7 @@
     "orientationView": "VEURE",
     "orientationCompareHint": "* Comparació feta amb col·lisions reals (no travessen).",
     "orientationStable": "Estable",
+    "orientationUnstable": "Inestable",
     "orientationInclude": "Incloure a l'empaquetatge",
     "gravitySettled": "Gravetat estabilitzada — {count} peces a la caixa",
     "gravityTimeout": "Temps de simulació esgotat — {count} peces a la caixa",

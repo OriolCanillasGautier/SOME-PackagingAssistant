@@ -452,6 +452,13 @@ async function findStableOrientationByGravity(geometry, initialQuat = null) {
         }
     }
 
+    // A pose that never settles (rocks on an edge/point) is NOT stable —
+    // discard it instead of returning a mid-rock orientation.
+    if (settledFrames < 60) {
+        world.free();
+        return null;
+    }
+
     const rot = body.rotation();
     const settledQuat = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
     world.free();
@@ -855,7 +862,7 @@ function renderOrientationSelector() {
         const canvasId = `orient-canvas-${i}`;
         const stabilityText = o.stability?.stable
             ? `${mainText('orientationStable', {}, 'Estable')} · ${(o.stability.supportArea || 0).toFixed(0)} mm²`
-            : mainText('orientationStable', {}, 'Estable');
+            : mainText('orientationUnstable', {}, 'Inestable');
         return `<div class="orient-card ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''}" data-index="${i}"
                 tabindex="0" role="button" aria-pressed="${isSelected}"
                 onclick="selectOrientation(${i})">
@@ -2140,13 +2147,15 @@ async function handleGPUCalculate(calcStartTime, options = null) {
     await nextFrame();
 
     try {
-        // Stacking/Compartment ALWAYS honor the user's chosen orientation
-        // (the modal selection): export the selected pose's geometry and tell
-        // the server to use only that rotation. Other methods explore all
-        // orientations themselves.
+        // Stacking/Compartment (and multi-box with stacking/grid/compartment
+        // per tray) ALWAYS honor the user's chosen orientation (the modal
+        // selection): export the selected pose's geometry and tell the server
+        // to use only that rotation. Sparrow (single or per tray) explores
+        // all orientations itself.
         let stlBlob = null;
         let fixedOrientation = 0;
-        const isPoseMethod = gpuMethod === 'stacking' || gpuMethod === 'compartment';
+        const isPoseMethod = gpuMethod === 'stacking' || gpuMethod === 'compartment'
+            || (gpuMethod === 'multitray' && (options?.trayMethod || 'stacking') !== 'sparrow');
         const selectedSet = state.selectedOrientations;
         if (isPoseMethod && selectedSet && selectedSet.size === 1 && state.stlStableOrientations?.length) {
             const selIdx = [...selectedSet][0];
@@ -2169,6 +2178,11 @@ async function handleGPUCalculate(calcStartTime, options = null) {
         formData.append('cell', cellSize);
         formData.append('method', gpuMethod);
         if (options?.totalPieces) formData.append('total_pieces', String(options.totalPieces));
+        if (options?.trayMethod) {
+            formData.append('tray_method', options.trayMethod);
+            // grid → pieces touch (gap 0); compartment → cardboard thickness
+            formData.append('gap', String(options.trayMethod === 'grid' ? 0 : Math.max(0, values.cardboardMm || 0)));
+        }
         if (extraSeed) formData.append('seed', String(extraSeed));
         if (fixedOrientation) formData.append('fixed_orientation', String(fixedOrientation));
         if (fixedOrientation && options?.horizontalAngle != null) {
@@ -2233,10 +2247,12 @@ async function handleGPUCalculate(calcStartTime, options = null) {
             if (job.status === 'running' || job.status === 'queued') {
                 let etaText = '';
                 if (job.pieces > 2 && job.time_s > 0) {
-                    // Live ETA from actual measured progress
+                    // Live ETA from actual measured pace × remaining pieces.
+                    // The server estimates the box total from piece volume
+                    // (multi-box: the exact requested total).
                     const perPiece = job.time_s / job.pieces;
-                    const boxVol = (submitData.box?.[0] || 1) * (submitData.box?.[1] || 1) * (submitData.box?.[2] || 1);
-                    const estTotal = Math.min(500, (boxVol / 100000) * 3);
+                    const estTotal = job.expected_pieces
+                        || (gpuMethod === 'multitray' ? (options?.totalPieces || 500) : 500);
                     const remainS = Math.max(0, estTotal - job.pieces) * perPiece;
                     etaText = remainS > 60
                         ? ` (≈${Math.round(remainS / 60)} min restants)`
@@ -2315,15 +2331,18 @@ async function handleGPUCalculate(calcStartTime, options = null) {
         // the cells (Pack Studio "Partitions" — the carton that separates
         // each piece). The server reports the cell pitch + layer pitch so
         // the walls and shelves sit exactly where pieces are placed.
-        if (job.compartment && job.compartment.cellL && job.compartment.cellW) {
+        // Multi-box compartment jobs carry the info per tray.
+        const compartmentInfo = job.compartment
+            || (isTrays && job.trays[0] && job.trays[0].compartment) || null;
+        if (compartmentInfo && compartmentInfo.cellL && compartmentInfo.cellW) {
             state.sceneManager.addPartitions({
                 boxL: values.boxL,
                 boxW: values.boxW,
                 boxH: values.boxH,
-                cellL: job.compartment.cellL,
-                cellW: job.compartment.cellW,
-                nLayers: job.compartment.nLayers || 1,
-                layerPitch: job.compartment.layerPitch || null,
+                cellL: compartmentInfo.cellL,
+                cellW: compartmentInfo.cellW,
+                nLayers: compartmentInfo.nLayers || 1,
+                layerPitch: compartmentInfo.layerPitch || null,
             });
         }
 
@@ -2551,6 +2570,18 @@ window.selectTray = (idx) => {
         fillPct: tray.fill_pct || 0,
         interlocked: tray.interlocked ? tray.interlocked.indices : null,
     };
+    const comp = tray.compartment;
+    if (comp && comp.cellL && comp.cellW) {
+        state.sceneManager.addPartitions({
+            boxL: trayBox.boxL,
+            boxW: trayBox.boxW,
+            boxH: trayBox.boxH,
+            cellL: comp.cellL,
+            cellW: comp.cellW,
+            nLayers: comp.nLayers || 1,
+            layerPitch: comp.layerPitch || null,
+        });
+    }
 };
 
 /**
@@ -2690,9 +2721,9 @@ async function handleCalculate() {
     // ── Planar multi-tray — same server-side voxel packer, but pack the
     // requested piece count into as many boxes as needed (stacking per tray).
     if (state.mode === 'fast' && state.planarVariant === 'multitray') {
-        showMtPopup((totalPieces) => {
+        showMtPopup((totalPieces, trayMethod) => {
             if (elements.multitrayTotal) elements.multitrayTotal.value = String(totalPieces);
-            handleGPUCalculate(calcStartTime, { method: 'multitray', totalPieces });
+            handleGPUCalculate(calcStartTime, { method: 'multitray', totalPieces, trayMethod });
         });
         return;
     }
@@ -2859,7 +2890,7 @@ async function handleCalculate() {
                             stlGeometry: orientedGeometry,
                             pieceL, pieceW, pieceH,
                             nx: nx, ny: nz, nz: ny,
-                            maxDraw: 500,
+                            maxDraw: 5000,
                             packingGap: card,
                             colorCount: values.colorCount,
                             boxL: values.boxL,
@@ -2953,7 +2984,7 @@ async function handleCalculate() {
                             drawn = await state.sceneManager.addPackedSTLOptimalGrid({
                                 stlGeometry: primaryGeom,
                                 orientationPool: altPool.length > 0 ? altPool : null,
-                                maxDraw: 500,
+                                maxDraw: 5000,
                                 packingGap: values.packingGap,
                                 colorCount: values.colorCount,
                                 boxL: values.boxL,
@@ -3118,7 +3149,7 @@ async function handleCalculate() {
                         stlGeometry: orientedGeometry,
                         pieceL, pieceW, pieceH,
                         nx, ny, nz,
-                        maxDraw: 500,
+                        maxDraw: 5000,
                         packingGap: values.packingGap,
                         colorCount: values.colorCount,
                         boxL: values.boxL,
@@ -3131,7 +3162,7 @@ async function handleCalculate() {
                     drawn = state.sceneManager.addPackedPieces({
                         pieceL, pieceW, pieceH,
                         nx, ny, nz,
-                        maxDraw: 500,
+                        maxDraw: 5000,
                         packingGap: values.packingGap,
                         colorCount: values.colorCount,
                         boxL: values.boxL,
@@ -3146,7 +3177,7 @@ async function handleCalculate() {
                 drawn = state.sceneManager.addPackedPieces({
                     pieceL, pieceW, pieceH,
                     nx, ny, nz,
-                    maxDraw: 500,
+                    maxDraw: 5000,
                     packingGap: values.packingGap,
                     colorCount: values.colorCount,
                     boxL: values.boxL,
@@ -4163,6 +4194,7 @@ function recolorScene(colorCount) {
         colorCount,
         fillPct: ctx.fillPct,
         interlocked: ctx.interlocked,
+        instant: true,
         onProgress: (p) => {
             const el = document.getElementById('gpu-piece-count');
             if (el) el.textContent = String(p.revealed);
@@ -4291,8 +4323,9 @@ document.addEventListener('DOMContentLoaded', () => {
         const cb = mtPopupCallback;
         const input = document.getElementById('mt-popup-total');
         const total = parseInt(input?.value, 10) || 1000;
+        const trayMethod = document.querySelector('#mt-popup input[name="mt-method"]:checked')?.value || 'stacking';
         hideMtPopup();
-        if (cb) cb(Math.max(1, total));
+        if (cb) cb(Math.max(1, total), trayMethod);
     });
     document.getElementById('mt-popup-cancel')?.addEventListener('click', hideMtPopup);
     const mtInput = document.getElementById('mt-popup-total');

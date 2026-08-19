@@ -2528,8 +2528,9 @@ export class SceneManager {
      * @param {number} [params.colorCount] - Number of palette colors to cycle
      * @param {number} [params.fillPct] - Fill percentage for the stats overlay
      * @param {(p:{revealed:number,total:number,pct:number})=>void} [params.onProgress]
+     * @param {boolean} [params.instant] - Skip the staggered reveal (e.g. recolour)
      */
-    addPackedPlacements({ placements, baseGeometry, boxL, boxW, boxH, colorCount = null, fillPct = 0, onProgress = null, interlocked = null }) {
+    addPackedPlacements({ placements, baseGeometry, boxL, boxW, boxH, colorCount = null, fillPct = 0, onProgress = null, interlocked = null, instant = false }) {
         this.clearPieces();
 
         if (!placements || placements.length === 0) {
@@ -2620,7 +2621,15 @@ export class SceneManager {
         };
 
         this._lastReveal = { meshes, revealOrder, fillPct, onProgress };
-        this.revealPlacements(meshes, revealOrder, fillPct, onProgress);
+        if (instant) {
+            for (const { mesh, idx } of revealOrder) {
+                mesh.count = Math.max(mesh.count, idx + 1);
+                mesh.instanceMatrix.needsUpdate = true;
+            }
+            if (onProgress) onProgress({ revealed: revealOrder.length, total: revealOrder.length, pct: fillPct || 0 });
+        } else {
+            this.revealPlacements(meshes, revealOrder, fillPct, onProgress);
+        }
 
         return { count: placements.length };
     }

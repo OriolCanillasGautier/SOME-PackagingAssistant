@@ -122,7 +122,9 @@ The server scales job parameters automatically to keep responses practical:
 
 ## Benchmark results
 
-All benchmarks pack **an irregular concave part (~28×37×97mm)** into the given box (no part name/STL disclosed).
+All benchmark numbers were measured with a single **undisclosed reference
+part** (irregular concave shape, ~28×37×97mm) — no part name or STL is
+published. Different parts give different counts/fills/times.
 
 | Packer | Method | Box (mm) | Pieces | Fill | Time |
 |---|---|---|---|---|---|
@@ -154,8 +156,10 @@ packer_gpu_voxel.py (Voxel)
 
 ## Credits
 
-Full papers and references live in [`research/`](research/) — if this project
-helped you, please credit the original authors.
+The canonical references are the list below (tracked in this README). Full
+paper PDFs live in `research/` locally — that folder is git-ignored (large
+binaries), but if this project helped you, please credit the original
+authors.
 
 - **JonasTollenaere** (KU Leuven) — the separation + compression strategy in `sparrow-3d` (and MeshCore) inspired the Sparrow GPU packing algorithm in this project (`sparrow-3d` is LGPL-3.0; the Python implementation here is original work that draws on the published approach).
 - **Cui, Rong, Chen & Matusik (SIGGRAPH 2023)** — *Dense, Interlocking-Free and Scalable Spectral Packing of Generic 3D Objects* — basis of the spectral packing method.

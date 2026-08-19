@@ -442,6 +442,12 @@
                 <h3>Quantes peces vols empaquetar?</h3>
                 <p class="modal-subtitle">S'ompliran tantes caixes com calguin (caixa a caixa) fins a assolir el total.</p>
                 <input type="number" id="mt-popup-total" class="popup-input" min="1" step="1" value="1000">
+                <div class="mt-methods" role="radiogroup" aria-label="Mètode per caixa">
+                    <label class="mt-method"><input type="radio" name="mt-method" value="stacking" checked> Apilar</label>
+                    <label class="mt-method"><input type="radio" name="mt-method" value="grid"> Graella</label>
+                    <label class="mt-method"><input type="radio" name="mt-method" value="compartment"> Graella + separadors</label>
+                    <label class="mt-method"><input type="radio" name="mt-method" value="sparrow"> Sparrow GPU</label>
+                </div>
                 <div class="popup-actions">
                     <button id="mt-popup-cancel" class="btn-secondary">Cancel·lar</button>
                     <button id="mt-popup-confirm" class="btn-primary">Calcular</button>

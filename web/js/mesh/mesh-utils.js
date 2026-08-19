@@ -637,15 +637,53 @@ export function getSupportStability(geometry, epsilon = 0.5) {
     const hull = convexHull2D(basePoints);
     const supportArea = polygonArea2D(hull);
 
-    const com = new THREE.Vector3();
-    for (let i = 0; i < positions.count; i++) {
-        com.x += positions.getX(i);
-        com.y += positions.getY(i);
-        com.z += positions.getZ(i);
+    // Centre of mass from the AREA-WEIGHTED triangle centroids — the vertex
+    // average is biased by mesh tessellation (a dense fillet would pull the
+    // COM away from the real mass centre).
+    const indexed = geometry.index;
+    const triCount = indexed ? indexed.count / 3 : positions.count / 3;
+    const vA = new THREE.Vector3();
+    const vB = new THREE.Vector3();
+    const vC = new THREE.Vector3();
+    const e1 = new THREE.Vector3();
+    const e2 = new THREE.Vector3();
+    const cr = new THREE.Vector3();
+    let com = new THREE.Vector3();
+    let totalArea = 0;
+    for (let t = 0; t < triCount; t++) {
+        const ia = indexed ? indexed.getX(t * 3) : t * 3;
+        const ib = indexed ? indexed.getX(t * 3 + 1) : t * 3 + 1;
+        const ic = indexed ? indexed.getX(t * 3 + 2) : t * 3 + 2;
+        vA.set(positions.getX(ia), positions.getY(ia), positions.getZ(ia));
+        vB.set(positions.getX(ib), positions.getY(ib), positions.getZ(ib));
+        vC.set(positions.getX(ic), positions.getY(ic), positions.getZ(ic));
+        e1.subVectors(vB, vA);
+        e2.subVectors(vC, vA);
+        cr.crossVectors(e1, e2);
+        const area = cr.length() * 0.5;
+        if (area < 1e-10) continue;
+        const centroid = new THREE.Vector3(
+            (vA.x + vB.x + vC.x) / 3,
+            (vA.y + vB.y + vC.y) / 3,
+            (vA.z + vB.z + vC.z) / 3
+        );
+        com.addScaledVector(centroid, area);
+        totalArea += area;
     }
-    com.divideScalar(positions.count);
+    if (totalArea > 0) com.divideScalar(totalArea);
 
-    const stable = pointInPolygon2D({ x: com.x, z: com.z }, hull) && supportArea > 0;
+    // A real resting base needs meaningful contact: the support polygon must
+    // cover a reasonable share of the piece's own XZ footprint, and the COM
+    // must project inside it. A ring standing on its rim fails both checks
+    // (near-zero area / COM right on the edge line).
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const extentArea = Math.max(1e-6,
+        (bb.max.x - bb.min.x) * (bb.max.z - bb.min.z));
+    const minSupport = Math.max(1.0, extentArea * 0.04);
+
+    const stable = supportArea >= minSupport
+        && pointInPolygon2D({ x: com.x, z: com.z }, hull);
     return { stable, supportArea, basePointCount: basePoints.length };
 }
 

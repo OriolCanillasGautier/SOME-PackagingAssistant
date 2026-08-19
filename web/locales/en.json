@@ -151,6 +151,7 @@
     "orientationView": "VIEW",
     "orientationCompareHint": "* Comparison uses real collisions (no intersections).",
     "orientationStable": "Stable",
+    "orientationUnstable": "Unstable",
     "orientationInclude": "Include in packaging",
     "gravitySettled": "Gravity settled — {count} pieces in the box",
     "gravityTimeout": "Simulation time limit reached — {count} pieces in the box",

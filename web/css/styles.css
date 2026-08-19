@@ -2115,6 +2115,37 @@ button {
     width: 100%;
 }
 
+.mt-methods {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.mt-method {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: var(--bg-primary);
+    color: var(--text-secondary);
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.mt-method:has(input:checked) {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #ffffff;
+}
+
+.mt-method input {
+    accent-color: var(--accent);
+}
+
 .popup-actions {
     display: flex;
     justify-content: flex-end;

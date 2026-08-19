@@ -151,6 +151,19 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                 mesh = trimesh.util.concatenate(
                     [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)])
 
+            # Estimated total pieces for progress/ETA: box capacity vs the
+            # piece volume at a typical fill. Far better than a hard cap;
+            # multi-box overrides this with the exact requested total.
+            try:
+                piece_vol = float(getattr(mesh, "volume", 0) or 0)
+            except Exception:
+                piece_vol = 0.0
+            box_vol = float(box_dims[0] * box_dims[1] * box_dims[2])
+            if piece_vol > 0:
+                job["expected_pieces"] = max(1, int(box_vol * 0.20 / piece_vol))
+            else:
+                job["expected_pieces"] = 500
+
             box_l, box_w, box_h = box_dims
             cell = params.get("cell", 1.0)
             yaw = params.get("yaw", 8)
@@ -188,6 +201,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                 _random.seed(seed)
                 packer = BestPacker(box_dims)
                 packer._fixed_orientation = packer_fixed_orientation
+                packer._smart_stack = bool(int(params.get("smart_stack", 1)))
                 if horizontal_angle is not None and packer_fixed_orientation:
                     packer._horizontal_angle = horizontal_angle
                 packer.load_mesh_from_data(mesh, n_yaw=yaw)
@@ -214,51 +228,102 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                         progress_callback=progress_cb, seed=seed)
                 elif method == "stacking":
                     placed_pieces, placed_meshes = packer.pack_stacking(
-                        max_pieces=500, cell_size=vox_cell, verbose=False,
+                        max_pieces=5000, cell_size=vox_cell, verbose=False,
                         progress_callback=progress_cb)
                 elif method == "multitray":
                     # Multi-tray: pack the same box repeatedly until the
                     # requested piece count is reached (or a tray fits
-                    # nothing). Uses the stacking method per tray — highest
-                    # density for identical parts with the user's pose.
+                    # nothing). Per-tray strategy mirrors the single-box
+                    # methods so the user can pick how each box is filled:
+                    #   stacking     — free/in-plane stacking (default)
+                    #   grid         — axis-aligned grid, no partitions
+                    #   compartment  — grid + cardboard partition info per tray
+                    #   sparrow      — GPU optimized nesting per tray
                     total_wanted = int(params.get("total_pieces", 1000))
+                    tray_method = params.get("tray_method", "stacking")
+                    tray_gap = float(params.get("gap", 1.0))
+                    job["expected_pieces"] = total_wanted
                     packed_so_far = 0
                     trays = []
                     for tray_no in range(1, 64):
                         remaining = total_wanted - packed_so_far
                         if remaining <= 0:
                             break
-                        tray_placed, tray_meshes = packer.pack_stacking(
-                            max_pieces=min(remaining, 500), cell_size=vox_cell,
-                            verbose=False, progress_callback=progress_cb)
+                        if tray_method == "sparrow":
+                            tray_placed, tray_meshes = packer.pack_sparrow(
+                                max_pieces=min(remaining, 500), n_workers=4,
+                                cell_size=vox_cell, verbose=False,
+                                progress_callback=progress_cb, seed=seed)
+                        elif tray_method in ("grid", "compartment"):
+                            # Exact bounding-box grid (same math as the
+                            # single-box Graella): gap 0 for grid (boxes
+                            # touch), cardboard thickness for compartment.
+                            tray_placed, tray_meshes = packer.pack_bbox_grid(
+                                gap=tray_gap, verbose=False,
+                                progress_callback=progress_cb)
+                        else:
+                            tray_placed, tray_meshes = packer.pack_stacking(
+                                max_pieces=min(remaining, 5000), cell_size=vox_cell,
+                                verbose=False, progress_callback=progress_cb)
                         if not tray_placed:
                             break
-                        from packer_best import refine_subvoxel
-                        tray_refined = refine_subvoxel(
-                            tray_placed, packer._sparrow_voxel_data,
-                            float(packer._sparrow_cell_size), n_rounds=3)
-                        oris_t = packer._sparrow_voxel_data
-                        tray_meshes = []
-                        for (x, y, z, oi, name) in tray_refined:
-                            cm = oris_t[oi]['mesh'].copy()
-                            cm.apply_translation([x, y, z])
-                            tray_meshes.append(cm)
-                        tray_placed = tray_refined
-                        trays.append({
+                        # Sparrow may return slightly more than requested
+                        # (its max_pieces is a soft target) — trim so the
+                        # multi-box total is exact.
+                        if len(tray_placed) > remaining:
+                            tray_placed = tray_placed[:remaining]
+                            tray_meshes = tray_meshes[:remaining]
+                        if tray_method == "stacking":
+                            from packer_best import refine_subvoxel, descent_stack_contact
+                            tray_refined = refine_subvoxel(
+                                tray_placed, packer._sparrow_voxel_data,
+                                float(packer._sparrow_cell_size), n_rounds=3)
+                            tray_refined = descent_stack_contact(
+                                tray_refined, packer._sparrow_voxel_data, verbose=False)
+                            oris_t = packer._sparrow_voxel_data
+                            tray_meshes = []
+                            for (x, y, z, oi, name) in tray_refined:
+                                cm = oris_t[oi]['mesh'].copy()
+                                cm.apply_translation([x, y, z])
+                                tray_meshes.append(cm)
+                            tray_placed = tray_refined
+                        elif tray_method == "sparrow":
+                            from packer_best import refine_subvoxel
+                            tray_refined = refine_subvoxel(
+                                tray_placed, packer._sparrow_voxel_data,
+                                float(packer._sparrow_cell_size), n_rounds=3)
+                            oris_t = packer._sparrow_voxel_data
+                            tray_meshes = []
+                            for (x, y, z, oi, name) in tray_refined:
+                                cm = oris_t[oi]['mesh'].copy()
+                                cm.apply_translation([x, y, z])
+                                tray_meshes.append(cm)
+                            tray_placed = tray_refined
+                        tray_info = {
                             "tray": tray_no,
                             "pieces": len(tray_placed),
                             "fill_pct": round(sum(m.volume for m in tray_meshes) /
                                               (box_l * box_w * box_h) * 100, 1),
                             "placements": format_placements(
                                 tray_placed, packer._sparrow_voxel_data),
-                        })
+                        }
+                        if (tray_method == "compartment"
+                                and getattr(packer, "_compartment_cell", None)):
+                            cell_l_mm, cell_w_mm, n_layers, layer_pitch_mm = packer._compartment_cell
+                            tray_info["compartment"] = {
+                                "cellL": round(float(cell_l_mm), 2),
+                                "cellW": round(float(cell_w_mm), 2),
+                                "nLayers": int(n_layers),
+                                "layerPitch": round(float(layer_pitch_mm), 2),
+                            }
+                        trays.append(tray_info)
                         packed_so_far += len(tray_placed)
                         placed_pieces = tray_placed
                         placed_meshes = tray_meshes
                     job["trays"] = trays
                 else:  # compartment
-                    placed_pieces, placed_meshes = packer.pack_compartment(
-                        max_pieces=500, cell_size=vox_cell, verbose=False,
+                    placed_pieces, placed_meshes = packer.pack_bbox_grid(
+                        gap=float(params.get("gap", 1.0)), verbose=False,
                         progress_callback=progress_cb)
                 elapsed = time.time() - t0
                 placed = placed_pieces
@@ -296,6 +361,23 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                 placed_meshes = rm
                 placed = placed_pieces
 
+            # Stacking contact pass: drop every piece onto the pieces below
+            # it until exact mesh contact (FCL) — closes the residual voxel
+            # shell gaps so stacked pieces physically touch.
+            if method == "stacking" and placed_pieces:
+                from packer_best import descent_stack_contact
+                refined_placed = descent_stack_contact(
+                    placed_pieces, packer._sparrow_voxel_data, verbose=False)
+                oris_here = packer._sparrow_voxel_data
+                rm = []
+                for (x, y, z, oi, name) in refined_placed:
+                    cm = oris_here[oi]['mesh'].copy()
+                    cm.apply_translation([x, y, z])
+                    rm.append(cm)
+                placed_pieces = refined_placed
+                placed_meshes = rm
+                placed = placed_pieces
+
             elapsed = time.time() - t0
 
             jid = job["job_id"][:8]
@@ -312,11 +394,18 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                 from matplotlib.patches import Rectangle
 
                 fig, ax = plt.subplots(figsize=(10, 8))
-                colors = plt.cm.tab20(np.linspace(0, 1, max(20, len(placed_meshes))))
+                # The PNG is a quick top-down preview — beyond ~1200 pieces
+                # matplotlib rectangle rendering dominates the job time, so
+                # draw a uniform sample of the layout instead of every piece.
+                png_sample = placed_meshes
+                if len(placed_meshes) > 1200:
+                    step = len(placed_meshes) / 1200
+                    png_sample = [placed_meshes[int(i * step)] for i in range(1200)]
+                colors = plt.cm.tab20(np.linspace(0, 1, max(20, len(png_sample))))
                 ax.set_xlim(0, box_l)
                 ax.set_ylim(0, box_w)
                 ax.invert_yaxis()
-                for i, m in enumerate(placed_meshes):
+                for i, m in enumerate(png_sample):
                     b = m.bounds
                     ax.add_patch(Rectangle((b[0, 0], b[0, 2]),
                                  b[1, 0] - b[0, 0], b[1, 2] - b[0, 2],
@@ -570,6 +659,9 @@ def submit_pack():
         "fixed_orientation": int(request.form.get("fixed_orientation", 0)),
         "horizontal_angle": request.form.get("horizontal_angle"),
         "total_pieces": int(request.form.get("total_pieces", 1000)),
+        "tray_method": request.form.get("tray_method", "stacking"),
+        "gap": float(request.form.get("gap", 1.0)),
+        "cardboard_mm": float(request.form.get("cardboard_mm", 0)),
     }
 
     # ── Adaptive resolution: prefer scan-step scaling over cell bumping ──
@@ -606,8 +698,30 @@ def submit_pack():
         if cell != requested_cell:
             params["cell_adjusted_from"] = requested_cell
 
-    # ETA estimate based on final (adjusted) params
-    if method in ("sparrow", "stacking", "compartment", "multitray"):
+    # ETA estimate based on final (adjusted) params. For the fast methods the
+    # piece volume gives a much better idea of the box total than any fixed
+    # number — show the expected piece count instead of a made-up time, and
+    # let the live ETA (real pace × remaining) take over after the first few
+    # pieces are placed.
+    if method in ("stacking", "compartment", "multitray", "grid"):
+        try:
+            pm = trimesh.load(io.BytesIO(stl_data), file_type='stl', force='mesh')
+            if isinstance(pm, trimesh.Scene):
+                pm = trimesh.util.concatenate(
+                    [g for g in pm.geometry.values() if isinstance(g, trimesh.Trimesh)])
+            pv = float(getattr(pm, "volume", 0) or 0)
+            expected = max(1, int(box_l * box_w * box_h * 0.20 / pv)) if pv > 0 else 0
+        except Exception:
+            expected = 0
+        if method == "multitray":
+            expected = params.get("total_pieces", 1000)
+        if expected > 0:
+            eta_s = max(2, expected * 0.02)
+            eta_label = f"~{expected} peces"
+        else:
+            eta_s = 2
+            eta_label = "2s"
+    elif method == "sparrow":
         box_vol = box_l * box_w * box_h
         eta_s = max(2, min(120, box_vol / 40000))
         eta_label = f"{eta_s:.0f}s"
@@ -633,6 +747,7 @@ def submit_pack():
         "job_id": job_id,
         "status": "queued",
         "pieces": 0,
+        "expected_pieces": 0,
         "fill_pct": 0,
         "time_s": 0,
         "stl_path": "",
@@ -680,6 +795,7 @@ def get_pack_status(job_id):
         "job_id": job["job_id"],
         "status": job["status"],
         "pieces": job["pieces"],
+        "expected_pieces": job.get("expected_pieces", 0),
         "fill_pct": job["fill_pct"],
         "time_s": job["time_s"],
         "verified": job["verified"],
