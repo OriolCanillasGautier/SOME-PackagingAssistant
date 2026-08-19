@@ -481,6 +481,11 @@ try:
 except Exception:
     pass
 
+
+# Meshes with fewer faces than this use the CPU voxelizer (kernel-launch/JIT
+# overhead dominates below this; measured crossover ~ a few hundred faces).
+_GPU_VOXEL_MIN_FACES = 512
+
 def meshes_collide(mesh_a, mesh_b, eps=0.01):
     try:
         if _FCL_AVAILABLE:
@@ -500,10 +505,112 @@ def meshes_collide(mesh_a, mesh_b, eps=0.01):
         return False
 
 
+@cuda.jit(device=True)
+def _tri_box_axis_test(cx, cy, cz, hx, hy, hz, a0, a1, a2, b0, b1, b2, c0, c1, c2, ax, ay, az):
+    """SAT projection test of triangle (a,b,c) and box (center c, half h) on axis (ax,ay,az)."""
+    pa = (a0 - cx) * ax + (a1 - cy) * ay + (a2 - cz) * az
+    pb = (b0 - cx) * ax + (b1 - cy) * ay + (b2 - cz) * az
+    pc = (c0 - cx) * ax + (c1 - cy) * ay + (c2 - cz) * az
+    tmin = min(pa, pb, pc)
+    tmax = max(pa, pb, pc)
+    r = hx * abs(ax) + hy * abs(ay) + hz * abs(az)
+    return not (tmax < -r or tmin > r)
+
+
+@cuda.jit(device=True)
+def _tri_voxel_overlap(v0, v1, v2, cx, cy, cz, half):
+    """Conservative triangle-vs-voxel overlap (Schwarz & Seidel SAT, 13 axes).
+    Returns True if the triangle overlaps the voxel whose center is (cx,cy,cz)."""
+    h = half
+    # Triangle edges
+    e0x = v1[0] - v0[0]; e0y = v1[1] - v0[1]; e0z = v1[2] - v0[2]
+    e1x = v2[0] - v0[0]; e1y = v2[1] - v0[1]; e1z = v2[2] - v0[2]
+    e2x = v2[0] - v1[0]; e2y = v2[1] - v1[1]; e2z = v2[2] - v1[2]
+
+    a0 = v0[0]; a1 = v0[1]; a2 = v0[2]
+    b0 = v1[0]; b1 = v1[1]; b2 = v1[2]
+    c0 = v2[0]; c1 = v2[1]; c2 = v2[2]
+
+    # Box face normals (3)
+    if not _tri_box_axis_test(cx, cy, cz, h, h, h, a0, a1, a2, b0, b1, b2, c0, c1, c2, 1.0, 0.0, 0.0):
+        return False
+    if not _tri_box_axis_test(cx, cy, cz, h, h, h, a0, a1, a2, b0, b1, b2, c0, c1, c2, 0.0, 1.0, 0.0):
+        return False
+    if not _tri_box_axis_test(cx, cy, cz, h, h, h, a0, a1, a2, b0, b1, b2, c0, c1, c2, 0.0, 0.0, 1.0):
+        return False
+    # Triangle normal
+    nx = e0y * e1z - e0z * e1y
+    ny = e0z * e1x - e0x * e1z
+    nz = e0x * e1y - e0y * e1x
+    nl = math.sqrt(nx * nx + ny * ny + nz * nz)
+    if nl > 1e-12:
+        nx /= nl; ny /= nl; nz /= nl
+        if not _tri_box_axis_test(cx, cy, cz, h, h, h, a0, a1, a2, b0, b1, b2, c0, c1, c2, nx, ny, nz):
+            return False
+    # Edge × box-axis cross products (9)
+    for (ex, ey, ez) in ((e0x, e0y, e0z), (e1x, e1y, e1z), (e2x, e2y, e2z)):
+        for (wx, wy, wz) in ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)):
+            ax = ey * wz - ez * wy
+            ay = ez * wx - ex * wz
+            az = ex * wy - ey * wx
+            if abs(ax) + abs(ay) + abs(az) < 1e-12:
+                continue
+            if not _tri_box_axis_test(cx, cy, cz, h, h, h, a0, a1, a2, b0, b1, b2, c0, c1, c2, ax, ay, az):
+                return False
+    return True
+
+
+@cuda.jit
+def _voxelize_surface_kernel(verts, faces, occ, nx, ny, nz, bmin, cell):
+    """One thread per triangle: mark every voxel the triangle overlaps (conservative)."""
+    fi = cuda.grid(1)
+    if fi >= faces.shape[0]:
+        return
+    f0 = faces[fi, 0]; f1 = faces[fi, 1]; f2 = faces[fi, 2]
+    v0 = (verts[f0, 0], verts[f0, 1], verts[f0, 2])
+    v1 = (verts[f1, 0], verts[f1, 1], verts[f1, 2])
+    v2 = (verts[f2, 0], verts[f2, 1], verts[f2, 2])
+    half = cell * 0.5
+    # Triangle AABB in voxel space
+    tminx = min(v0[0], v1[0], v2[0])
+    tmaxx = max(v0[0], v1[0], v2[0])
+    tminy = min(v0[1], v1[1], v2[1])
+    tmaxy = max(v0[1], v1[1], v2[1])
+    tminz = min(v0[2], v1[2], v2[2])
+    tmaxz = max(v0[2], v1[2], v2[2])
+    ix0 = int((tminx - bmin[0]) / cell)
+    ix1 = int((tmaxx - bmin[0]) / cell) + 1
+    iy0 = int((tminy - bmin[1]) / cell)
+    iy1 = int((tmaxy - bmin[1]) / cell) + 1
+    iz0 = int((tminz - bmin[2]) / cell)
+    iz1 = int((tmaxz - bmin[2]) / cell) + 1
+    if ix0 < 0: ix0 = 0
+    if iy0 < 0: iy0 = 0
+    if iz0 < 0: iz0 = 0
+    if ix1 > nx - 1: ix1 = nx - 1
+    if iy1 > ny - 1: iy1 = ny - 1
+    if iz1 > nz - 1: iz1 = nz - 1
+    for iz in range(iz0, iz1 + 1):
+        cz = bmin[2] + (iz + 0.5) * cell
+        for iy in range(iy0, iy1 + 1):
+            cy = bmin[1] + (iy + 0.5) * cell
+            for ix in range(ix0, ix1 + 1):
+                cx = bmin[0] + (ix + 0.5) * cell
+                if _tri_voxel_overlap(v0, v1, v2, cx, cy, cz, half):
+                    idx = (ix * ny + iy) * nz + iz
+                    cuda.atomic.max(occ, idx, 1)
+
+
 def voxelize_mesh(mesh, cell_size):
     """Rasterize mesh faces into 3D sparse occupancy data.
     Returns (sparse_voxels, origin_mm) where sparse_voxels is [N,3] int32
-    local voxel indices and origin_mm is the mm position of voxel (0,0,0)."""
+    local voxel indices and origin_mm is the mm position of voxel (0,0,0).
+
+    Uses the GPU conservative voxelizer (Schwarz & Seidel: SAT triangle-vs-voxel
+    test, one thread per face) for meshes with >= _GPU_VOXEL_MIN_FACES faces,
+    falling back to the CPU point-in-triangle rasterizer otherwise. Both paths
+    run binary_fill_holes afterwards to turn the surface shell into solid
+    occupancy."""
     bmin = mesh.bounds[0] - cell_size
     bmax = mesh.bounds[1] + cell_size
     nx = max(1, int(math.ceil((bmax[0] - bmin[0]) / cell_size)))
@@ -511,6 +618,50 @@ def voxelize_mesh(mesh, cell_size):
     nz = max(1, int(math.ceil((bmax[2] - bmin[2]) / cell_size)))
     occ = np.zeros((nx, ny, nz), dtype=np.uint8)
 
+    # GPU conservative surface voxelization (Schwarz & Seidel). The SAT test
+    # marks every voxel a triangle overlaps — no gaps in the surface shell, so
+    # binary_fill_holes always fills the true interior. GPU only pays off for
+    # meshes with enough faces to hide kernel-launch/JIT overhead; tiny meshes
+    # use the CPU point-in-triangle rasterizer instead.
+    gpu_used = False
+    n_faces = int(len(mesh.faces))
+    if n_faces >= _GPU_VOXEL_MIN_FACES:
+        try:
+            if cuda.is_available():
+                verts = np.ascontiguousarray(mesh.vertices, dtype=np.float64)
+                faces = np.ascontiguousarray(mesh.faces, dtype=np.int32)
+                occ_flat = np.zeros(nx * ny * nz, dtype=np.int32)
+                d_verts = cuda.to_device(verts)
+                d_faces = cuda.to_device(faces)
+                d_occ = cuda.to_device(occ_flat)
+                d_bmin = cuda.to_device(np.ascontiguousarray(bmin, dtype=np.float64))
+                threads = 256
+                blocks = max(1, (n_faces + threads - 1) // threads)
+                _voxelize_surface_kernel[blocks, threads](d_verts, d_faces, d_occ,
+                                                          nx, ny, nz, d_bmin, float(cell_size))
+                cuda.synchronize()
+                occ_flat = d_occ.copy_to_host()
+                occ = occ_flat.reshape(nx, ny, nz).astype(np.uint8)
+                gpu_used = True
+        except Exception:
+            gpu_used = False
+            occ = np.zeros((nx, ny, nz), dtype=np.uint8)
+
+    if not gpu_used:
+        _voxelize_mesh_cpu(mesh, cell_size, occ, bmin, nx, ny, nz)
+
+    try:
+        from scipy.ndimage import binary_fill_holes
+        occ = binary_fill_holes(occ > 0).astype(np.uint8)
+    except Exception:
+        pass
+
+    sparse = np.argwhere(occ > 0).astype(np.int32)
+    return sparse, bmin
+
+
+def _voxelize_mesh_cpu(mesh, cell_size, occ, bmin, nx, ny, nz):
+    """Reference CPU rasterizer: point-in-triangle test at voxel centers."""
     for fi in range(len(mesh.faces)):
         f = mesh.faces[fi]
         v0 = mesh.vertices[f[0]].copy()
@@ -571,15 +722,6 @@ def voxelize_mesh(mesh, cell_size):
 
                     if u >= -0.08 and v >= -0.08 and u + v <= 1.08:
                         occ[ix, iy, iz] = 1
-
-    try:
-        from scipy.ndimage import binary_fill_holes
-        occ = binary_fill_holes(occ > 0).astype(np.uint8)
-    except Exception:
-        pass
-
-    sparse = np.argwhere(occ > 0).astype(np.int32)
-    return sparse, bmin
 
 
 def generate_sparrow_voxel_orientations(mesh, cell_size, n_yaw=8, n_roll=4, n_pitch=4, box_dims=None):
@@ -1797,7 +1939,7 @@ class BestPacker:
     # ── Spectral packing (FFT-based, Inkbit paper) ──
 
     def pack_spectral(self, max_pieces=500, cell_size=None, verbose=True,
-                      progress_callback=None, seed=None):
+                      progress_callback=None, seed=None, edt_every=10, phi_mode='manhattan'):
         """FFT-based spectral packing (Cui et al., ACM TOG 2023).
 
         For each orientation: one FFT correlation yields the collision metric
@@ -1805,6 +1947,19 @@ class BestPacker:
         metric (fit tightness via distance transform). The best offset is the
         minimum of cost = proximity + height-penalty among collision-free
         offsets. Greedy placement of the (single) part type.
+
+        edt_every: recompute the (expensive, single-threaded) 3D Euclidean
+        distance transform of the free space only every `edt_every` placements
+        and reuse it in between. The collision metric is still exact every
+        iteration; only the soft proximity ranking uses a (few-placements-old)
+        distance field, which is a mild perturbation of the greedy order.
+
+        phi_mode: 'edt' uses scipy's exact Euclidean distance transform;
+        'manhattan' uses the much cheaper L1 (taxicab) chamfer distance
+        transform, recomputed fresh every iteration. The proximity field is a
+        soft heuristic (the hard collision test is unchanged), so swapping the
+        metric only perturbs the greedy ordering of equally-collision-free
+        offsets.
         """
         from scipy import ndimage as _ndi
         from scipy.fft import rfftn as _rfftn, irfftn as _irfftn
@@ -1825,8 +1980,24 @@ class BestPacker:
         ny_vox = max(2, int(math.ceil(self.box_h / cell_size)))
         nz_vox = max(2, int(math.ceil(self.box_w / cell_size)))
 
-        # Padded grid for linear (non-circular) correlation
-        PX, PY, PZ = 2 * nx_vox, 2 * ny_vox, 2 * nz_vox
+        # Padded grid for linear (non-circular) correlation. Only offsets
+        # t in [0, nx-sx] etc. are ever read, which only needs b indices up
+        # to nx-1 < PX, so PX == nx_vox already gives wrap-free exact results
+        # for the whole valid region. We still round each axis up to a
+        # FFT-friendly (7-smooth) size so pocketfft never falls back to the
+        # slow prime (Bluestein) path (nx_vox=193 etc. are prime). The pad
+        # region beyond the box stays zeroed and never wraps into the read
+        # range, so results are identical to the previous 2*nx zero padding.
+        def _smooth(n):
+            while True:
+                x = n
+                for p in (2, 3, 5, 7):
+                    while x % p == 0:
+                        x //= p
+                if x == 1:
+                    return n
+                n += 1
+        PX, PY, PZ = _smooth(nx_vox), _smooth(ny_vox), _smooth(nz_vox)
         s_omega = np.zeros((PX, PY, PZ), dtype=np.float32)
 
         # Tray walls: mark the interior boundary as occupied so objects
@@ -1850,7 +2021,7 @@ class BestPacker:
             s_a[sp[:, 0], sp[:, 1], sp[:, 2]] = 1
             f_a = _rfftn(s_a, axes=(0, 1, 2), workers=-1)
             ori_info.append((oi, o, (sx, sy, sz), f_a))
-            if len(ori_info) >= 6:
+            if len(ori_info) >= 4:
                 break
         if not ori_info:
             return self.pack_greedy(max_pieces, verbose)
@@ -1865,8 +2036,14 @@ class BestPacker:
         while len(placed) < max_pieces and consecutive < 10:
             # FFT of occupancy (with walls + pieces) and of its distance transform
             f_omega = _rfftn(s_omega, axes=axes, workers=-1)
-            phi = _ndi.distance_transform_edt(s_omega == 0).astype(np.float32)
-            f_phi = _rfftn(phi, axes=axes, workers=-1)
+            if phi_mode == 'manhattan':
+                # L1 (taxicab) chamfer distance of the free space — ~10x
+                # cheaper than the Euclidean EDT and refreshed every iteration.
+                phi = _ndi.distance_transform_cdt(s_omega == 0, metric='taxicab').astype(np.float32)
+                f_phi = _rfftn(phi, axes=axes, workers=-1)
+            elif (len(placed) % edt_every == 0) or consecutive > 0:
+                phi = _ndi.distance_transform_edt(s_omega == 0).astype(np.float32)
+                f_phi = _rfftn(phi, axes=axes, workers=-1)
 
             best_cost = float('inf')
             best = None  # (oi, qx, qy, qz)
@@ -1966,6 +2143,279 @@ class BestPacker:
 # ═══════════════════════════════════════════════
 # Verification + visualization
 # ═══════════════════════════════════════════════
+
+def _column_extents(sp, offset, axis):
+    """Per-column extents of a piece's voxels in GLOBAL float coordinates.
+
+    sp: local sparse voxel indices (N,3); offset: (ox, oy, oz) float voxel
+    offset of the piece's origin; axis: 0/1/2 = the slide axis. Returns a
+    dict mapping the OTHER two global coords (floats) -> (min, max) extent
+    along the axis. Used for exact pure-translation collision limits.
+    """
+    g = sp.astype(np.float64) + np.asarray(offset, dtype=np.float64)
+    o1, o2 = [k for k in range(3) if k != axis]
+    col = g[:, o1] * 10000.0 + g[:, o2]
+    order = np.argsort(col, kind='stable')
+    ks = col[order]
+    vs = g[order, axis]
+    starts = np.r_[0, np.flatnonzero(ks[1:] != ks[:-1]) + 1]
+    cols = ks[starts]
+    mins = np.minimum.reduceat(vs, starts)
+    maxs = np.maximum.reduceat(vs, starts)
+    return dict(zip(cols, zip(mins, maxs)))
+
+
+def refine_subvoxel(placed, oris, cell_size, n_rounds=3, verbose=False):
+    """Tighten voxel placements at sub-voxel precision.
+
+    Each piece is slid toward the box origin (-x, -z) and dropped down (-y)
+    by the exact amount that keeps it collision-free against every other
+    piece (pure-translation column test: a piece may move until its low end
+    touches the highest opposing voxel in a shared column). Moves are capped
+    at half a voxel so pieces stay anchored to their grid slot (the whole
+    point is sub-voxel refinement, not re-packing). Pieces are processed in
+    reverse placement order (top of each stack first) and the x/z/y pass is
+    repeated `n_rounds` times so pieces can nest into valleys opened up by
+    earlier drops.
+
+    Returns a NEW placed list (x_mm, y_mm, z_mm, oi, name) with refined
+    continuous coordinates. Callers must rebuild meshes from the new
+    positions. Works on the 'sparse' voxel data (voxel methods only).
+    """
+    n = len(placed)
+    if n < 2:
+        return list(placed)
+
+    max_cell = float(cell_size)
+    half = 0.5 * max_cell
+    bbox = [None] * n  # global (xmin, xmax, ymin, ymax, zmin, zmax)
+    offsets = [None] * n  # float voxel offsets (ox, oy, oz)
+    exts = [None] * n    # [x-col map, y-col map, z-col map]
+
+    for i, (x_mm, y_mm, z_mm, oi, _name) in enumerate(placed):
+        sp = oris[oi]['sparse']
+        off = np.array([x_mm, y_mm, z_mm], dtype=np.float64) / max_cell
+        offsets[i] = off
+        exts[i] = [_column_extents(sp, off, 0), _column_extents(sp, off, 1),
+                   _column_extents(sp, off, 2)]
+        gmin = sp.min(axis=0).astype(np.float64) + off
+        gmax = sp.max(axis=0).astype(np.float64) + off
+        bbox[i] = (gmin[0], gmax[0], gmin[1], gmax[1], gmin[2], gmax[2])
+
+    def slide_allowed(i, axis):
+        """Max move of piece i along `axis` toward the box origin (voxel
+        units) before touching any other piece, capped at half a voxel from
+        the original anchor. Exact for pure translation."""
+        o1, o2 = [k for k in range(3) if k != axis]
+        b = bbox[i]
+        lim = b[axis] if axis == 0 else (b[2] if axis == 1 else b[4])
+        cur = exts[i][axis]
+        best = lim
+        for j in range(n):
+            if j == i:
+                continue
+            bj = bbox[j]
+            # column overlap requires overlap in the two non-axis dims
+            if bj[2 * o1] > b[2 * o1 + 1] or b[2 * o1] > bj[2 * o1 + 1]:
+                continue
+            if bj[2 * o2] > b[2 * o2 + 1] or b[2 * o2] > bj[2 * o2 + 1]:
+                continue
+            ej = exts[j][axis]
+            # iterate the smaller map
+            if len(cur) <= len(ej):
+                sm, lg = cur, ej
+            else:
+                sm, lg = ej, cur
+            for k, (lo, hi) in sm.items():
+                v = lg.get(k)
+                if v is None:
+                    continue
+                d = lo - v[1]  # move until i's low end touches j's high end
+                if d < best:
+                    best = d
+                    if best <= 0:
+                        return 0.0
+        return max(0.0, best)
+
+    def apply_move(i, axis, delta):
+        """Shift piece i by `delta` voxels toward the box origin along
+        `axis`; update all state."""
+        off = offsets[i]
+        b = bbox[i]
+        b = list(b)
+        b[2 * axis] -= delta
+        b[2 * axis + 1] -= delta
+        bbox[i] = tuple(b)
+        sp = oris[placed[i][3]]['sparse']
+        off = list(off)
+        off[axis] -= delta
+        offsets[i] = off
+        exts[i] = [_column_extents(sp, off, 0), _column_extents(sp, off, 1),
+                   _column_extents(sp, off, 2)]
+
+    # Cap moves to half a voxel from the ORIGINAL anchor so the piece stays
+    # in its grid slot. Anchors are the starting offsets.
+    def anchor_lim(i, axis):
+        base = placed[i][axis] / max_cell
+        return offsets[i][axis] - base + half  # may move down to base - half
+
+    for _round in range(n_rounds):
+        moved_any = 0.0
+        for i in range(n - 1, -1, -1):  # top of stack first
+            for axis in (0, 2, 1):      # x, z, then y (drop last)
+                d = slide_allowed(i, axis)
+                d = min(d, anchor_lim(i, axis))
+                if d > 1e-6:
+                    apply_move(i, axis, d)
+                    moved_any += d
+        if verbose:
+            print(f"  [Refine] round {_round + 1}: {moved_any:.2f} voxels moved")
+        if moved_any < 1e-4:
+            break
+
+    refined = []
+    for i, (x_mm, y_mm, z_mm, oi, name) in enumerate(placed):
+        ox, oy, oz = offsets[i]
+        refined.append((ox * max_cell, oy * max_cell, oz * max_cell, oi, name))
+
+    # Mesh-level safety: the voxel shells carry an overhang vs the real
+    # meshes, so voxel-touching can still overlap surfaces. Scale ALL moves
+    # down until the refined meshes are collision-free (monotone: k=0 gives
+    # the original collision-free packing). FCL is the same oracle the
+    # server's verify() uses.
+    moves = [tuple(refined[i][a] - placed[i][a] for a in range(3))
+             for i in range(n)]
+    if _FCL_AVAILABLE and any(any(abs(m) > 1e-9 for m in mv) for mv in moves):
+        has_mesh = all('mesh' in oris[placed[i][3]] for i in range(n))
+        if has_mesh:
+            def _colliding(k):
+                try:
+                    from trimesh.collision import CollisionManager
+                except Exception:
+                    return True
+                cm = CollisionManager()
+                for i in range(n):
+                    mi = oris[placed[i][3]]['mesh'].copy()
+                    mi.apply_translation([placed[i][0] + k * moves[i][0],
+                                          placed[i][1] + k * moves[i][1],
+                                          placed[i][2] + k * moves[i][2]])
+                    cm.add_object(f'p{i}', mi)
+                try:
+                    names, _ = cm.in_collision_internal(return_names=True, return_data=False)
+                    return bool(names)
+                except Exception:
+                    return True
+
+            k = 1.0
+            while k > 0.05 and _colliding(k):
+                k *= 0.5
+            if k < 1.0:
+                refined = [tuple(placed[i][a] + k * moves[i][a] for a in range(3))
+                           + (placed[i][3], placed[i][4]) for i in range(n)]
+    return refined
+
+
+def detect_interlocking(placed, oris, cell_size):
+    """Detect pieces that cannot be removed from the box by lifting straight
+    up (vertical interlock).
+
+    A piece is removable iff no other piece occupies any voxel above it in a
+    shared (x,z) column — the straight-up lift is collision-free. Pieces are
+    removed greedily in any order (top of a stack comes out first, then the
+    piece below becomes removable). Whatever is left at the end is truly
+    interlocked: it is trapped by neighbours above it in every possible
+    removal sequence.
+
+    `placed` is the (x_mm, y_mm, z_mm, oi, name) list; `oris` the orientation
+    list with 'sparse' local voxel indices; `cell_size` the voxel pitch.
+    Returns a sorted list of placement indices that are interlocked.
+    """
+    n = len(placed)
+    if n < 2:
+        return []
+
+    # Per-piece column extents: (x,z) -> (min_y, max_y) in global voxel coords
+    cols = []
+    bboxes = []
+    for (x_mm, y_mm, z_mm, oi, _name) in placed:
+        sp = oris[oi]['sparse']
+        ox = int(round(x_mm / cell_size))
+        oy = int(round(y_mm / cell_size))
+        oz = int(round(z_mm / cell_size))
+        g = sp + np.array([ox, oy, oz], dtype=np.int32)
+        bboxes.append((int(g[:, 0].min()), int(g[:, 0].max()),
+                       int(g[:, 1].min()), int(g[:, 1].max()),
+                       int(g[:, 2].min()), int(g[:, 2].max())))
+        cmap = {}
+        for p in g:
+            k = (int(p[0]), int(p[2]))
+            if k in cmap:
+                lo, hi = cmap[k]
+                if p[1] < lo: lo = int(p[1])
+                if p[1] > hi: hi = int(p[1])
+                cmap[k] = (lo, hi)
+            else:
+                cmap[k] = (int(p[1]), int(p[1]))
+        cols.append(cmap)
+
+    # blockers[i] = set of pieces j that have a voxel above some voxel of i
+    # in a shared column -> j blocks i's straight-up lift.
+    blockers = [set() for _ in range(n)]
+    for i in range(n):
+        x0i, x1i, _y0i, _y1i, z0i, z1i = bboxes[i]
+        ci = cols[i]
+        for j in range(i + 1, n):
+            x0j, x1j, _y0j, _y1j, z0j, z1j = bboxes[j]
+            # no shared (x,z) column -> no possible interaction
+            if x1i < x0j or x1j < x0i or z1i < z0j or z1j < z0i:
+                continue
+            cj = cols[j]
+            # iterate the smaller map; keep track of which map is which
+            if len(ci) <= len(cj):
+                sm, sm_is_i = ci, True
+                lg = cj
+            else:
+                sm, sm_is_i = cj, False
+                lg = ci
+            block_i = block_j = False
+            for k, (lo, hi) in sm.items():
+                v = lg.get(k)
+                if v is None:
+                    continue
+                # in this shared (x,z) column, sm spans [lo, hi],
+                # lg spans [v[0], v[1]]
+                if sm_is_i:
+                    # j above i in this column -> j blocks i's lift
+                    if v[1] > lo and not block_i:
+                        block_i = True
+                    # i above j -> i blocks j's lift
+                    if hi > v[0] and not block_j:
+                        block_j = True
+                else:
+                    # i above j in this column -> i blocks j's lift
+                    if v[1] > lo and not block_j:
+                        block_j = True
+                    # j above i -> j blocks i's lift
+                    if hi > v[0] and not block_i:
+                        block_i = True
+                if block_i and block_j:
+                    break
+            if block_i:
+                blockers[i].add(j)
+            if block_j:
+                blockers[j].add(i)
+
+    # Greedy removal: repeatedly lift out every piece with no remaining blocker.
+    remaining = set(range(n))
+    changed = True
+    while changed:
+        changed = False
+        for i in sorted(remaining):
+            if not (blockers[i] & remaining):
+                remaining.discard(i)
+                changed = True
+    return sorted(remaining)
+
 
 def verify(placed_meshes):
     collisions = 0

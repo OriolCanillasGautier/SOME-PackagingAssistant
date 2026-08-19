@@ -154,7 +154,13 @@ packer_gpu_voxel.py (Voxel)
 
 ## Credits
 
+Full papers and references live in [`research/`](research/) — if this project
+helped you, please credit the original authors.
+
 - **JonasTollenaere** (KU Leuven) — the separation + compression strategy in `sparrow-3d` (and MeshCore) inspired the Sparrow GPU packing algorithm in this project (`sparrow-3d` is LGPL-3.0; the Python implementation here is original work that draws on the published approach).
+- **Cui, Rong, Chen & Matusik (SIGGRAPH 2023)** — *Dense, Interlocking-Free and Scalable Spectral Packing of Generic 3D Objects* — basis of the spectral packing method.
+- **Schwarz & Seidel (SIGGRAPH Asia 2010)** — *Fast Parallel Surface and Solid Voxelization on GPUs* — basis of the GPU voxelization kernel.
+- **Gardeyn et al. (2025)** — *An open-source heuristic to reboot 2D nesting research* — the original `sparrow` 2D nesting algorithm.
 
 ## Project structure
 

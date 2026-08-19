@@ -8,7 +8,7 @@ import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_42';
 import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=force_update_42';
-import { SceneManager } from './visualization/scene.js?v=live_pack_v1';
+import { SceneManager } from './visualization/scene.js?v=ui_fix_v2';
 import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-world.js?v=force_update_42';
 import { ReportGenerator } from './report/report-generator.js?v=force_update_42';
 import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_42';
@@ -1029,7 +1029,64 @@ function setBoxPreset(l, w, h, btn) {
     document.getElementById('box-width').value = w;
     document.getElementById('box-height').value = h;
     document.querySelectorAll('.preset-btn').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
+    if (btn) btn.classList.add('active');
+}
+
+// ── Saved (user-defined) box presets — localStorage ──
+const BOXES_STORAGE_KEY = 'packassist.boxes';
+
+function loadSavedBoxes() {
+    try {
+        const raw = JSON.parse(localStorage.getItem(BOXES_STORAGE_KEY) || '[]');
+        return Array.isArray(raw) ? raw : [];
+    } catch (e) {
+        return [];
+    }
+}
+
+function saveBoxesList(boxes) {
+    try {
+        localStorage.setItem(BOXES_STORAGE_KEY, JSON.stringify(boxes));
+    } catch (e) { /* storage unavailable — non fatal */ }
+}
+
+function renderSavedBoxes() {
+    const wrap = document.getElementById('saved-boxes');
+    if (!wrap) return;
+    const boxes = loadSavedBoxes();
+    wrap.style.display = boxes.length ? 'flex' : 'none';
+    wrap.innerHTML = boxes.map((b, i) => `
+        <button class="preset-btn" onclick="setBoxPreset(${b.l},${b.w},${b.h},this)" title="${b.l}×${b.w}×${b.h} mm">
+            ${b.l}×${b.w}×${b.h}
+            <span class="preset-remove" onclick="event.stopPropagation();removeSavedBox(${i})">×</span>
+        </button>
+    `).join('');
+}
+
+window.removeSavedBox = (i) => {
+    const boxes = loadSavedBoxes();
+    if (i >= 0 && i < boxes.length) {
+        boxes.splice(i, 1);
+        saveBoxesList(boxes);
+        renderSavedBoxes();
+    }
+};
+
+function saveCurrentBox() {
+    const l = parseFloat(document.getElementById('box-length')?.value);
+    const w = parseFloat(document.getElementById('box-width')?.value);
+    const h = parseFloat(document.getElementById('box-height')?.value);
+    if (!(l > 0) || !(w > 0) || !(h > 0)) {
+        alert(mainText('invalidDimensions'));
+        return;
+    }
+    const boxes = loadSavedBoxes();
+    const exists = boxes.some(b => Math.abs(b.l - l) < 0.1 && Math.abs(b.w - w) < 0.1 && Math.abs(b.h - h) < 0.1);
+    if (!exists) {
+        boxes.push({ l, w, h });
+        saveBoxesList(boxes);
+    }
+    renderSavedBoxes();
 }
 
 // DOM Elements
@@ -1068,6 +1125,8 @@ const elements = {
     packingGap: document.getElementById('packing-gap'),
     cardboardMm: document.getElementById('cardboard-mm'),
     cardboardMmGroup: document.getElementById('cardboard-mm-group'),
+    multitrayTotalGroup: document.getElementById('multitray-total-group'),
+    multitrayTotal: document.getElementById('multitray-total'),
     
     // Bulk mode options
     bulkOptions: document.getElementById('bulk-options'),
@@ -1318,6 +1377,11 @@ function setupEventListeners() {
     
     elements.colorCount?.addEventListener('input', (e) => {
         elements.colorCountValue.textContent = e.target.value;
+        if (elements.optPieceColors) elements.optPieceColors.value = e.target.value;
+        if (elements.reportModal && elements.reportModal.style.display === 'flex') {
+            recolorScene(parseInt(e.target.value, 10) || 1);
+            updateReportPreview();
+        }
     });
 
     document.querySelectorAll('input[name="report-lang"]').forEach(radio => {
@@ -1344,6 +1408,61 @@ function setupEventListeners() {
     elements.results?.addEventListener('click', (e) => {
         // Orientation alternatives UI removed — unified grid-based evaluation.
     });
+}
+
+/**
+ * Monotonic counter used to invalidate in-flight calculations when the user
+ * switches mode/variant. Any async calc (client pack or server GPU poll) that
+ * finishes after a mode change must NOT render stale results.
+ */
+let calcGeneration = 0;
+
+/**
+ * Clear every trace of the previous calculation from the UI + 3D scene:
+ * results table/stats, re-optimize buttons, report buttons, comparison panel,
+ * the 3D scene (pieces + box + partitions + protective overlays), the
+ * progress bar and the simulation status. Call on every mode/variant switch.
+ * @param {{placeholder?: string|null}} [opts]
+ */
+function clearResults({ placeholder = null } = {}) {
+    calcGeneration++;
+
+    // Abort any in-flight client-side calculation
+    if (state.calcAbortController) {
+        state.calcAbortController.abort();
+        state.calcAbortController = null;
+    }
+
+    setCalcProgress(false, 0, '', 0);
+    stopGravitySimulation();
+
+    state.sceneManager?.clearPieces();
+    state.sceneManager?.clearBox();
+
+    // Reset the Pack Studio overlay checkboxes (meshes are gone with the scene)
+    ['protective-partitions', 'protective-foam', 'protective-tray'].forEach(id => {
+        const cb = document.getElementById(id);
+        if (cb) cb.checked = false;
+    });
+
+    if (elements.simulationStatus) {
+        elements.simulationStatus.className = 'simulation-status';
+        elements.simulationStatus.textContent = '';
+    }
+    if (elements.reportButtons) elements.reportButtons.style.display = 'none';
+    if (elements.applyGravityBtn) elements.applyGravityBtn.style.display = 'none';
+
+    // Clear the "Comparar caixes" results panel below the results section
+    const boxOpts = document.getElementById('box-options-container');
+    if (boxOpts) boxOpts.innerHTML = '';
+
+    state.lastResults = null;
+    state.displayCount = 0;
+
+    if (placeholder !== null && elements.results) {
+        elements.results.innerHTML = placeholder;
+        elements.results.classList.remove('fade-in');
+    }
 }
 
 /**
@@ -1394,14 +1513,14 @@ function switchMode(mode) {
         elements.applyGravityBtn.style.display = 'none';
     }
 
-    if (isBulk) {
-        elements.results.innerHTML = `<p class="placeholder-text">${mainText('bulkPlaceholder')}</p>`;
-        state.sceneManager.clearPieces();
-    }
-    if (isGPU) {
-        elements.results.innerHTML = `<p class="placeholder-text">${mainText('gpuPlaceholder')}</p>`;
-        state.sceneManager.clearPieces();
-    }
+    // Any previous calculation is invalid once the mode changes: clear the
+    // results, stats, 3D scene, re-optimize buttons and progress UI.
+    const placeholder = isBulk
+        ? `<p class="placeholder-text">${mainText('bulkPlaceholder')}</p>`
+        : (isGPU
+            ? `<p class="placeholder-text">${mainText('gpuPlaceholder')}</p>`
+            : `<p class="placeholder-text">${mainText('placeholder')}</p>`);
+    clearResults({ placeholder });
 
     // Ask for an orientation if entering Planar without a confirmed pose
     if (modeNeedsOrientation() && !state.orientationConfirmed && state.stlGeometry) {
@@ -1435,16 +1554,25 @@ function switchPlanarVariant(variant) {
     if (elements.cardboardMmGroup) {
         elements.cardboardMmGroup.style.display = variant === 'compartment' ? 'block' : 'none';
     }
+    // Multi-tray mode: show the total piece count input.
+    if (elements.multitrayTotalGroup) {
+        elements.multitrayTotalGroup.style.display = variant === 'multitray' ? 'block' : 'none';
+    }
 
     // Refresh the Planar mode button subtitle to match the active variant.
     const descMap = {
         grid: mainText('planarGridDesc'),
         stacking: mainText('planarStackingDesc'),
+        multitray: mainText('planarMultitrayDesc'),
         compartment: mainText('planarCompartmentDesc'),
     };
     const planarBtn = document.querySelector('.mode-btn[data-mode="fast"]');
     const descEl = planarBtn?.querySelector('.mode-desc');
     if (descEl) descEl.textContent = descMap[variant] || mainText('modePlanarDesc');
+
+    // Switching variant invalidates the previous calculation: clear results,
+    // 3D scene, re-optimize buttons, report buttons and progress UI.
+    clearResults({ placeholder: `<p class="placeholder-text">${mainText('placeholder')}</p>` });
 
     // All Planar variants still place pieces in a chosen pose, so keep the
     // orientation requirement (re-offer the modal if not yet confirmed).
@@ -1975,6 +2103,9 @@ let gpuHistory = [];
 const MAX_GPU_HISTORY = 10;
 
 async function handleGPUCalculate(calcStartTime, options = null) {
+    const calcGen = ++calcGeneration;
+    const isCurrent = () => calcGeneration === calcGen;
+
     if (!state.stlGeometry) {
         elements.results.innerHTML = `<p class="error-text">${mainText('modeGPURequiresSTL')}</p>`;
         return;
@@ -2037,6 +2168,7 @@ async function handleGPUCalculate(calcStartTime, options = null) {
         formData.append('box_h', values.boxH);
         formData.append('cell', cellSize);
         formData.append('method', gpuMethod);
+        if (options?.totalPieces) formData.append('total_pieces', String(options.totalPieces));
         if (extraSeed) formData.append('seed', String(extraSeed));
         if (fixedOrientation) formData.append('fixed_orientation', String(fixedOrientation));
         if (fixedOrientation && options?.horizontalAngle != null) {
@@ -2064,6 +2196,9 @@ async function handleGPUCalculate(calcStartTime, options = null) {
             const r = await fetch(`/api/pack/${job_id}`);
             job = await r.json();
             pollCount++;
+
+            // User switched mode while the server was packing → abandon silently.
+            if (!isCurrent()) return;
 
             // Live packing preview (sparrow): render placements as they arrive
             // so the user watches the box fill while the server is still packing.
@@ -2123,6 +2258,8 @@ async function handleGPUCalculate(calcStartTime, options = null) {
             throw new Error(job.error || mainText('modeGPUError'));
         }
 
+        if (!isCurrent()) return;
+
         setCalcProgress(true, 80, 'Carregant resultats...', calcStartTime);
         await nextFrame();
 
@@ -2141,7 +2278,15 @@ async function handleGPUCalculate(calcStartTime, options = null) {
 
         state.sceneManager.createBox(values.boxL, values.boxW, values.boxH);
 
-        const placements = job.placements || [];
+        // Multi-tray: render the FIRST box; tray buttons re-render the scene.
+        // Non-tray jobs keep the server's flat placements list.
+        const isTrays = Array.isArray(job.trays) && job.trays.length > 0;
+        state._trayJob = isTrays ? job : null;
+        state._trayBaseGeo = isTrays ? baseGeometry : null;
+        const placements = isTrays ? (job.trays[0].placements || []) : (job.placements || []);
+        const trayInterlocked = isTrays
+            ? (job.trays[0].interlocked ? job.trays[0].interlocked.indices : null)
+            : (job.interlocked ? job.interlocked.indices : null);
         state.sceneManager.addPackedPlacements({
             placements,
             baseGeometry,
@@ -2150,11 +2295,21 @@ async function handleGPUCalculate(calcStartTime, options = null) {
             boxH: values.boxH,
             colorCount: gpuColorCount,
             fillPct: job.fill_pct || 0,
+            interlocked: trayInterlocked,
             onProgress: (p) => {
                 const el = document.getElementById('gpu-piece-count');
                 if (el) el.textContent = String(p.revealed);
             }
         });
+        state._renderCtx = {
+            placements,
+            baseGeometry,
+            boxL: values.boxL,
+            boxW: values.boxW,
+            boxH: values.boxH,
+            fillPct: job.fill_pct || 0,
+            interlocked: trayInterlocked,
+        };
 
         // Compartment packing: render the cardboard partition grid between
         // the cells (Pack Studio "Partitions" — the carton that separates
@@ -2218,11 +2373,35 @@ async function handleGPUCalculate(calcStartTime, options = null) {
 
         const clampedFill = Math.max(0, Math.min(100, job.fill_pct || 0));
         const isStacking = gpuMethod === 'stacking';
+
+        // Guard: a mode/variant switch may have happened during the poll loop.
+        if (!isCurrent()) return;
+
         elements.results.innerHTML = `
             <div class="results-hero">
                 <div class="hero-number" id="gpu-piece-count" data-total="${job.pieces}">0</div>
                 <div class="hero-label">${mainText('pieces')}</div>
             </div>
+            ${job.interlocked && job.interlocked.count > 0 ? `
+                <div class="results-warning" id="interlock-warning">
+                    ${job.interlocked.count} peces no es poden extreure verticalment (entrellaçades)
+                </div>
+            ` : ''}
+            ${Array.isArray(job.trays) && job.trays.length > 0 ? `
+                <div class="results-warning" id="tray-summary">
+                    ${job.trays.length} ${job.trays.length === 1 ? 'caixa' : 'caixes'} de
+                    ${values.boxL}×${values.boxW}×${values.boxH}mm:
+                    ${job.trays.map(t => t.pieces).join(' + ')}
+                    = ${job.pieces} ${mainText('pieces')}
+                </div>
+                <div class="tray-selector" id="tray-selector">
+                    ${job.trays.map((t, idx) => `
+                        <button class="reopt-option tray-opt ${idx === 0 ? 'active' : ''}"
+                                data-tray="${idx}"
+                                onclick="window.selectTray(${idx})">Caixa ${idx + 1}: ${t.pieces}</button>
+                    `).join('')}
+                </div>
+            ` : ''}
             <div class="results-cards">
                 <div class="result-card">
                     <div class="card-body">
@@ -2246,23 +2425,27 @@ async function handleGPUCalculate(calcStartTime, options = null) {
                 <button class="replay-btn" id="replay-animation-btn" onclick="window.replayGPUAnimation()">${mainText('gpuReplayAnimation')}</button>
                 <button class="reoptimize-btn" onclick="window.askReoptimize()">${mainText('reoptimize')}</button>
             </div>
+            ${isStacking ? `
+                <div class="reopt-horizontal" id="reopt-horizontal-group">
+                    <span class="reopt-horizontal-label">Rotació horitzontal:</span>
+                    <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 0)">0°</button>
+                    <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 45)">45°</button>
+                    <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 90)">90°</button>
+                    <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 135)">135°</button>
+                    <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', null)">Auto</button>
+                </div>
+            ` : ''}
             <div id="reoptimize-chooser" class="reoptimize-chooser" style="display: none;">
-                ${isStacking ? `
-                    <div class="reopt-horizontal" id="reopt-horizontal-group">
-                        <span class="reopt-horizontal-label">Rotació horitzontal:</span>
-                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 0)">0°</button>
-                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 45)">45°</button>
-                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 90)">90°</button>
-                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', 135)">135°</button>
-                        <button class="reopt-option" onclick="window.reoptimizeGPU('horizontal', null)">Auto</button>
-                    </div>
-                ` : ''}
                 <button class="reopt-option" onclick="window.reoptimizeGPU('accurate')">${mainText('reoptAccurate')}</button>
                 <button class="reopt-option" onclick="window.reoptimizeGPU('fast')">${mainText('reoptFast')}</button>
                 <button class="reopt-option" onclick="window.reoptimizeGPU('reseed')">${mainText('reoptReseed')}</button>
             </div>
             ${comparisonHtml}
         `;
+
+        // Many trays → collapse the box selector into a dropdown so it never
+        // overflows the results panel (measured, not a fixed threshold).
+        maybeCollapseTraySelector();
 
         setCalcProgress(false, 0, '', 0);
 
@@ -2292,7 +2475,11 @@ async function handleGPUCalculate(calcStartTime, options = null) {
             meshVolume: meshVolume || 0,
             materialDensity: matDensity,
             estimatedPieceWeight: estPieceWeight,
-            estimatedTotalWeight: estPieceWeight * job.pieces
+            estimatedTotalWeight: estPieceWeight * job.pieces,
+            fillPct: job.fill_pct ?? null,
+            interlocked: job.interlocked ?? null,
+            trays: job.trays ?? null,
+            gpuMethod,
         };
         state.displayCount = job.pieces;
         if (elements.reportButtons) elements.reportButtons.style.display = 'block';
@@ -2304,6 +2491,7 @@ async function handleGPUCalculate(calcStartTime, options = null) {
             }, { once: true });
         });
     } catch (err) {
+        if (!isCurrent()) return; // stale run — a mode switch already cleared the UI
         console.error('[GPU]', err);
         elements.results.innerHTML = `<p class="error-text">${mainText('modeGPUError')}: ${err.message}</p>`;
         setCalcProgress(false, 0, '', 0);
@@ -2316,6 +2504,53 @@ async function handleGPUCalculate(calcStartTime, options = null) {
  */
 window.replayGPUAnimation = () => {
     state.sceneManager?.replayReveal();
+};
+
+/**
+ * Multi-tray: re-render the 3D scene with the placements of the chosen box.
+ */
+window.selectTray = (idx) => {
+    idx = parseInt(idx, 10);
+    const job = state._trayJob;
+    if (!job || !Array.isArray(job.trays) || !job.trays[idx]) return;
+    const tray = job.trays[idx];
+    state._trayIdx = idx;
+    document.querySelectorAll('#tray-selector .tray-opt').forEach((btn, i) => {
+        btn.classList.toggle('active', i === idx);
+    });
+    const select = document.querySelector('#tray-selector select.tray-select');
+    if (select) select.value = String(idx);
+    const hero = document.getElementById('gpu-piece-count');
+    if (hero) {
+        hero.dataset.total = String(tray.pieces);
+        hero.textContent = String(tray.pieces);
+    }
+    if (!state._trayBaseGeo) return;
+    state.sceneManager.clearPieces();
+    const trayBox = {
+        boxL: parseFloat(elements.boxLength?.value) || 385,
+        boxW: parseFloat(elements.boxWidth?.value) || 285,
+        boxH: parseFloat(elements.boxHeight?.value) || 150,
+    };
+    state.sceneManager.addPackedPlacements({
+        placements: tray.placements || [],
+        baseGeometry: state._trayBaseGeo,
+        boxL: trayBox.boxL,
+        boxW: trayBox.boxW,
+        boxH: trayBox.boxH,
+        colorCount: parseInt(elements.optPieceColors?.value) || 10,
+        fillPct: tray.fill_pct || 0,
+        interlocked: tray.interlocked ? tray.interlocked.indices : null,
+    });
+    state._renderCtx = {
+        placements: tray.placements || [],
+        baseGeometry: state._trayBaseGeo,
+        boxL: trayBox.boxL,
+        boxW: trayBox.boxW,
+        boxH: trayBox.boxH,
+        fillPct: tray.fill_pct || 0,
+        interlocked: tray.interlocked ? tray.interlocked.indices : null,
+    };
 };
 
 /**
@@ -2380,14 +2615,62 @@ window.reoptimizeGPU = (option, angle = null) => {
 };
 
 /**
+ * Collapse the multi-box tray selector into a dropdown when the tray buttons
+ * would overflow the results panel width.
+ */
+function maybeCollapseTraySelector() {
+    const sel = document.getElementById('tray-selector');
+    if (!sel || sel.querySelector('select')) return;
+    const btns = Array.from(sel.querySelectorAll('.tray-opt'));
+    if (btns.length < 2) return;
+    const top0 = btns[0].offsetTop;
+    if (!btns.some(b => b.offsetTop > top0 + 1)) return;
+    const current = btns.findIndex(b => b.classList.contains('active'));
+    const options = btns.map((b, i) => `
+                <option value="${i}">${b.textContent}</option>
+            `).join('');
+    sel.innerHTML = `
+        <select class="tray-select" onchange="window.selectTray(this.value)">
+            ${options}
+        </select>`;
+    if (current >= 0) sel.querySelector('select').value = String(current);
+}
+
+/**
+ * Ask the user how many pieces to pack (multi-box mode) before starting.
+ */
+let mtPopupCallback = null;
+function showMtPopup(onConfirm) {
+    const input = document.getElementById('mt-popup-total');
+    if (input) {
+        input.value = parseInt(elements.multitrayTotal?.value, 10) || 1000;
+        input.focus();
+        input.select();
+    }
+    mtPopupCallback = onConfirm;
+    const popup = document.getElementById('mt-popup');
+    if (popup) popup.style.display = 'flex';
+}
+
+function hideMtPopup() {
+    const popup = document.getElementById('mt-popup');
+    if (popup) popup.style.display = 'none';
+    mtPopupCallback = null;
+}
+
+/**
  * Handle calculate button click (optimized mode)
  */
 async function handleCalculate() {
+    const calcGen = ++calcGeneration;
+    const isCurrent = () => calcGeneration === calcGen;
+
     if (state.calcAbortController) {
         state.calcAbortController.abort();
     }
-    state.calcAbortController = new AbortController();
-    const abortSignal = state.calcAbortController.signal;
+    const abortControllerRef = new AbortController();
+    state.calcAbortController = abortControllerRef;
+    const abortSignal = abortControllerRef.signal;
 
     const calcStartTime = performance.now();
 
@@ -2401,6 +2684,16 @@ async function handleCalculate() {
     // (same /api/pack flow + placements rendering).
     if (state.mode === 'fast' && state.planarVariant === 'stacking') {
         await handleGPUCalculate(calcStartTime, { method: 'stacking' });
+        return;
+    }
+
+    // ── Planar multi-tray — same server-side voxel packer, but pack the
+    // requested piece count into as many boxes as needed (stacking per tray).
+    if (state.mode === 'fast' && state.planarVariant === 'multitray') {
+        showMtPopup((totalPieces) => {
+            if (elements.multitrayTotal) elements.multitrayTotal.value = String(totalPieces);
+            handleGPUCalculate(calcStartTime, { method: 'multitray', totalPieces });
+        });
         return;
     }
 
@@ -2449,7 +2742,9 @@ async function handleCalculate() {
         }
 
         // Compartment mode: count cells with the cardboard thickness as the
-        // inter-piece gap, and only the user's chosen pose (no auto-rotation).
+        // inter-piece gap, and only the user's chosen pose. Compartments are
+        // rectangles, so the piece's footprint can be swapped 90° in-plane
+        // (L↔W) — offer both and let the calculator pick the denser grid.
         if (isCompartment) {
             const card = Math.max(0, values.cardboardMm || 0);
             values.packingGap = card;
@@ -2463,11 +2758,10 @@ async function handleCalculate() {
                 values.objL = dims.length;
                 values.objW = dims.width;
                 values.objH = dims.height;
-                orientationOverrides = [{
-                    dims: [dims.length, dims.width, dims.height],
-                    perm: [0, 1, 2],
-                    name: 'Orientació seleccionada',
-                }];
+                orientationOverrides = [
+                    { dims: [dims.length, dims.width, dims.height], perm: [0, 1, 2], name: 'Orientació seleccionada' },
+                    { dims: [dims.width, dims.length, dims.height], perm: [0, 1, 2], name: 'Orientació seleccionada 90°', rotated: true },
+                ];
             }
         }
 
@@ -2507,12 +2801,14 @@ async function handleCalculate() {
 
         // Show results immediately — unified grid-based approach guarantees correct count
         setCalcProgress(true, 4, 'Mostrant resultats...', calcStartTime);
+        if (!isCurrent()) return; // mode/variant switched while calculating
         elements.results.innerHTML = result.summary;
         elements.results.classList.add('fade-in');
 
         // Update 3D visualization
         setCalcProgress(true, 5, 'Preparant geometria 3D...', calcStartTime);
         await nextFrame();
+        if (!isCurrent()) return;
         state.sceneManager.clearPieces();
 
         // Always create box even if no data fits
@@ -2544,7 +2840,15 @@ async function handleCalculate() {
                             const sel = [...state.selectedOrientations][0];
                             poseGeom = state.stlStableOrientations[sel]?.geometry || null;
                         }
+                        // The calculator picks between the 0° and 90° in-plane
+                        // orientations; rotate the geometry to match the winner
+                        // (pieceL/pieceW come from the winning dims).
+                        const poseDims = poseGeom ? extractDimensions(poseGeom) : null;
+                        const rotated90 = !!poseDims &&
+                            Math.abs(pieceL - poseDims.width) < 0.5 &&
+                            Math.abs(pieceW - poseDims.length) < 0.5;
                         const orientedGeometry = (poseGeom || state.stlGeometry).clone();
+                        if (rotated90) applyYawToGeometry(orientedGeometry, 90);
                         recenterGeometry(orientedGeometry);
                         orientedGeometry.computeVertexNormals();
 
@@ -2899,6 +3203,7 @@ async function handleCalculate() {
                 materialName: matName,
                 labels: getCalculatorLabels(),
             });
+            if (!isCurrent()) return; // stale run — a mode switch already cleared the UI
             elements.results.innerHTML = finalSummary + `
                 <button class="reoptimize-btn" onclick="document.querySelector('#calculate-btn').click()">
                     ${mainText('reoptimize') || 'Re-optimitzar'}
@@ -2939,18 +3244,21 @@ async function handleCalculate() {
         setCalcProgress(true, 100, `Completat! (${elapsed}s)`);
         setTimeout(() => setCalcProgress(false, 0), 1200);
     } catch (err) {
-        if (err?.name === 'AbortError') {
-            elements.results.innerHTML = `<p class="placeholder-text">${mainText('calcCancelled')}</p>`;
-            state.sceneManager?.clearPieces();
-            if (elements.reportButtons) elements.reportButtons.style.display = 'none';
-            if (elements.applyGravityBtn) elements.applyGravityBtn.style.display = 'none';
-        } else {
-            console.error(err);
-            elements.results.innerHTML = `<p class="error-text">Error: ${err.message}</p>`;
+        // A mode switch mid-calc already cleared the UI — don't repopulate it.
+        if (isCurrent()) {
+            if (err?.name === 'AbortError') {
+                elements.results.innerHTML = `<p class="placeholder-text">${mainText('calcCancelled')}</p>`;
+                state.sceneManager?.clearPieces();
+                if (elements.reportButtons) elements.reportButtons.style.display = 'none';
+                if (elements.applyGravityBtn) elements.applyGravityBtn.style.display = 'none';
+            } else {
+                console.error(err);
+                elements.results.innerHTML = `<p class="error-text">Error: ${err.message}</p>`;
+            }
+            setCalcProgress(false, 0);
         }
-        setCalcProgress(false, 0);
     } finally {
-        state.calcAbortController = null;
+        if (state.calcAbortController === abortControllerRef) state.calcAbortController = null;
     }
 }
 
@@ -3652,6 +3960,217 @@ async function applyLanguage() {
 /**
  * Open report preview modal
  */
+const REPORT_STORAGE_KEY = 'packassist.reportData';
+
+/**
+ * Add one packaging-component row to the report data form.
+ */
+function addReportItemRow(item = {}) {
+    const container = document.getElementById('rp-items');
+    if (!container) return;
+    const row = document.createElement('div');
+    row.className = 'rp-item-row';
+    const mk = (ph, val, type = 'text') => {
+        const inp = document.createElement('input');
+        inp.type = type;
+        inp.step = type === 'number' ? '0.01' : undefined;
+        inp.placeholder = ph;
+        inp.value = val != null ? String(val) : '';
+        return inp;
+    };
+    row.append(
+        mk('Descripció', item.desc),
+        mk('Material', item.material),
+        mk('L', item.l, 'number'),
+        mk('W', item.w, 'number'),
+        mk('H', item.h, 'number'),
+        mk('Qty', item.qty, 'number'),
+        mk('€/unit', item.price, 'number'),
+    );
+    const del = document.createElement('button');
+    del.type = 'button';
+    del.className = 'rp-item-remove';
+    del.textContent = '×';
+    del.title = 'Eliminar component';
+    del.addEventListener('click', () => {
+        row.remove();
+        saveReportForm();
+    });
+    row.append(del);
+    container.appendChild(row);
+}
+
+function renderReportItems(items) {
+    const container = document.getElementById('rp-items');
+    if (!container) return;
+    container.innerHTML = '';
+    if (items && items.length) {
+        items.forEach(it => addReportItemRow(it));
+    } else {
+        addReportItemRow();
+    }
+}
+
+/**
+ * Populate the report data form from localStorage (saved once the user
+ * fills it) — pre-filled values are never clobbered on later opens.
+ */
+function loadReportForm() {
+    let saved = null;
+    try {
+        saved = JSON.parse(localStorage.getItem(REPORT_STORAGE_KEY) || 'null');
+    } catch (e) { /* ignore corrupted storage */ }
+    const s = saved || {};
+    const set = (id, v) => {
+        const el = document.getElementById(id);
+        if (el && v != null && v !== '') el.value = v;
+    };
+    const part = s.part || {};
+    const supplier = s.supplier || {};
+    const cost = s.cost || {};
+    const pallet = s.pallet || {};
+    const approvals = s.approvals || {};
+    set('rp-part-number', part.number);
+    set('rp-project', part.project);
+    set('rp-revision', part.revision);
+    set('rp-material', part.material);
+    set('rp-supplier-name', supplier.name);
+    set('rp-supplier-address', supplier.address);
+    set('rp-supplier-contact', supplier.contact);
+    set('rp-supplier-phone', supplier.phone);
+    set('rp-supplier-email', supplier.email);
+    set('rp-supplier-function', supplier.function);
+    set('rp-box-cost', cost.boxCost);
+    set('rp-packaging-cost', cost.packagingCost);
+    set('rp-freight-cost', cost.freightCost);
+    set('rp-cost-part', cost.costPerPart);
+    set('rp-pallet-l', pallet.l);
+    set('rp-pallet-w', pallet.w);
+    set('rp-pallet-h', pallet.h);
+    set('rp-pallet-weight', pallet.weight);
+    set('rp-pallet-boxes', pallet.boxes);
+    set('rp-created-by', approvals.createdBy);
+    set('rp-concept-function', approvals.conceptFunction);
+    set('rp-concept-name', approvals.conceptName);
+    set('rp-concept-date', approvals.conceptDate);
+    set('rp-final-function', approvals.finalFunction);
+    set('rp-final-name', approvals.finalName);
+    set('rp-final-date', approvals.finalDate);
+    set('rp-comments', s.comments);
+    renderReportItems(s.items);
+}
+
+/**
+ * Collect the current report data form values.
+ */
+function collectReportForm() {
+    const val = (id) => {
+        const el = document.getElementById(id);
+        return el ? el.value.trim() : '';
+    };
+    const num = (id) => {
+        const v = val(id);
+        return v === '' ? null : Number(v);
+    };
+    const items = Array.from(document.querySelectorAll('#rp-items .rp-item-row')).map(row => {
+        const inputs = row.querySelectorAll('input');
+        return {
+            desc: inputs[0].value.trim(),
+            material: inputs[1].value.trim(),
+            l: inputs[2].value === '' ? null : Number(inputs[2].value),
+            w: inputs[3].value === '' ? null : Number(inputs[3].value),
+            h: inputs[4].value === '' ? null : Number(inputs[4].value),
+            qty: inputs[5].value === '' ? null : Number(inputs[5].value),
+            price: inputs[6].value === '' ? null : Number(inputs[6].value),
+        };
+    }).filter(it => it.desc || it.material || it.l != null || it.w != null || it.h != null || it.qty != null || it.price != null);
+    return {
+        part: {
+            number: val('rp-part-number'),
+            project: val('rp-project'),
+            revision: val('rp-revision'),
+            material: val('rp-material'),
+        },
+        supplier: {
+            name: val('rp-supplier-name'),
+            address: val('rp-supplier-address'),
+            contact: val('rp-supplier-contact'),
+            phone: val('rp-supplier-phone'),
+            email: val('rp-supplier-email'),
+            function: val('rp-supplier-function'),
+        },
+        cost: {
+            boxCost: num('rp-box-cost'),
+            packagingCost: num('rp-packaging-cost'),
+            freightCost: num('rp-freight-cost'),
+            costPerPart: num('rp-cost-part'),
+        },
+        pallet: {
+            l: num('rp-pallet-l'),
+            w: num('rp-pallet-w'),
+            h: num('rp-pallet-h'),
+            weight: num('rp-pallet-weight'),
+            boxes: num('rp-pallet-boxes'),
+        },
+        approvals: {
+            createdBy: val('rp-created-by'),
+            conceptFunction: val('rp-concept-function'),
+            conceptName: val('rp-concept-name'),
+            conceptDate: val('rp-concept-date'),
+            finalFunction: val('rp-final-function'),
+            finalName: val('rp-final-name'),
+            finalDate: val('rp-final-date'),
+        },
+        comments: val('rp-comments'),
+    };
+}
+
+/**
+ * Persist the report data form to localStorage.
+ */
+function saveReportForm() {
+    try {
+        localStorage.setItem(REPORT_STORAGE_KEY, JSON.stringify(collectReportForm()));
+    } catch (e) { /* storage full / unavailable — non fatal */ }
+}
+
+/**
+ * Merge pack results with the report data form.
+ */
+function buildReportData() {
+    saveReportForm();
+    return { ...(state.lastResults || {}), ...collectReportForm() };
+}
+
+/**
+ * Re-render the scene pieces with a different colour count (report slider).
+ * Uses the last rendered placement context (GPU/fast results, or the
+ * currently selected tray). Returns false when there is nothing to re-colour
+ * (e.g. bulk simulation) — the caller can still regenerate the preview.
+ */
+function recolorScene(colorCount) {
+    const ctx = state._renderCtx;
+    if (!ctx || !state.sceneManager || !Array.isArray(ctx.placements) || ctx.placements.length === 0) {
+        return false;
+    }
+    state.sceneManager.clearPieces();
+    state.sceneManager.addPackedPlacements({
+        placements: ctx.placements,
+        baseGeometry: ctx.baseGeometry,
+        boxL: ctx.boxL,
+        boxW: ctx.boxW,
+        boxH: ctx.boxH,
+        colorCount,
+        fillPct: ctx.fillPct,
+        interlocked: ctx.interlocked,
+        onProgress: (p) => {
+            const el = document.getElementById('gpu-piece-count');
+            if (el) el.textContent = String(p.revealed);
+        }
+    });
+    return true;
+}
+
 async function openReportModal() {
     if (!state.lastResults) {
         alert(mainText('reportNoResults'));
@@ -3665,6 +4184,8 @@ async function openReportModal() {
         elements.colorCount.value = String(mainColorCount);
         elements.colorCountValue.textContent = String(mainColorCount);
     }
+
+    loadReportForm();
     
     elements.reportModal.style.display = 'flex';
     elements.reportPreviewFrame.innerHTML = '<p class="loading-text">Carregant previsualització...</p>';
@@ -3689,12 +4210,12 @@ async function updateReportPreview() {
     const language = document.querySelector('input[name="report-lang"]:checked')?.value || 'ca';
     
     try {
-        const html = await state.reportGenerator.generatePreview(state.lastResults, language);
+        const html = await state.reportGenerator.generatePreview(buildReportData(), language);
         
         // Create iframe with content
         const iframe = document.createElement('iframe');
         iframe.style.width = '100%';
-        iframe.style.height = '1123px'; // A4 at 96dpi, one sheet
+        iframe.style.height = '1123px'; // A4 at 96dpi
         iframe.style.border = 'none';
         
         elements.reportPreviewFrame.innerHTML = '';
@@ -3721,7 +4242,7 @@ async function downloadReportFromModal() {
     const language = document.querySelector('input[name="report-lang"]:checked')?.value || 'ca';
     
     try {
-        await state.reportGenerator.downloadReport(state.lastResults, language);
+        await state.reportGenerator.downloadReport(buildReportData(), language);
         closeReportModal();
     } catch (error) {
         console.error('Error generating report:', error);
@@ -3740,12 +4261,50 @@ async function generateReport(language) {
     }
     
     try {
-        await state.reportGenerator.downloadReport(state.lastResults, language);
+        await state.reportGenerator.downloadReport(buildReportData(), language);
     } catch (error) {
         console.error('Error generating report:', error);
         alert(mainText('reportGenerateError'));
     }
 }
+
+// Report data form: persist on input, add component rows.
+let reportPreviewDebounce = null;
+document.addEventListener('DOMContentLoaded', () => {
+    const rpData = document.getElementById('report-data');
+    if (rpData) {
+        rpData.addEventListener('input', () => {
+            saveReportForm();
+            if (elements.reportModal?.style.display === 'flex') {
+                clearTimeout(reportPreviewDebounce);
+                reportPreviewDebounce = setTimeout(updateReportPreview, 400);
+            }
+        });
+    }
+    document.getElementById('rp-add-item')?.addEventListener('click', () => {
+        addReportItemRow();
+        saveReportForm();
+    });
+    document.getElementById('save-box-btn')?.addEventListener('click', saveCurrentBox);
+    renderSavedBoxes();
+    document.getElementById('mt-popup-confirm')?.addEventListener('click', () => {
+        const cb = mtPopupCallback;
+        const input = document.getElementById('mt-popup-total');
+        const total = parseInt(input?.value, 10) || 1000;
+        hideMtPopup();
+        if (cb) cb(Math.max(1, total));
+    });
+    document.getElementById('mt-popup-cancel')?.addEventListener('click', hideMtPopup);
+    const mtInput = document.getElementById('mt-popup-total');
+    if (mtInput) {
+        mtInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                document.getElementById('mt-popup-confirm')?.click();
+            }
+        });
+    }
+});
 
 // Box Options ("Comparar caixes") — ranked cost-per-part comparison
 initBoxOptions();

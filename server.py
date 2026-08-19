@@ -163,7 +163,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             # Stacking/Compartment honor the user's chosen pose: when the
             # client sends a pre-rotated STL, restrict to in-plane spins of
             # that pose (the piece keeps resting on the chosen face).
-            if fixed_orientation and method in ("stacking", "compartment"):
+            if fixed_orientation and method in ("stacking", "compartment", "multitray"):
                 yaw = roll = pitch = 1
                 packer_fixed_orientation = True
             else:
@@ -182,7 +182,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
 
             t0 = time.time()
 
-            if method in ("sparrow", "stacking", "compartment", "spectral"):
+            if method in ("sparrow", "stacking", "compartment", "spectral", "multitray"):
                 import random as _random
                 seed = params.get("seed", 0) or abs(hash(stl_data)) % (2**31)
                 _random.seed(seed)
@@ -216,6 +216,46 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                     placed_pieces, placed_meshes = packer.pack_stacking(
                         max_pieces=500, cell_size=vox_cell, verbose=False,
                         progress_callback=progress_cb)
+                elif method == "multitray":
+                    # Multi-tray: pack the same box repeatedly until the
+                    # requested piece count is reached (or a tray fits
+                    # nothing). Uses the stacking method per tray — highest
+                    # density for identical parts with the user's pose.
+                    total_wanted = int(params.get("total_pieces", 1000))
+                    packed_so_far = 0
+                    trays = []
+                    for tray_no in range(1, 64):
+                        remaining = total_wanted - packed_so_far
+                        if remaining <= 0:
+                            break
+                        tray_placed, tray_meshes = packer.pack_stacking(
+                            max_pieces=min(remaining, 500), cell_size=vox_cell,
+                            verbose=False, progress_callback=progress_cb)
+                        if not tray_placed:
+                            break
+                        from packer_best import refine_subvoxel
+                        tray_refined = refine_subvoxel(
+                            tray_placed, packer._sparrow_voxel_data,
+                            float(packer._sparrow_cell_size), n_rounds=3)
+                        oris_t = packer._sparrow_voxel_data
+                        tray_meshes = []
+                        for (x, y, z, oi, name) in tray_refined:
+                            cm = oris_t[oi]['mesh'].copy()
+                            cm.apply_translation([x, y, z])
+                            tray_meshes.append(cm)
+                        tray_placed = tray_refined
+                        trays.append({
+                            "tray": tray_no,
+                            "pieces": len(tray_placed),
+                            "fill_pct": round(sum(m.volume for m in tray_meshes) /
+                                              (box_l * box_w * box_h) * 100, 1),
+                            "placements": format_placements(
+                                tray_placed, packer._sparrow_voxel_data),
+                        })
+                        packed_so_far += len(tray_placed)
+                        placed_pieces = tray_placed
+                        placed_meshes = tray_meshes
+                    job["trays"] = trays
                 else:  # compartment
                     placed_pieces, placed_meshes = packer.pack_compartment(
                         max_pieces=500, cell_size=vox_cell, verbose=False,
@@ -233,6 +273,30 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                                              scan_step_vox=scan_vox, verbose=False,
                                              progress_callback=progress_cb)
                 elapsed = time.time() - t0
+
+            # Sub-voxel refinement: slide each piece toward the box origin
+            # and drop it into the valleys left by grid quantization, then
+            # scale all moves back until the meshes are collision-free.
+            # Voxel methods only (they have sparse voxel data per orientation).
+            if method in ("sparrow", "stacking", "spectral") and placed_pieces:
+                from packer_best import refine_subvoxel
+                refined_placed = refine_subvoxel(
+                    placed_pieces, packer._sparrow_voxel_data,
+                    float(packer._sparrow_cell_size), n_rounds=3)
+                # Rebuild meshes at the refined positions (positions stay
+                # within half a voxel of the grid anchor, so the packing
+                # result is unchanged — only tighter).
+                oris_here = packer._sparrow_voxel_data
+                rm = []
+                for (x, y, z, oi, name) in refined_placed:
+                    cm = oris_here[oi]['mesh'].copy()
+                    cm.apply_translation([x, y, z])
+                    rm.append(cm)
+                placed_pieces = refined_placed
+                placed_meshes = rm
+                placed = placed_pieces
+
+            elapsed = time.time() - t0
 
             jid = job["job_id"][:8]
             stl_out = RESULT_DIR / f"packed_{jid}.stl"
@@ -268,14 +332,17 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             ok = verify(placed_meshes) if placed_meshes else True
 
             # Build placement data with orientation transforms
-            orients_for_placements = packer._sparrow_voxel_data if method in ("sparrow", "stacking", "compartment", "spectral") else orients
+            orients_for_placements = packer._sparrow_voxel_data if method in ("sparrow", "stacking", "compartment", "spectral", "multitray") else orients
             placements = format_placements(placed, orients_for_placements)
 
             # Populate every result field BEFORE flipping status to "done" so
             # concurrent status polls never observe a partially-written result.
-            job["pieces"] = len(placed_meshes)
-            job["fill_pct"] = round(sum(m.volume for m in placed_meshes) /
-                                    (box_l * box_w * box_h) * 100, 1) if placed_meshes else 0
+            job["pieces"] = sum(t["pieces"] for t in trays) if job.get("trays") else len(placed_meshes)
+            if job.get("trays"):
+                job["fill_pct"] = round(sum(t["fill_pct"] for t in job["trays"]) / len(job["trays"]), 1) if job["trays"] else 0
+            else:
+                job["fill_pct"] = round(sum(m.volume for m in placed_meshes) /
+                                        (box_l * box_w * box_h) * 100, 1) if placed_meshes else 0
             job["time_s"] = round(elapsed, 1)
             job["stl_path"] = str(stl_out) if placed_meshes else ""
             job["png_path"] = str(png_out) if placed_meshes else ""
@@ -292,6 +359,20 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                     "cellW": round(float(cell_w_mm), 2),
                     "nLayers": int(n_layers),
                     "layerPitch": round(float(layer_pitch_mm), 2),
+                }
+
+            # Interlocking analysis: pieces that cannot be lifted straight out
+            # of the box (trapped by neighbours above them). Only for the
+            # optimized GPU methods (sparrow / spectral), which have sparse
+            # voxel data per orientation.
+            if method in ("sparrow", "spectral") and placed_pieces:
+                from packer_best import detect_interlocking
+                vox_cell_used = getattr(packer, "_sparrow_cell_size", None) or cell
+                oris_used = getattr(packer, "_sparrow_voxel_data", None) or orients_for_placements
+                interlocked = detect_interlocking(placed_pieces, oris_used, float(vox_cell_used))
+                job["interlocked"] = {
+                    "count": len(interlocked),
+                    "indices": interlocked,
                 }
             job["status"] = "done"
 
@@ -488,6 +569,7 @@ def submit_pack():
         "seed": int(request.form.get("seed", 0)),
         "fixed_orientation": int(request.form.get("fixed_orientation", 0)),
         "horizontal_angle": request.form.get("horizontal_angle"),
+        "total_pieces": int(request.form.get("total_pieces", 1000)),
     }
 
     # ── Adaptive resolution: prefer scan-step scaling over cell bumping ──
@@ -525,7 +607,7 @@ def submit_pack():
             params["cell_adjusted_from"] = requested_cell
 
     # ETA estimate based on final (adjusted) params
-    if method in ("sparrow", "stacking", "compartment"):
+    if method in ("sparrow", "stacking", "compartment", "multitray"):
         box_vol = box_l * box_w * box_h
         eta_s = max(2, min(120, box_vol / 40000))
         eta_label = f"{eta_s:.0f}s"
@@ -613,6 +695,10 @@ def get_pack_status(job_id):
         result["placements"] = job["placements"]
         if job.get("compartment"):
             result["compartment"] = job["compartment"]
+        if job.get("interlocked"):
+            result["interlocked"] = job["interlocked"]
+        if job.get("trays"):
+            result["trays"] = job["trays"]
     elif job["status"] == "error":
         result["error"] = job.get("error_msg", "Unknown error")
 

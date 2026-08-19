@@ -536,7 +536,7 @@ export class SceneManager {
         const geometry = new THREE.BoxGeometry(length, height, width);
         const edges = new THREE.EdgesGeometry(geometry);
         const material = new THREE.LineBasicMaterial({ 
-            color: 0x22c55e,
+            color: 0x0047ab,
             linewidth: 3
         });
         this.boxMesh = new THREE.LineSegments(edges, material);
@@ -589,6 +589,25 @@ export class SceneManager {
         this.pieces = [];
         this._lastReveal = null;
         this._partialState = null;
+    }
+
+    /**
+     * Remove the box wireframe and its translucent floor, disposing GPU
+     * resources. Used when switching mode/variant to reset the whole scene.
+     */
+    clearBox() {
+        if (this.boxMesh) {
+            this.scene.remove(this.boxMesh);
+            this.boxMesh.geometry.dispose();
+            this.boxMesh.material.dispose();
+            this.boxMesh = null;
+        }
+        if (this.boxFloor) {
+            this.scene.remove(this.boxFloor);
+            this.boxFloor.geometry.dispose();
+            this.boxFloor.material.dispose();
+            this.boxFloor = null;
+        }
     }
 
     // ═══════════════ PROTECTIVE PACKAGING OVERLAYS (Pack Studio) ═══════════════
@@ -2510,7 +2529,7 @@ export class SceneManager {
      * @param {number} [params.fillPct] - Fill percentage for the stats overlay
      * @param {(p:{revealed:number,total:number,pct:number})=>void} [params.onProgress]
      */
-    addPackedPlacements({ placements, baseGeometry, boxL, boxW, boxH, colorCount = null, fillPct = 0, onProgress = null }) {
+    addPackedPlacements({ placements, baseGeometry, boxL, boxW, boxH, colorCount = null, fillPct = 0, onProgress = null, interlocked = null }) {
         this.clearPieces();
 
         if (!placements || placements.length === 0) {
@@ -2573,12 +2592,16 @@ export class SceneManager {
             mesh.count = 0; // hidden until revealed
 
             const dummy = new THREE.Object3D();
+            const interlockedSet = interlocked ? new Set(interlocked) : null;
             group.forEach(({ p, globalIdx }, localIdx) => {
                 dummy.position.set(p.x, p.y, p.z);
                 dummy.rotation.set(0, 0, 0);
                 dummy.updateMatrix();
                 mesh.setMatrixAt(localIdx, dummy.matrix);
-                mesh.setColorAt(localIdx, new THREE.Color(this.pieceColors[globalIdx % numColors]));
+                const c = interlockedSet && interlockedSet.has(globalIdx)
+                    ? new THREE.Color(0xcc2222)
+                    : new THREE.Color(this.pieceColors[globalIdx % numColors]);
+                mesh.setColorAt(localIdx, c);
                 revealOrder.push({ mesh, idx: localIdx });
             });
             mesh.instanceMatrix.needsUpdate = true;

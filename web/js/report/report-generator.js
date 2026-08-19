@@ -1,19 +1,19 @@
 /**
  * PackAssist Web - PDF Report Generator
- * Professional one-page "Pack Report" (Pack Studio style).
+ * Professional multi-page "Pack Data Sheet" (generic PDS, inspired by the
+ * ZF Packaging Data Sheet and Autoliv proposal sheet formats).
  *
- * Generates a single A4 sheet with:
- *   - Header: part info (name, dims, weight) + PackAssist branding
- *   - Hero: large isometric render of the packed box (green wireframe + pieces)
- *   - Metrics: clean grid of key numbers
- *   - Small multi-views: top / front / side
- *   - Cost summary (only when cost data is present)
+ * Generates A4 sheets with:
+ *   Page 1 - Doc header (part + metadata), renders (isometric hero + top/
+ *            front/side views), box (PU) data table, pallet (SU) table.
+ *   Page 2 - Packaging components & cost table, supplier block, approval
+ *            signature table, additional comments.
  */
 
 import * as THREE from 'three';
 import { loadLocale } from '../i18n.js';
 
-export const PACKASSIST_VERSION = 'v1.0.0';
+export const PACKASSIST_VERSION = 'v1.3.0';
 
 /**
  * Report Generator Class
@@ -100,7 +100,7 @@ export class ReportGenerator {
             // Grid
             if (grid) grid.visible = opts.hideGrid === false;
 
-            // Box wireframe (null boxColor = keep current green box)
+            // Box wireframe (null boxColor = keep current cobalt blue box)
             if (this.scene.boxMesh && opts.boxColor != null) {
                 this.scene.boxMesh.material = new THREE.LineBasicMaterial({
                     color: opts.boxColor,
@@ -252,8 +252,8 @@ export class ReportGenerator {
     }
 
     /**
-     * Capture the large presentation "hero" render: green wireframe box,
-     * solid colored pieces and a white ground with soft shadows.
+     * Capture the large presentation "hero" render: cobalt blue wireframe box,
+     * solid colored pieces on a pure white background.
      * @param {number} width - Image width
      * @param {number} height - Image height
      * @returns {string|null} Data URL of the image
@@ -267,21 +267,60 @@ export class ReportGenerator {
             width,
             height,
             background: 0xffffff,
-            boxColor: null,      // keep the green wireframe box
+            boxColor: null,      // keep the cobalt blue wireframe box
             hideGrid: true,
-            floor: 'white',
+            floor: 'none',
             pieceOpacity: 1,
             pixelRatio: 1
         });
     }
 
+    // ── formatting helpers ──────────────────────────────────
+    _num(v) {
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    _fmt(v, maxFrac = 2) {
+        const n = this._num(v);
+        if (n === null) return '—';
+        return n.toLocaleString(this.localeCode, { maximumFractionDigits: maxFrac });
+    }
+
+    _fmtEuro(v, maxFrac = 4) {
+        const n = this._num(v);
+        if (n === null) return '—';
+        return n.toLocaleString(this.localeCode, {
+            style: 'currency', currency: 'EUR',
+            minimumFractionDigits: 2, maximumFractionDigits: maxFrac
+        });
+    }
+
+    _fmtDim(v) {
+        const n = this._num(v);
+        return n === null ? '—' : n.toLocaleString(this.localeCode, { maximumFractionDigits: 1 });
+    }
+
+    _fmtDate(isoOrText) {
+        if (!isoOrText) return '';
+        if (/^\d{4}-\d{2}-\d{2}/.test(String(isoOrText))) {
+            const d = new Date(isoOrText);
+            return d.toLocaleDateString(this.localeCode);
+        }
+        return String(isoOrText);
+    }
+
+    // ── section builders ────────────────────────────────────
+    _sectionTitle(label) {
+        return `<div class="sec-title">${label}</div>`;
+    }
+
     /**
-     * Generate the one-page PDF report (HTML document for print / preview)
-     * @param {Object} data - Report data
+     * Generate the multi-page PDF report (HTML document for print / preview)
+     * @param {Object} data - Report data (pack results + report form fields)
      * @returns {Promise<string>} HTML content
      */
     async generatePDF(data) {
-        // Capture views - hero is large, small views are compact
         const views = {
             hero: this.captureHero(1400, 1050),
             top: this.captureView('top', 720, 480),
@@ -293,104 +332,379 @@ export class ReportGenerator {
     }
 
     /**
-     * Create the one-page Pack Report HTML document
-     * @param {Object} data - Report data
+     * Create the multi-page Pack Data Sheet HTML document.
+     * @param {Object} data - Report data (merged with form fields)
      * @param {Object} views - Captured view data URLs
      * @returns {string} HTML content
      */
     async createPDFDocument(data, views) {
         const {
-            pieceDims,
-            boxDims,
-            pieceCount,
-            pieceWeight = 0.1,
-            maxWeight,
+            pieceDims = { l: 0, w: 0, h: 0 },
+            boxDims = { length: 0, width: 0, height: 0 },
+            pieceCount = 0,
+            pieceWeight = 0,
             mode = 'bulk',
             meshVolume = 0,
-            materialDensity = 0,
-            estimatedPieceWeight = 0,
-            estimatedTotalWeight = 0,
+            fillPct = null,
+            interlocked = null,
+            trays = null,
+            gpuMethod = null,
             stlFileName = null,
             partName = null,
-            cost = null
         } = data;
 
-        // Volumes and weights - use real mesh volume if available
-        const bboxVolumeMM3 = pieceDims.l * pieceDims.w * pieceDims.h;
-        const realVolumeMM3 = meshVolume > 0 ? meshVolume : bboxVolumeMM3;
-        const pieceVolume = realVolumeMM3 / 1000000; // cm³
-        const boxVolume = (boxDims.length * boxDims.width * boxDims.height) / 1000000; // cm³
-        const totalWeight = pieceCount * pieceWeight;
-        const effectiveTotalWeight = estimatedTotalWeight > 0 ? estimatedTotalWeight : totalWeight;
-        const volumeUsage = (pieceCount * pieceVolume / boxVolume * 100).toFixed(1);
+        // ── report form fields (merged in main.js) ──
+        const part = data.part || {};
+        const supplier = data.supplier || {};
+        const cost = data.cost || {};
+        const items = Array.isArray(data.items) ? data.items : [];
+        const pallet = data.pallet || {};
+        const approvals = data.approvals || {};
+        const comments = data.comments || '';
 
-        const localeCode = this.locale?.meta?.locale || (this.language === 'ca' ? 'ca-ES' : 'en-US');
-        const currentDate = new Date().toLocaleDateString(localeCode);
+        this.localeCode = this.locale?.meta?.locale || (this.language === 'ca' ? 'ca-ES' : 'en-US');
+        const t = this.t;
+        const fmt = (v) => this._fmt(v);
+        const fmtW = (v) => this._fmt(v, 4);
+        const fmtEuro = (v) => this._fmtEuro(v, 4);
+        const fmtEuro2 = (v) => this._fmtEuro(v, 2);
+        const fmtD = (v) => this._fmtDim(v);
+        const currentDate = this._fmtDate(new Date().toISOString());
 
-        // Localized helpers
-        const fmt = (v) => Number(v).toLocaleString(localeCode, { maximumFractionDigits: 2 });
-        const fmtW = (v) => Number(v).toLocaleString(localeCode, { maximumFractionDigits: 4 });
-        const fmtEuro = (v) => {
-            if (v == null || Number.isNaN(Number(v))) return '—';
-            return Number(v).toLocaleString(localeCode, {
-                style: 'currency',
-                currency: 'EUR',
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 4
-            });
-        };
+        // ── derived values ──
+        const name = part.name || partName || stlFileName || (t.customPiece || 'Custom piece');
+        const partNumber = part.number || '';
+        const revision = part.revision || '';
+        const dimsText = `${fmtD(pieceDims.l)} × ${fmtD(pieceDims.w)} × ${fmtD(pieceDims.h)} mm`;
+        const boxDimsText = `${fmtD(boxDims.length)} × ${fmtD(boxDims.width)} × ${fmtD(boxDims.height)} mm`;
 
         const modeLabel = mode === 'fast'
-            ? (this.t.modeFast || 'Planar')
+            ? (t.modeFast || 'Planar')
             : mode === 'gpu'
-                ? (this.t.modeGpu || 'GPU')
-                : (this.t.modeBulk || 'Bulk');
+                ? (t.modeGpu || 'GPU')
+                : (t.modeBulk || 'Bulk');
 
-        const name = partName || stlFileName || (this.t.customPiece || 'Custom piece');
-        const fmtD = (v) => Number(v).toLocaleString(localeCode, { maximumFractionDigits: 2 });
-        const dimsText = `${fmtD(pieceDims.l)} × ${fmtD(pieceDims.w)} × ${fmtD(pieceDims.h)} mm`;
-        const weightText = fmtW(pieceWeight);
+        // fill %
+        let fillRate = fillPct;
+        if (fillRate == null) {
+            const bboxVolumeMM3 = (pieceDims.l || 0) * (pieceDims.w || 0) * (pieceDims.h || 0);
+            const realVolumeMM3 = meshVolume > 0 ? meshVolume : bboxVolumeMM3;
+            const pieceVolume = realVolumeMM3 / 1000000; // cm³
+            const boxVolume = (boxDims.length * boxDims.width * boxDims.height) / 1000000;
+            fillRate = boxVolume > 0 ? (pieceCount * pieceVolume / boxVolume * 100) : 0;
+        }
+        fillRate = this._num(fillRate) ?? 0;
 
-        const totalWeightText = effectiveTotalWeight > 0
-            ? `${effectiveTotalWeight.toFixed(2)} kg`
-            : `${totalWeight.toFixed(2)} kg`;
+        // weights
+        const totalWeight = this._num(data.estimatedTotalWeight) ?? (pieceCount * this._num(pieceWeight) ?? 0);
 
-        // Cost section - only when cost data is present
-        const hasCost = !!cost && (
-            cost.boxCost != null || cost.packagingCost != null ||
-            cost.freightCost != null || cost.costPerPart != null
-        );
+        // cost rows
+        const itemRows = items
+            .map(it => {
+                const qty = this._num(it.qty) ?? 0;
+                const price = this._num(it.price) ?? 0;
+                const lineCost = qty * price;
+                return {
+                    desc: it.desc || '',
+                    material: it.material || '',
+                    dims: `${fmtD(it.l)}×${fmtD(it.w)}×${fmtD(it.h)}`,
+                    qty,
+                    price,
+                    cost: lineCost,
+                    hasDims: this._num(it.l) != null || this._num(it.w) != null || this._num(it.h) != null
+                };
+            })
+            .filter(r => r.desc || r.material);
 
-        const costRow = hasCost ? `
-            <section class="cost-section">
-                <div class="cost-header">
-                    <span class="cost-title">${this.t.costTitle || 'Cost Summary'}</span>
+        const itemsTotal = itemRows.reduce((s, r) => s + r.cost, 0);
+        const boxCost = this._num(cost.boxCost);
+        const packagingCost = this._num(cost.packagingCost);
+        const freightCost = this._num(cost.freightCost);
+        const hasItems = itemRows.length > 0;
+        const hasCostInputs = boxCost != null || packagingCost != null || freightCost != null || hasItems;
+        let costPerPart = this._num(cost.costPerPart);
+        if (costPerPart == null && hasCostInputs && pieceCount > 0) {
+            costPerPart = ((itemsTotal + (boxCost ?? 0)) / pieceCount);
+        }
+        const hasCost = hasCostInputs || costPerPart != null;
+
+        // multitray info
+        const trayCount = Array.isArray(trays) ? trays.length : 0;
+        const trayPieces = Array.isArray(trays) ? trays.map(tr => tr.pieces) : [];
+        const interlockCount = interlocked ? (this._num(interlocked.count) ?? 0) : 0;
+
+        // pallet info
+        const hasPallet = Object.keys(pallet).some(k => this._num(pallet[k]) != null || pallet[k]);
+
+        // approvals
+        const hasSupplier = Object.keys(supplier).some(k => supplier[k]);
+        const hasApprovals = approvals.conceptName || approvals.finalName || approvals.createdBy;
+        const approvalRows = [
+            ['CONCEPT', approvals.conceptFunction, approvals.conceptName, approvals.conceptDate],
+            ['FINAL APPROVAL', approvals.finalFunction, approvals.finalName, approvals.finalDate],
+        ];
+
+        // ── helpers for HTML ──
+        const imgOrPlaceholder = (src, alt, label, phLabel) => src
+            ? `<img src="${src}" alt="${alt}">`
+            : `<div class="view-unavailable">${phLabel || (t.viewUnavailable || '—')}</div>`;
+
+        const pageNum = (n) => `<div class="page-num">${t.page || 'Pàgina'} ${n}/2</div>`;
+
+        // ══════════════ PAGE 1 ══════════════
+        const page1 = `
+        <div class="sheet">
+            <!-- DOC HEADER -->
+            <header class="doc-header">
+                <div class="doc-header-left">
+                    <div class="doc-kicker">${t.kicker || 'Pack Data Sheet'}</div>
+                    <h1 class="doc-title">${name}</h1>
+                    <div class="doc-sub">${partNumber ? `PN ${partNumber} · ` : ''}${dimsText} · ${t.weight || 'Pes'} ${fmtW(pieceWeight)} kg</div>
                 </div>
-                <div class="cost-grid">
-                    <div class="cost-item">
-                        <div class="cost-value">${fmtEuro(cost.boxCost)}</div>
-                        <div class="cost-label">${this.t.boxCost || 'Box cost'}</div>
-                    </div>
-                    <div class="cost-item">
-                        <div class="cost-value">${fmtEuro(cost.packagingCost)}</div>
-                        <div class="cost-label">${this.t.packagingCost || 'Packaging'}</div>
-                    </div>
-                    <div class="cost-item">
-                        <div class="cost-value">${fmtEuro(cost.freightCost)}</div>
-                        <div class="cost-label">${this.t.freightCost || 'Freight'}</div>
-                    </div>
-                    <div class="cost-item cost-item-highlight">
-                        <div class="cost-value">${fmtEuro(cost.costPerPart)}</div>
-                        <div class="cost-label">${this.t.costPerPart || 'Cost per part'}</div>
-                    </div>
+                <div class="doc-header-right">
+                    <div class="brand">PackAssist</div>
+                    <div class="brand-sub">${PACKASSIST_VERSION} · ${currentDate}</div>
+                    ${revision ? `<div class="brand-sub">${t.revision || 'Rev'} ${revision}</div>` : ''}
                 </div>
-            </section>` : '';
+            </header>
+
+            <!-- PART INFO -->
+            <section class="table-section">
+                ${this._sectionTitle(t.partInfo || 'Part information')}
+                <table class="data-table part-table">
+                    <tbody>
+                        <tr>
+                            <th>${t.partNumber || 'Part number'}</th>
+                            <td>${part.number || '—'}</td>
+                            <th>${t.project || 'Project'}</th>
+                            <td>${part.project || '—'}</td>
+                            <th>${t.material || 'Material'}</th>
+                            <td>${part.material || '—'}</td>
+                            <th>${t.supplierName || 'Supplier'}</th>
+                            <td>${supplier.name || '—'}</td>
+                        </tr>
+                        <tr>
+                            <th>${t.dimensions || 'Dimensions'}</th>
+                            <td>${dimsText}</td>
+                            <th>${t.weightPerPiece || 'Weight / part'}</th>
+                            <td>${fmtW(pieceWeight)} kg</td>
+                            <th>${t.modeUsed || 'Mode'}</th>
+                            <td>${mode === 'gpu' ? `${modeLabel}${gpuMethod ? ` · ${gpuMethod}` : ''}` : modeLabel}</td>
+                            <th>${t.fillRate || 'Fill rate'}</th>
+                            <td>${fmt(fillRate)} %</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <!-- RENDERS -->
+            <section class="views-section">
+                <div class="hero">
+                    ${imgOrPlaceholder(views.hero, t.isometricView, t.isometricView)}
+                    <div class="view-label">${t.isometricView}</div>
+                </div>
+                <div class="views-small">
+                    <div class="view">${imgOrPlaceholder(views.top, t.topView)}<div class="view-label">${t.topView}</div></div>
+                    <div class="view">${imgOrPlaceholder(views.front, t.frontView)}<div class="view-label">${t.frontView}</div></div>
+                    <div class="view">${imgOrPlaceholder(views.side, t.sideView)}<div class="view-label">${t.sideView}</div></div>
+                </div>
+            </section>
+
+            <!-- PACK METRICS TABLE -->
+            <section class="table-section">
+                <table class="data-table metrics-table">
+                    <tbody>
+                        <tr>
+                            <th>${t.pieceCount || 'Piece count'}</th>
+                            <td>${fmt(pieceCount)}</td>
+                            <th>${t.fillRate || 'Fill rate'}</th>
+                            <td>${fmt(fillRate)} %</td>
+                            <th>${t.boxDims || 'Box (mm)'}</th>
+                            <td>${boxDimsText}</td>
+                            <th>${t.totalWeight || 'Total weight'}</th>
+                            <td>${fmt(totalWeight)} kg</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <!-- WARNINGS -->
+            ${interlockCount > 0 ? `<div class="warn-box">${t.interlockedWarning || 'Interlocked pieces'}:
+                ${interlockCount} ${t.pieces || 'pieces'}</div>` : ''}
+            ${trayCount > 1 ? `<div class="info-box">${t.traySummary || 'Multi-box packing'}:
+                ${trayCount} ${t.boxes || 'boxes'} (${trayPieces.join(' + ')}) = ${fmt(pieceCount)} ${t.pieces || 'pieces'}</div>` : ''}
+
+            <!-- BOX (PU) TABLE -->
+            <section class="table-section">
+                ${this._sectionTitle(t.boxInfo || 'Packing unit (box)')}
+                <table class="data-table">
+                    <tbody>
+                        <tr>
+                            <th>${t.boxDims || 'External size (mm)'}</th>
+                            <td>${boxDimsText}</td>
+                            <th>${t.pieceCount || 'Pieces / box'}</th>
+                            <td>${fmt(pieceCount)}</td>
+                            <th>${t.fillRate || 'Fill rate'}</th>
+                            <td>${fmt(fillRate)} %</td>
+                        </tr>
+                        <tr>
+                            <th>${t.modeUsed || 'Mode'}</th>
+                            <td>${mode === 'gpu' ? `${modeLabel}${gpuMethod ? ` · ${gpuMethod}` : ''}` : modeLabel}</td>
+                            <th>${t.totalWeight || 'Total weight (kg)'}</th>
+                            <td>${fmt(totalWeight)}</td>
+                            <th>${t.maxWeight || 'Max weight (kg)'}</th>
+                            <td>${fmt(data.maxWeight)}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <!-- PALLET (SU) TABLE -->
+            ${hasPallet ? `
+            <section class="table-section">
+                ${this._sectionTitle(t.palletInfo || 'Shipping unit (pallet)')}
+                <table class="data-table">
+                    <tbody>
+                        <tr>
+                            <th>${t.palletDims || 'External size (mm)'}</th>
+                            <td>${fmtD(pallet.l)} × ${fmtD(pallet.w)} × ${fmtD(pallet.h)}</td>
+                            <th>${t.palletWeight || 'Weight (kg)'}</th>
+                            <td>${fmt(pallet.weight)}</td>
+                            <th>${t.boxesPerPallet || 'Boxes / pallet'}</th>
+                            <td>${fmt(pallet.boxes)}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>` : ''}
+
+            ${pageNum(1)}
+        </div>`;
+
+        // ══════════════ PAGE 2 ══════════════
+        const page2 = `
+        <div class="sheet">
+            <header class="doc-header doc-header-thin">
+                <div class="doc-header-left">
+                    <div class="doc-kicker">${t.kicker || 'Pack Data Sheet'}</div>
+                    <div class="doc-sub">${name}${partNumber ? ` · PN ${partNumber}` : ''}</div>
+                </div>
+                <div class="doc-header-right">
+                    <div class="brand-sub">${PACKASSIST_VERSION} · ${currentDate}</div>
+                </div>
+            </header>
+
+            <!-- COMPONENTS + COST -->
+            <section class="table-section">
+                ${this._sectionTitle(t.components || 'Packaging components')}
+                <table class="data-table components-table">
+                    <thead>
+                        <tr>
+                            <th class="w40">${t.desc || 'Description'}</th>
+                            <th>${t.matType || 'Material'}</th>
+                            <th>${t.dimsCol || 'L×W×H (mm)'}</th>
+                            <th class="w8">${t.qty || 'Qty'}</th>
+                            <th>${t.priceUnit || 'Price / unit'}</th>
+                            <th>${t.costCol || 'Cost'}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${hasItems ? itemRows.map(r => `
+                        <tr>
+                            <td>${r.desc}</td>
+                            <td>${r.material || '—'}</td>
+                            <td>${r.hasDims ? r.dims : '—'}</td>
+                            <td>${fmt(r.qty)}</td>
+                            <td>${fmtEuro(r.price)}</td>
+                            <td>${fmtEuro(r.cost)}</td>
+                        </tr>`).join('') : `
+                        <tr><td colspan="6" class="empty-cell">${t.noComponents || 'No packaging components defined'}</td></tr>`}
+                    </tbody>
+                </table>
+            </section>
+
+            ${hasCost ? `
+            <section class="table-section">
+                ${this._sectionTitle(t.costSummary || 'Cost summary')}
+                ${hasItems ? `<div class="cost-total">${t.itemsTotal || 'Components / box'}: ${fmtEuro2(itemsTotal)}</div>` : ''}
+                <table class="data-table cost-table">
+                    <tbody>
+                        <tr>
+                            <th>${t.boxCost || 'Box cost'}</th>
+                            <td>${fmtEuro2(boxCost)}</td>
+                            <th>${t.packagingCost || 'Packaging'}</th>
+                            <td>${fmtEuro2(packagingCost)}</td>
+                            <th>${t.freightCost || 'Freight'}</th>
+                            <td>${fmtEuro2(freightCost)}</td>
+                            <th class="cost-highlight">${t.costPerPart || 'Cost per part'}</th>
+                            <td class="cost-highlight">${fmtEuro2(costPerPart)}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>` : ''}
+
+            <!-- SUPPLIER -->
+            ${hasSupplier ? `
+            <section class="table-section">
+                ${this._sectionTitle(t.supplierInfo || 'Supplier information')}
+                <table class="data-table">
+                    <tbody>
+                        <tr>
+                            <th>${t.supplierName || 'Name'}</th><td>${supplier.name || '—'}</td>
+                            <th>${t.supplierAddress || 'Address'}</th><td>${supplier.address || '—'}</td>
+                            <th>${t.supplierContact || 'Contact'}</th><td>${supplier.contact || '—'}</td>
+                        </tr>
+                        <tr>
+                            <th>${t.supplierPhone || 'Phone'}</th><td>${supplier.phone || '—'}</td>
+                            <th>${t.supplierEmail || 'Email'}</th><td>${supplier.email || '—'}</td>
+                            <th>${t.supplierFunction || 'Function'}</th><td>${supplier.function || '—'}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>` : ''}
+
+            <!-- APPROVALS -->
+            ${hasApprovals ? `
+            <section class="table-section">
+                ${this._sectionTitle(t.approvals || 'Approvals')}
+                <table class="data-table approvals-table">
+                    <thead>
+                        <tr>
+                            <th>${t.step || 'Step'}</th>
+                            <th>${t.function || 'Function'}</th>
+                            <th>${t.name || 'Name'}</th>
+                            <th>${t.signature || 'Signature'}</th>
+                            <th>${t.date || 'Date'}</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        ${approvalRows.map(([step, fn, nm, dt]) => `
+                        <tr>
+                            <td><strong>${step}</strong></td>
+                            <td>${fn || '—'}</td>
+                            <td>${nm || '—'}</td>
+                            <td></td>
+                            <td>${this._fmtDate(dt)}</td>
+                        </tr>`).join('')}
+                        ${approvals.createdBy ? `<tr><td><strong>${t.createdBy || 'Created by'}</strong></td><td colspan="4">${approvals.createdBy}</td></tr>` : ''}
+                    </tbody>
+                </table>
+            </section>` : ''}
+
+            <!-- COMMENTS -->
+            ${comments ? `
+            <section class="table-section">
+                ${this._sectionTitle(t.additionalComments || 'Additional comments')}
+                <div class="comments-box">${comments}</div>
+            </section>` : ''}
+
+            ${pageNum(2)}
+        </div>`;
 
         const htmlContent = `<!DOCTYPE html>
 <html lang="${this.language === 'ca' ? 'ca' : 'en'}">
 <head>
 <meta charset="UTF-8">
-<title>${this.t.title} — PackAssist</title>
+<title>${t.title} — ${name}</title>
 <style>
     @page { size: A4; margin: 0; }
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -398,365 +712,153 @@ export class ReportGenerator {
         background: #e5e7eb;
         font-family: 'Segoe UI', -apple-system, Arial, sans-serif;
         color: #111827;
+        font-size: 3mm;
     }
 
     .sheet {
         width: 210mm;
-        height: 296.5mm;
+        min-height: 296.5mm;
         background: #ffffff;
         margin: 0 auto;
-        padding: 9mm 9mm 7mm 9mm;
-        display: flex;
-        flex-direction: column;
-        gap: 4.5mm;
-        overflow: hidden;
+        padding: 9mm 10mm;
+        position: relative;
     }
+    .sheet + .sheet { page-break-before: always; }
 
-    /* ── Header ─────────────────────────────────────── */
-    .report-header {
+    /* ── Doc header ───────────────────────────────── */
+    .doc-header {
         display: flex;
         justify-content: space-between;
         align-items: flex-start;
         border-bottom: 1.2mm solid #111827;
         padding-bottom: 3mm;
     }
-    .header-kicker {
-        font-size: 2.6mm;
-        font-weight: 700;
-        letter-spacing: 1.6px;
-        color: #059669;
-        text-transform: uppercase;
-        margin-bottom: 0.8mm;
+    .doc-header-thin { border-bottom: 0.6mm solid #111827; padding-bottom: 2mm; }
+    .doc-kicker {
+        font-size: 2.6mm; font-weight: 700; letter-spacing: 1.6px;
+        color: #0047ab; text-transform: uppercase; margin-bottom: 0.8mm;
     }
-    .header-title {
-        font-size: 6.6mm;
-        font-weight: 800;
-        line-height: 1.1;
-        color: #111827;
-        word-break: break-word;
-    }
-    .header-sub {
-        font-size: 3.2mm;
-        color: #6b7280;
-        margin-top: 1.2mm;
-        font-weight: 600;
-    }
-    .header-right {
-        text-align: right;
-        flex-shrink: 0;
-        margin-left: 4mm;
-    }
-    .brand {
-        font-size: 5.2mm;
-        font-weight: 800;
-        letter-spacing: 0.5px;
-        color: #059669;
-    }
-    .brand-sub {
-        font-size: 2.6mm;
-        color: #6b7280;
-        margin-top: 0.6mm;
-        font-weight: 600;
-    }
+    .doc-title { font-size: 6mm; font-weight: 800; line-height: 1.1; word-break: break-word; }
+    .doc-sub { font-size: 3mm; color: #6b7280; margin-top: 1.2mm; font-weight: 600; }
+    .doc-header-right { text-align: right; flex-shrink: 0; margin-left: 4mm; }
+    .brand { font-size: 4.6mm; font-weight: 800; letter-spacing: 0.5px; color: #0047ab; }
+    .brand-sub { font-size: 2.5mm; color: #6b7280; margin-top: 0.6mm; font-weight: 600; }
 
-    /* ── Hero + Metrics ─────────────────────────────── */
-    .main-row {
-        flex: 1 1 auto;
-        min-height: 0;
-        display: flex;
-        gap: 4.5mm;
+    /* ── Sections ─────────────────────────────────── */
+    .sec-title {
+        font-size: 2.7mm; font-weight: 800; color: #0047ab;
+        text-transform: uppercase; letter-spacing: 1px;
+        border-left: 1.4mm solid #0047ab; padding-left: 2mm;
+        margin: 0 0 2.2mm 0;
     }
+    .table-section { margin-top: 5mm; }
+
+    /* ── Renders ──────────────────────────────────── */
+    .views-section { margin-top: 4mm; }
     .hero {
-        flex: 1.55;
-        min-width: 0;
-        background: #f8fafc;
-        border: 1px solid #e5e7eb;
-        border-radius: 3.5mm;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        justify-content: center;
-        padding: 2mm;
-        overflow: hidden;
+        width: 100%; height: 75mm;
+        background: #ffffff; border: 0.4mm solid #e5e7eb; border-radius: 2.6mm;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        padding: 1.5mm; overflow: hidden;
     }
-    .hero img {
-        max-width: 100%;
-        max-height: 100%;
-        object-fit: contain;
-        flex: 1 1 auto;
-        min-height: 0;
-    }
-    .hero-caption {
-        font-size: 2.6mm;
-        font-weight: 600;
-        color: #6b7280;
-        margin-top: 1.2mm;
-        text-align: center;
-    }
+    .hero img { max-width: 100%; max-height: 100%; object-fit: contain; flex: 1 1 auto; min-height: 0; }
+    .hero .view-label { font-size: 2.4mm; font-weight: 600; color: #6b7280; margin-top: 1mm; flex-shrink: 0; }
 
-    .metrics {
-        flex: 1;
-        min-width: 0;
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        grid-auto-rows: 1fr;
-        gap: 2.4mm;
-    }
-    .metric {
-        border: 1px solid #e5e7eb;
-        border-radius: 2.6mm;
-        background: #ffffff;
-        padding: 2.4mm 2.8mm;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        min-height: 0;
-    }
-    .metric-value {
-        font-size: 5.4mm;
-        font-weight: 800;
-        color: #059669;
-        line-height: 1.05;
-        word-break: break-word;
-    }
-    .metric-label {
-        font-size: 2.5mm;
-        color: #6b7280;
-        margin-top: 1mm;
-        font-weight: 600;
-        line-height: 1.2;
-    }
-
-    /* ── Small views ───────────────────────────────── */
-    .views-row {
-        height: 42mm;
-        display: grid;
-        grid-template-columns: 1fr 1fr 1fr;
-        gap: 4.5mm;
-        flex-shrink: 0;
-    }
+    .views-small { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2.5mm; height: 42mm; margin-top: 2.5mm; }
     .view {
-        border: 1px solid #e5e7eb;
-        border-radius: 3mm;
-        background: #f8fafc;
-        padding: 1.6mm;
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        overflow: hidden;
+        border: 0.4mm solid #e5e7eb; border-radius: 2.2mm; background: #ffffff;
+        padding: 1.4mm; display: flex; flex-direction: column; align-items: center; overflow: hidden;
     }
-    .view img {
-        max-width: 100%;
-        max-height: 100%;
-        flex: 1 1 auto;
-        min-height: 0;
-        object-fit: contain;
+    .view img { max-width: 100%; max-height: 100%; flex: 1 1 auto; min-height: 0; object-fit: contain; }
+    .view-label { font-size: 2.3mm; font-weight: 600; color: #374151; margin-top: 0.8mm; text-align: center; flex-shrink: 0; }
+    .view-unavailable { color: #9ca3af; font-size: 2.6mm; padding: 8mm 0; text-align: center; }
+
+    /* ── Warning / info boxes ─────────────────────── */
+    .warn-box {
+        margin-top: 4mm; padding: 2mm 3mm; border-radius: 2mm;
+        background: #fef2f2; border: 0.4mm solid #fecaca; color: #b91c1c;
+        font-size: 2.8mm; font-weight: 700;
     }
-    .view-label {
-        font-size: 2.5mm;
-        font-weight: 600;
-        color: #374151;
-        margin-top: 1mm;
-        text-align: center;
-        flex-shrink: 0;
+    .info-box {
+        margin-top: 4mm; padding: 2mm 3mm; border-radius: 2mm;
+        background: #eff6ff; border: 0.4mm solid #bfdbfe; color: #1d4ed8;
+        font-size: 2.8mm; font-weight: 700;
     }
 
-    /* ── Cost summary ──────────────────────────────── */
-    .cost-section {
-        flex-shrink: 0;
-        border: 0.8mm solid #059669;
-        border-radius: 3mm;
-        padding: 2.6mm 3mm;
-        background: #f0fdf9;
+    /* ── Tables ───────────────────────────────────── */
+    .data-table { width: 100%; border-collapse: collapse; margin-top: 2mm; }
+    .data-table th, .data-table td {
+        border: 0.3mm solid #e5e7eb; padding: 1.8mm 2.2mm;
+        font-size: 2.6mm; vertical-align: middle;
     }
-    .cost-header {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        margin-bottom: 1.8mm;
-    }
-    .cost-title {
-        font-size: 3mm;
-        font-weight: 800;
-        color: #059669;
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    .cost-grid {
-        display: grid;
-        grid-template-columns: 1fr 1fr 1fr 1fr;
-        gap: 2mm;
-    }
-    .cost-item {
-        background: #ffffff;
-        border: 1px solid #d1fae5;
-        border-radius: 2.2mm;
-        padding: 1.8mm 2.2mm;
-    }
-    .cost-item-highlight {
-        background: #059669;
-        border-color: #059669;
-    }
-    .cost-item-highlight .cost-value,
-    .cost-item-highlight .cost-label {
-        color: #ffffff;
-    }
-    .cost-value {
-        font-size: 4mm;
-        font-weight: 800;
-        color: #059669;
-        line-height: 1.05;
-        word-break: break-word;
-    }
-    .cost-label {
-        font-size: 2.3mm;
-        color: #6b7280;
-        margin-top: 0.8mm;
-        font-weight: 600;
+    .data-table th { background: #eef4ff; color: #003a8c; text-align: left; font-weight: 700; width: 20%; }
+    .data-table td { color: #111827; }
+    .components-table th { background: #0047ab; color: #ffffff; width: auto; }
+    .components-table td { text-align: center; }
+    .components-table td:first-child { text-align: left; font-weight: 600; }
+    .components-table .w40 { width: 40%; }
+    .components-table .w8 { width: 8%; }
+    .empty-cell { text-align: center !important; color: #9ca3af; }
+    .approvals-table th { background: #0047ab; color: #ffffff; width: auto; }
+    .approvals-table td { height: 9mm; }
+    .part-table th { width: 15%; }
+    .part-table td { width: 10%; }
+    .cost-table th { width: 15%; }
+    .cost-table td { width: 10%; }
+    .cost-table .cost-highlight { background: #0047ab; color: #ffffff; }
+    .metrics-table th { width: 15%; }
+    .metrics-table td { width: 10%; }
+
+    /* ── Cost summary ─────────────────────────────── */
+    .cost-total {
+        margin-top: 2mm; font-size: 2.6mm; color: #003a8c; font-weight: 700;
     }
 
-    /* ── Footer ────────────────────────────────────── */
-    .report-footer {
-        flex-shrink: 0;
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        border-top: 0.5mm solid #e5e7eb;
-        padding-top: 2mm;
-        font-size: 2.6mm;
-        color: #6b7280;
-        font-weight: 600;
-    }
-    .report-footer .footer-brand {
-        font-weight: 800;
-        color: #059669;
+    /* ── Comments ─────────────────────────────────── */
+    .comments-box {
+        margin-top: 2mm; padding: 2.5mm 3mm; min-height: 16mm;
+        border: 0.3mm solid #e5e7eb; border-radius: 2mm;
+        font-size: 2.7mm; line-height: 1.5; color: #374151; white-space: pre-wrap;
     }
 
-    .view-unavailable {
-        color: #6b7280;
-        font-size: 3mm;
-        padding: 10mm 0;
-        text-align: center;
+    /* ── Page numbers / footer ────────────────────── */
+    .page-num {
+        position: absolute; bottom: 4mm; right: 10mm;
+        font-size: 2.4mm; color: #9ca3af; font-weight: 600;
     }
 
-    /* ── Preview scaling (screen only) ─────────────── */
-    @media screen {
-        body { padding: 12px; }
-    }
+    /* ── Preview scaling (screen only) ────────────── */
+    @media screen { body { padding: 12px; } }
     @media print {
         html, body { background: #ffffff; }
-        .sheet {
-            margin: 0;
-            transform: none !important;
-            left: 0 !important;
-        }
+        .sheet { margin: 0; transform: none !important; left: 0 !important; }
     }
 </style>
 </head>
 <body>
-    <div class="sheet">
-        <!-- HEADER: part info | PackAssist -->
-        <header class="report-header">
-            <div class="header-left">
-                <div class="header-kicker">${this.t.kicker || 'Pack Report'}</div>
-                <h1 class="header-title">${name}</h1>
-                <div class="header-sub">${dimsText} · ${this.t.weight} ${weightText} kg</div>
-            </div>
-            <div class="header-right">
-                <div class="brand">PackAssist</div>
-                <div class="brand-sub">${PACKASSIST_VERSION} · ${currentDate}</div>
-            </div>
-        </header>
-
-        <!-- HERO + METRICS -->
-        <div class="main-row">
-            <div class="hero">
-                ${views.hero
-                    ? `<img src="${views.hero}" alt="${this.t.isometricView}">`
-                    : `<div class="view-unavailable">${this.t.viewUnavailable}</div>`}
-                <div class="hero-caption">${this.t.isometricView}</div>
-            </div>
-            <div class="metrics">
-                <div class="metric">
-                    <div class="metric-value">${fmt(pieceCount)}</div>
-                    <div class="metric-label">${this.t.pieceCount}</div>
-                </div>
-                <div class="metric">
-                    <div class="metric-value">${volumeUsage}%</div>
-                    <div class="metric-label">${this.t.volumeUsage}</div>
-                </div>
-                <div class="metric">
-                    <div class="metric-value">${boxDims.length}×${boxDims.width}×${boxDims.height}</div>
-                    <div class="metric-label">${this.t.boxDims || 'Box (mm)'}</div>
-                </div>
-                <div class="metric">
-                    <div class="metric-value">${weightText} kg</div>
-                    <div class="metric-label">${this.t.weightPerPiece || 'Weight / piece'}</div>
-                </div>
-                <div class="metric">
-                    <div class="metric-value">${totalWeightText}</div>
-                    <div class="metric-label">${this.t.totalWeight}</div>
-                </div>
-                <div class="metric">
-                    <div class="metric-value">${modeLabel}</div>
-                    <div class="metric-label">${this.t.modeUsed || 'Mode'}</div>
-                </div>
-            </div>
-        </div>
-
-        <!-- SMALL MULTI-VIEWS -->
-        <div class="views-row">
-            <div class="view">
-                ${views.top
-                    ? `<img src="${views.top}" alt="${this.t.topView}">`
-                    : `<div class="view-unavailable">${this.t.viewUnavailable}</div>`}
-                <div class="view-label">${this.t.topView}</div>
-            </div>
-            <div class="view">
-                ${views.front
-                    ? `<img src="${views.front}" alt="${this.t.frontView}">`
-                    : `<div class="view-unavailable">${this.t.viewUnavailable}</div>`}
-                <div class="view-label">${this.t.frontView}</div>
-            </div>
-            <div class="view">
-                ${views.side
-                    ? `<img src="${views.side}" alt="${this.t.sideView}">`
-                    : `<div class="view-unavailable">${this.t.viewUnavailable}</div>`}
-                <div class="view-label">${this.t.sideView}</div>
-            </div>
-        </div>
-
-        <!-- COST SUMMARY (optional) -->
-        ${costRow}
-
-        <!-- FOOTER -->
-        <footer class="report-footer">
-            <span>${this.t.generatedBy}</span>
-            <span><span class="footer-brand">PackAssist</span> ${PACKASSIST_VERSION} · ${currentDate}</span>
-        </footer>
-    </div>
-
+    ${page1}
+    ${page2}
     <script>
         (function () {
-            // Scale the A4 sheet to fit the preview iframe width (screen only).
-            // In print the @page size guarantees exactly one A4 sheet.
             function fit() {
                 if (window.matchMedia('print').matches) return;
-                var sheet = document.querySelector('.sheet');
-                if (!sheet) return;
-                var w = sheet.offsetWidth;
+                var sheets = document.querySelectorAll('.sheet');
+                if (!sheets.length) return;
+                var w = sheets[0].offsetWidth;
                 var avail = (window.innerWidth || document.documentElement.clientWidth) - 24;
                 if (avail > 0 && avail < w) {
                     var s = avail / w;
-                    sheet.style.transformOrigin = 'top left';
-                    sheet.style.transform = 'scale(' + s + ')';
-                    sheet.style.marginLeft = '0';
-                    sheet.style.marginRight = '0';
-                    sheet.style.position = 'relative';
-                    sheet.style.left = ((w - avail) / 2) + 'px';
+                    var y = 0;
+                    sheets.forEach(function (sh) {
+                        sh.style.transformOrigin = 'top left';
+                        sh.style.transform = 'scale(' + s + ')';
+                        sh.style.marginTop = (y === 0 ? '0' : '6px') + 'px';
+                        sh.style.position = 'relative';
+                        sh.style.left = ((w - avail) / 2) + 'px';
+                        y += sh.offsetHeight * s + 6;
+                    });
                 } else {
-                    sheet.style.transform = '';
-                    sheet.style.left = '0';
+                    sheets.forEach(function (sh) { sh.style.transform = ''; sh.style.left = '0'; });
                 }
             }
             window.addEventListener('load', fit);
