@@ -459,6 +459,19 @@ export class PhysicsWorld {
         colliderDesc.setDensity(2.0).setFriction(0.8).setRestitution(0.0);
         this.world.createCollider(colliderDesc, body);
         
+        // Per-piece vibration personality: each piece shivers with its own
+        // small random frequency/phase/scale instead of all pieces feeling
+        // the identical box motion — the tiny differences make the settling
+        // look organic (e.g. base 8Hz/1mm → pieces at 9Hz/1.1, 7.5Hz/0.9…).
+        body._jitter = {
+            freq: 8 + (Math.random() * 2 - 1) * 1.2,        // ~6.8..9.2 Hz
+            phase: Math.random() * Math.PI * 2,
+            scale: 0.5 + Math.random() * 0.5,               // 0.5..1.0 × base
+            amp: 0.4 + Math.random() * 0.8,                 // 0.4..1.2 mm/s kick
+            rate: 0.02 + Math.random() * 0.06,              // kick probability/step
+            t: Math.random() * 10,
+        };
+        
         this.bodies.push(body);
         
         return body;
@@ -478,6 +491,26 @@ export class PhysicsWorld {
             // Update vibration PER SUBSTEP for perfect smoothness
             if (this.isVibrating) {
                 this.updateVibration(dt * 1000);
+                // Per-piece micro-jitter: each body shivers with its own
+                // random frequency/phase/scale (stored at spawn) so the
+                // settling is organic instead of all pieces moving with the
+                // box in lock-step. Small kicks only — just enough to keep
+                // the top layer fluid, never enough to launch pieces.
+                for (const b of this.bodies) {
+                    if (!b.isValid() || !b.isDynamic()) continue;
+                    const j = b._jitter;
+                    if (!j) continue;
+                    j.t += dt;
+                    if (Math.random() < j.rate) {
+                        const kick = j.amp * j.scale * Math.sin(2 * Math.PI * j.freq * j.t + j.phase);
+                        const lv = b.linvel();
+                        b.setLinvel({
+                            x: lv.x + (Math.random() * 2 - 1) * kick * 0.5,
+                            y: lv.y + (Math.random() - 0.5) * kick * 0.3,
+                            z: lv.z + (Math.random() * 2 - 1) * kick * 0.5,
+                        }, true);
+                    }
+                }
             }
             
             // Update Lid animation PER SUBSTEP if active
@@ -1297,8 +1330,26 @@ export class BulkSimulation {
         
         let mesh;
         if (this.stlGeometry && this.stlVertices) {
-            // Use STL geometry
+            // Use STL geometry. CRITICAL: center the geometry on its own
+            // bounding-box center so the visual mesh and the RAPIER convex
+            // hull (which sits at the hull's centre of mass) share the same
+            // origin. Without this the collider rests on the pile while the
+            // visual hovers up to ~half a piece away — "floating pieces".
             const geometry = this.stlGeometry.clone();
+            geometry.computeBoundingBox();
+            const bb = geometry.boundingBox;
+            const cx = (bb.min.x + bb.max.x) / 2;
+            const cy = (bb.min.y + bb.max.y) / 2;
+            const cz = (bb.min.z + bb.max.z) / 2;
+            geometry.translate(-cx, -cy, -cz);
+
+            const centeredVerts = new Float32Array(this.stlVertices.length);
+            for (let i = 0; i < this.stlVertices.length; i += 3) {
+                centeredVerts[i] = this.stlVertices[i] - cx;
+                centeredVerts[i + 1] = this.stlVertices[i + 1] - cy;
+                centeredVerts[i + 2] = this.stlVertices[i + 2] - cz;
+            }
+
             const material = new THREE.MeshPhongMaterial({
                 color: pieceColor,
                 flatShading: true,
@@ -1309,12 +1360,12 @@ export class BulkSimulation {
             mesh = new THREE.Mesh(geometry, material);
             mesh.castShadow = true;
             mesh.receiveShadow = true;
-            
+
             this.scene.scene.add(mesh);
             this.scene.pieces.push(mesh);
-            
-            // Add to physics as convex hull
-            this.physics.addConvexHull(this.stlVertices, position, rotation, mesh);
+
+            // Add to physics as convex hull (centered vertices)
+            this.physics.addConvexHull(centeredVerts, position, rotation, mesh);
         } else {
             // Use simple cuboid
             const geometry = new THREE.BoxGeometry(l, h, w);

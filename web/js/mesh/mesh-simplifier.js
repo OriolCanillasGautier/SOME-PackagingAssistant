@@ -40,9 +40,17 @@ export class MeshSimplifier {
         this.originalFaceCount  = this._countFaces(this.originalGeometry);
         this.originalVolume     = this._calculateVolume(this.originalGeometry);
 
-        // Pre-compute welded count for JS fallback ratio mapping.
-        const welded = BufferGeometryUtils.mergeVertices(this.originalGeometry.clone());
-        this._weldedCount = welded.getAttribute('position')?.count ?? 0;
+        // Pre-compute welded count for the JS fallback ratio mapping — but
+        // ONLY for small meshes. mergeVertices on a 458k-vertex part takes
+        // minutes and freezes the page; big meshes MUST go through the
+        // server anyway (the fallback would be hopelessly slow too).
+        this._weldedCount = 0;
+        if (this.originalVertexCount < 150000) {
+            try {
+                const welded = BufferGeometryUtils.mergeVertices(this.originalGeometry.clone());
+                this._weldedCount = welded.getAttribute('position')?.count ?? 0;
+            } catch (_) { /* keep 0 — the server path is preferred anyway */ }
+        }
 
         this._modifier = new SimplifyModifier();
         this._exporter = new STLExporter();
@@ -77,17 +85,17 @@ export class MeshSimplifier {
      * @param {boolean} _preserveFeatures  API compat
      * @returns {Promise<THREE.BufferGeometry>}
      */
-    async simplify(targetRatio, _preserveFeatures = true) {
+    async simplify(targetRatio, preserveFeatures = true, createEnvelope = false) {
         const ratio = THREE.MathUtils.clamp(Number(targetRatio) || 0, 0, 1);
 
-        if (ratio >= 0.999) {
+        if (ratio >= 0.999 && !createEnvelope) {
             return this.originalGeometry.clone();
         }
 
         // --- Try server (PyMeshLab) first ---
         if (this.rawSTLData && await this._isServerAvailable()) {
             try {
-                const result = await this._simplifyViaServer(ratio);
+                const result = await this._simplifyViaServer(ratio, preserveFeatures, createEnvelope);
                 if (result) {
                     console.log('[MeshSimplifier] Simplified via PyMeshLab server');
                     return result;
@@ -149,8 +157,8 @@ export class MeshSimplifier {
      * Send the raw STL to the Python server and parse the result.
      * @returns {Promise<THREE.BufferGeometry|null>}
      */
-    async _simplifyViaServer(ratio) {
-        const resp = await fetch(`${MESH_SERVER}/api/simplify?ratio=${ratio}`, {
+    async _simplifyViaServer(ratio, preserveFeatures = true, createEnvelope = false) {
+        const resp = await fetch(`${MESH_SERVER}/api/simplify?ratio=${ratio}&features=${preserveFeatures ? 1 : 0}&envelope=${createEnvelope ? 1 : 0}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/octet-stream',
@@ -185,6 +193,11 @@ export class MeshSimplifier {
      * No hole-filling — SimplifyModifier output is used as-is.
      */
     _simplifyLocal(ratio) {
+        if (this._weldedCount === 0) {
+            // Big meshes skip the welded precompute; in-browser decimation
+            // would freeze the page for minutes — the server is required.
+            throw new Error('Mesh too large for in-browser simplification — server unavailable');
+        }
         const minKeep   = Math.max(24, Math.floor(this._weldedCount * 0.005));
         const targetKeep = Math.max(minKeep, Math.floor(this._weldedCount * ratio));
         const collapses  = Math.max(0, this._weldedCount - targetKeep);

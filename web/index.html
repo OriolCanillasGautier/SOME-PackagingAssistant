@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PackAssist SOME</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="css/styles.css?v=ui_fix_v2">
+    <link rel="stylesheet" href="css/styles.css?v=ui_fix_v14">
     <!-- Three.js -->
     <script type="importmap">
     {
@@ -246,6 +246,11 @@
                     <div class="placement-options" id="placement-options">
                         <h3 id="placement-options-title">Opcions de Col·locació STL</h3>
                         <div class="input-group">
+                            <label for="max-pack-pieces">Màx. peces per caixa (càlcul i render)</label>
+                            <input type="number" id="max-pack-pieces" min="100" max="20000" step="100" value="5000">
+                            <p class="input-hint">Límit de peces per al càlcul planar i el render 3D. Valors grans = més peces, més temps.</p>
+                        </div>
+                        <div class="input-group">
                             <label for="placement-strategy">Estratègia de col·locació</label>
                             <select id="placement-strategy">
                                 <option value="stable-contact" selected>Contacte estable</option>
@@ -479,6 +484,13 @@
                             </div>
                             <p class="config-hint">Les peces tindran fins a aquest nombre de colors diferents</p>
                         </div>
+                        <div class="config-section" id="rp-interlock-section" style="display:none;">
+                            <h3>Avís d'entrellaçat</h3>
+                            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                                <input type="checkbox" id="rp-show-interlock">
+                                <span>Incloure l'avís de peces no extraïbles verticalment al PDF</span>
+                            </label>
+                        </div>
                     </div>
                     <details class="report-data" id="report-data">
                             <summary>Dades de l'informe (part, proveïdor, costos...)</summary>
@@ -551,6 +563,8 @@
                 </div>
                 <div class="modal-footer">
                     <button id="modal-cancel" class="btn-secondary">Cancel·lar</button>
+                    <button id="modal-download-xlsx" class="btn-secondary">Descarregar XLSX</button>
+                    <button id="modal-download-docx" class="btn-secondary">Descarregar DOCX</button>
                     <button id="modal-download" class="btn-primary">Descarregar PDF</button>
                 </div>
             </div>
@@ -563,7 +577,7 @@
     </div>
 
     <!-- Main Script -->
-    <script type="module" src="js/main.js?v=ui_fix_v2"></script>
+    <script type="module" src="js/main.js?v=ui_fix_v14"></script>
     <script type="module">
         // ── Protective packaging overlays (Pack Studio) wiring ──
         // Connects the 3 checkboxes to SceneManager.setProtectiveOverlay and

@@ -8,7 +8,7 @@
  * render a ranking table (best first, best highlighted).
  */
 
-import { t as localeText } from './i18n.js?v=force_update_42';
+import { t as localeText } from './i18n.js?v=force_update_43';
 
 const BOX_PRESETS = [
     [160, 160, 160],

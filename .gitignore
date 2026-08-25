@@ -41,6 +41,7 @@ research/
 *.png
 *.stl
 !test.stl
+!physics-engine/stl/cone.stl
 
 # Python tools
 packer_final.py
@@ -69,3 +70,13 @@ project.nuget.cache
 
 # Generated packing run artifacts (info.txt logs reference the part path)
 output/
+
+# Compiled native libs (rebuild from sources in physics-engine/meshopt/)
+*.so
+
+# .NET build outputs
+physics-engine/PhysicsEngine/bin/
+physics-engine/PhysicsEngine/obj/
+
+# Private docs (don't push)
+HANDOFF.md

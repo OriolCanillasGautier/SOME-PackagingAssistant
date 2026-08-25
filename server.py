@@ -72,45 +72,273 @@ GPU_LOCK = threading.Lock()
 # Mesh simplification (ported from mesh_server.py)
 # ——————————————————————————————————————————————————————————————————————
 
-def simplify_stl(input_bytes: bytes, target_ratio: float) -> bytes:
-    if not HAS_PYMESHLAB:
-        raise RuntimeError("pymeshlab is not installed")
+def _meshopt_decimate(mesh, target_ratio):
+    """Fastest decimator available: meshoptimizer (the game-engine quadric,
+    C++, via a tiny compiled .so + ctypes). ~6x faster than VTK and ~12x
+    faster than pymeshlab on 150k-triangle meshes; handles thin-walled
+    hollow parts. Same shape, less resolution."""
+    import ctypes
+    so = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                      "physics-engine", "meshopt", "decimator.so")
+    lib = ctypes.CDLL(so)
+    F = ctypes.POINTER(ctypes.c_float)
+    U = ctypes.POINTER(ctypes.c_uint32)
+    lib.mo_simplify.argtypes = [F, U, F, ctypes.c_int, U, ctypes.c_int,
+                                ctypes.c_float, ctypes.c_float]
+    lib.mo_simplify.restype = ctypes.c_int
 
-    with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as f:
-        f.write(input_bytes)
-        tmp_in = f.name
+    v = np.ascontiguousarray(mesh.vertices, dtype=np.float32)
+    f = np.ascontiguousarray(mesh.faces, dtype=np.uint32)
+    v_out = np.zeros(v.shape, dtype=np.float32)
+    f_out = np.zeros(f.size, dtype=np.uint32)
+    n = lib.mo_simplify(v_out.ctypes.data_as(F), f_out.ctypes.data_as(U),
+                        v.ctypes.data_as(F), len(v),
+                        f.ctypes.data_as(U), len(f),
+                        max(0.01, min(1.0, target_ratio)), 0.01)
+    return trimesh.Trimesh(vertices=v_out, faces=f_out[:n].reshape(-1, 3))
 
-    tmp_out = tmp_in + "_simplified.stl"
+
+def _fast_volume(verts, faces):
+    """Signed volume via the numpy cross/dot — much faster than trimesh's."""
+    v0 = verts[faces[:, 0]]
+    v1 = verts[faces[:, 1]]
+    v2 = verts[faces[:, 2]]
+    return float(np.einsum('ij,ij->i', v0, np.cross(v1, v2)).sum() / 6.0)
+
+
+def _fast_watertight(faces):
+    """True iff every undirected edge appears exactly twice (numpy)."""
+    e = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]],
+                                faces[:, [0, 2]]]), axis=1)
+    _, counts = np.unique(e, axis=0, return_counts=True)
+    return bool((counts == 2).all())
+
+
+def _fast_winding_consistent(faces):
+    """True iff every oriented edge appears once in each direction."""
+    # triangle (v0,v1,v2) has directed edges v0->v1, v1->v2, v2->v0
+    e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]],
+                        faces[:, [2, 0]]], axis=0)
+    # canonical key = sorted pair; sign = +1 if the direction matches the
+    # sorted order, -1 otherwise. Consistent winding => every key sums to 0.
+    lo = np.minimum(e[:, 0], e[:, 1])
+    hi = np.maximum(e[:, 0], e[:, 1])
+    sign = np.where(e[:, 0] < e[:, 1], 1, -1)
+    # Compact (lo, hi) pairs to dense IDs BEFORE bincount: the naive
+    # lo*1e6+hi key overflows memory for meshes with >~20k vertices
+    # (bincount allocates max_key+1 entries -> hundreds of GB).
+    _, inv = np.unique(np.stack([lo, hi], axis=1), axis=0, return_inverse=True)
+    sums = np.bincount(inv, weights=sign.astype(np.float64))
+    return bool(np.all(np.abs(sums) < 0.5))
+
+
+def _pm_repair(ms, names):
+    """Run pymeshlab repair filters defensively: try the typed method then
+    the apply_filter fallback. These repairs fix bad topology (non-manifold
+    edges, degenerate/duplicate faces) so the decimation cannot tear thin
+    walls — they do NOT change the overall shape and do NOT fill holes."""
+    for name in names:
+        try:
+            getattr(ms, name)()
+            continue
+        except Exception:
+            pass
+        try:
+            ms.apply_filter(name)
+        except Exception:
+            pass
+
+
+def _vtk_decimate(mesh, target_ratio):
+    """Fast C++ decimation via VTK's vtkDecimatePro (quadric edge collapse).
+    ~2.5x faster than the pymeshlab quadric on 150k+ triangle meshes AND it
+    handles thin-walled hollow parts (tubes) that the other fast C++
+    decimator (fast-simplification) refuses to collapse. Same shape, less
+    resolution; the winding is normalized afterwards by trimesh."""
+    import vtk
+    from vtk.util.numpy_support import numpy_to_vtk, vtk_to_numpy
+
+    verts = mesh.vertices
+    faces = mesh.faces
+    pv = vtk.vtkPoints()
+    pv.SetData(numpy_to_vtk(np.ascontiguousarray(verts, dtype=np.float64), deep=True))
+    n = len(faces)
+    legacy = np.empty(n * 4, dtype=np.int64)
+    legacy[0::4] = 3
+    legacy[1::4] = faces[:, 0]
+    legacy[2::4] = faces[:, 1]
+    legacy[3::4] = faces[:, 2]
+    ca = vtk.vtkCellArray()
+    ca.SetCells(n, numpy_to_vtk(legacy, deep=True, array_type=vtk.VTK_ID_TYPE))
+    pd = vtk.vtkPolyData()
+    pd.SetPoints(pv)
+    pd.SetPolys(ca)
+
+    target_faces = max(12, int(n * target_ratio))
+    dec = vtk.vtkDecimatePro()
+    dec.SetInputData(pd)
+    dec.SetTargetReduction(1.0 - target_faces / n)
+    dec.PreserveTopologyOn()
+    dec.SplitErrorOn() if hasattr(dec, 'SplitErrorOn') else None
+    dec.Update()
+
+    out = dec.GetOutput()
+    v = vtk_to_numpy(out.GetPoints().GetData())
+    arr = vtk_to_numpy(out.GetPolys().GetData())
+    # legacy cell format: [3, i0, i1, i2, ...]
+    f2 = arr.reshape(-1, 4)[:, 1:].astype(np.int64)
+    return trimesh.Trimesh(vertices=v, faces=f2)
+
+
+def simplify_stl(input_bytes: bytes, target_ratio: float,
+                 preserve_features: bool = True,
+                 create_envelope: bool = False) -> bytes:
+    tmp_out = tmp_in = None
     try:
+        # ── Fast path: VTK (C++ quadric) — ~2.5x faster than pymeshlab and
+        # handles thin-walled hollow parts. The input is pre-cleaned with
+        # trimesh (duplicate-vertex merge only — no shape change), and the
+        # output winding is normalized afterwards.
+        if target_ratio < 0.999:
+            try:
+                mesh = trimesh.load(io.BytesIO(input_bytes), file_type="stl",
+                                    force="mesh")
+                if isinstance(mesh, trimesh.Scene):
+                    geoms = [g for g in mesh.geometry.values()
+                             if isinstance(g, trimesh.Trimesh)]
+                    mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
+                in_vol = _fast_volume(mesh.vertices, mesh.faces)
+                in_wt = _fast_watertight(mesh.faces)
+                out = _meshopt_decimate(mesh, target_ratio)
+                # Validate the result (numpy fast checks): a garbage
+                # decimation shows up as a large signed-volume change.
+                # Only require watertight output if the input was watertight.
+                if in_wt and not _fast_watertight(out.faces):
+                    raise RuntimeError("meshopt: watertight input produced torn output")
+                out_vol = _fast_volume(out.vertices, out.faces)
+                if in_vol > 0 and abs(out_vol / in_vol - 1.0) > 0.05:
+                    raise RuntimeError("meshopt: volume drift")
+                if create_envelope:
+                    try:
+                        out = out.convex_hull
+                    except Exception:
+                        pass
+                # meshoptimizer preserves the winding — no fix_normals needed.
+                return out.export(file_type="stl")
+            except Exception:
+                pass   # fall through to the VTK path
+
+        # ── VTK fast path (C++ quadric) — the validation above also guards
+        # this one.
+        if target_ratio < 0.999:
+            try:
+                mesh = trimesh.load(io.BytesIO(input_bytes), file_type="stl",
+                                    force="mesh")
+                if isinstance(mesh, trimesh.Scene):
+                    geoms = [g for g in mesh.geometry.values()
+                             if isinstance(g, trimesh.Trimesh)]
+                    mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
+                in_vol = _fast_volume(mesh.vertices, mesh.faces)
+                in_wt = _fast_watertight(mesh.faces)
+                out = _vtk_decimate(mesh, max(0.01, min(1.0, target_ratio)))
+                if in_wt and not _fast_watertight(out.faces):
+                    raise RuntimeError("vtk: watertight input produced torn output")
+                out_vol = _fast_volume(out.vertices, out.faces)
+                if in_vol > 0 and abs(out_vol / in_vol - 1.0) > 0.05:
+                    raise RuntimeError("vtk: volume drift")
+                if create_envelope:
+                    try:
+                        out = out.convex_hull
+                    except Exception:
+                        pass
+                if not _fast_winding_consistent(out.faces):
+                    out.fix_normals()
+                return out.export(file_type="stl")
+            except Exception:
+                pass   # fall through to the pymeshlab path
+
+        if not HAS_PYMESHLAB:
+            raise RuntimeError("pymeshlab is not installed")
+
+        with tempfile.NamedTemporaryFile(suffix=".stl", delete=False) as f:
+            f.write(input_bytes)
+            tmp_in = f.name
+
+        tmp_out = tmp_in + "_simplified.stl"
         ms = pymeshlab.MeshSet()
         ms.load_new_mesh(tmp_in)
+
+        # Repair the input FIRST: real-world STLs (scans) carry duplicated or
+        # non-manifold geometry; the quadric collapse then deletes triangles
+        # around the bad spots — exactly the "holes in the tube walls" the
+        # user saw. Only NON-removing repairs are used (duplicate removal is
+        # exact; the non-manifold EDGES repair deletes faces and changes the
+        # shape — banned).
+        _pm_repair(ms, [
+            'meshing_remove_duplicate_vertices',
+            'meshing_remove_duplicate_faces',
+            'meshing_repair_non_manifold_vertices',
+        ])
 
         original_faces = ms.current_mesh().face_number()
         target_faces = max(12, int(original_faces * target_ratio))
 
         try:
             ms.meshing_decimation_quadric_edge_collapse(
-                targetfacenum=target_faces, preservenormal=True,
+                targetfacenum=target_faces, preservenormal=preserve_features,
                 preservetopology=True, optimalplacement=True, qualitythr=0.5)
         except Exception:
             try:
                 ms.apply_filter('simplification_quadric_edge_collapse_decimation',
-                                targetfacenum=target_faces, preservenormal=True,
-                                preservetopology=True, optimalplacement=True)
+                                targetfacenum=target_faces, preservenormal=preserve_features,
+                                preservetopology=True, optimalplacement=True, qualitythr=0.5)
             except Exception:
                 ms.meshing_decimation_clustering(
                     threshold=pymeshlab.AbsoluteValue(
                         ms.current_mesh().bounding_box().diagonal() * 0.01))
 
+        # Post-decimation: no face-removing repairs (they change the shape).
+        # The winding fix happens via trimesh fix_normals below.
+
+        # "Create convex envelope (close holes)": replace the result with
+        # its convex hull — the packing then treats the piece as its
+        # envelope (fast + safe, no concavities to catch).
+        if create_envelope:
+            try:
+                ms.meshing_convex_hull()
+            except Exception:
+                try:
+                    ms.apply_filter('meshing_convex_hull')
+                except Exception:
+                    pass
+
         ms.save_current_mesh(tmp_out)
         with open(tmp_out, "rb") as f:
-            return f.read()
+            out_bytes = f.read()
+
+        # Consistent winding: the STL round-trip can leave inverted faces
+        # (rendered "half transparent" with backface culling). trimesh's
+        # fix_normals orients every manifold shell consistently — same
+        # shape, just correct orientation. The shape/volume is unchanged.
+        try:
+            out_mesh = trimesh.load(io.BytesIO(out_bytes), file_type="stl",
+                                    force="mesh")
+            if isinstance(out_mesh, trimesh.Scene):
+                geoms = [g for g in out_mesh.geometry.values()
+                         if isinstance(g, trimesh.Trimesh)]
+                out_mesh = trimesh.util.concatenate(geoms) if len(geoms) > 1 else geoms[0]
+            out_mesh.fix_normals()
+            out_bytes = out_mesh.export(file_type="stl")
+        except Exception:
+            pass
+        return out_bytes
     finally:
         for p in (tmp_in, tmp_out):
-            try:
-                os.unlink(p)
-            except OSError:
-                pass
+            if p:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
 
 # ——————————————————————————————————————————————————————————————————————
 # GPU packing job runner
@@ -166,12 +394,39 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
 
             box_l, box_w, box_h = box_dims
             cell = params.get("cell", 1.0)
+            # The voxel size must adapt to the PIECE, not be a fixed number:
+            # 1.5mm is ~15% of an 8mm part (way too coarse — cavities and
+            # nesting vanish), but fine for a 10cm part. Rule: ~5% of the
+            # piece's smallest dimension, clamped to [0.5, 1.0]mm. The
+            # client's explicit (finer) cell is honored; anything coarser
+            # than the adaptive value is clamped down.
+            try:
+                b = mesh.bounds
+                piece_min_dim = float(min(
+                    b[1][0] - b[0][0], b[1][1] - b[0][1], b[1][2] - b[0][2]))
+            except Exception:
+                piece_min_dim = 20.0
+            # Cell rule (both directions):
+            #  * SMALL parts: never coarser than ~5% of the piece's smallest
+            #    dimension (a 1mm voxel is 12.5% of an 8mm cone and destroys
+            #    the stacking/nesting), floor 0.5mm — the client presets are
+            #    calibrated for ~30mm parts.
+            #  * BIG parts: the UI's mm presets are way too fine (a 279mm
+            #    part at 1mm = 3.5M voxels → minutes). Scale the client cell
+            #    up with the part size so the voxel count stays bounded.
+            try:
+                cell = max(0.5, min(
+                    float(cell) * max(1.0, piece_min_dim / 30.0),
+                    0.05 * piece_min_dim))
+            except (TypeError, ValueError):
+                cell = max(0.5, min(1.0, 0.05 * piece_min_dim))
             yaw = params.get("yaw", 8)
             roll = params.get("roll", 4)
             pitch = params.get("pitch", 4)
             scan_vox = params.get("scan_vox", 1)
             method = params.get("method", "sparrow")
             fixed_orientation = params.get("fixed_orientation", 0)
+            max_pieces = int(params.get("max_pieces", 5000))
 
             # Stacking/Compartment honor the user's chosen pose: when the
             # client sends a pre-rotated STL, restrict to in-plane spins of
@@ -202,11 +457,20 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                 packer = BestPacker(box_dims)
                 packer._fixed_orientation = packer_fixed_orientation
                 packer._smart_stack = bool(int(params.get("smart_stack", 1)))
+                # Stacking uses SURFACE-shell voxelization: the pieces are
+                # modelled as hard shells, so real nesting works (cones slide
+                # into cones, rings interlock, concavities mate). Solid-fill
+                # voxels would erase every cavity and make stacking behave
+                # like a bounding-box grid.
+                if method in ("stacking", "multitray"):
+                    packer._surface_shell = True
                 if horizontal_angle is not None and packer_fixed_orientation:
                     packer._horizontal_angle = horizontal_angle
                 packer.load_mesh_from_data(mesh, n_yaw=yaw)
 
                 def progress_cb(count, elapsed_s, partial_placements=None):
+                    if job.get("cancelled"):
+                        raise RuntimeError("job cancelled by user")
                     job["pieces"] = count
                     job["time_s"] = round(elapsed_s, 1)
                     # Throttle live placement updates (every 10 pieces) so the
@@ -215,7 +479,11 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                         job["placements_partial"] = format_placements(
                             partial_placements, packer._sparrow_voxel_data)
 
-                vox_cell = params.get("cell", 1.0)
+                # Use the ADAPTIVE-CLAMPED cell (the raw client value is
+                # capped to ~5% of the piece size, floor 0.5 / cap 1.0 — a
+                # 1mm voxel is 12.5% of an 8mm part and destroys the
+                # stacking).
+                vox_cell = cell
                 if method == "sparrow":
                     placed_pieces, placed_meshes = packer.pack_sparrow(
                         max_pieces=500, n_workers=4, cell_size=vox_cell, verbose=False,
@@ -228,7 +496,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                         progress_callback=progress_cb, seed=seed)
                 elif method == "stacking":
                     placed_pieces, placed_meshes = packer.pack_stacking(
-                        max_pieces=5000, cell_size=vox_cell, verbose=False,
+                        max_pieces=max_pieces, cell_size=vox_cell, verbose=False,
                         progress_callback=progress_cb)
                 elif method == "multitray":
                     # Multi-tray: pack the same box repeatedly until the
@@ -251,7 +519,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                             break
                         if tray_method == "sparrow":
                             tray_placed, tray_meshes = packer.pack_sparrow(
-                                max_pieces=min(remaining, 500), n_workers=4,
+                                max_pieces=min(remaining, max_pieces, 2000), n_workers=4,
                                 cell_size=vox_cell, verbose=False,
                                 progress_callback=progress_cb, seed=seed)
                         elif tray_method in ("grid", "compartment"):
@@ -263,7 +531,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                                 progress_callback=progress_cb)
                         else:
                             tray_placed, tray_meshes = packer.pack_stacking(
-                                max_pieces=min(remaining, 5000), cell_size=vox_cell,
+                                max_pieces=min(remaining, max_pieces), cell_size=vox_cell,
                                 verbose=False, progress_callback=progress_cb)
                         if not tray_placed:
                             break
@@ -331,6 +599,8 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                 orients = generate_orientations(mesh, cell, yaw, roll, pitch, box_dims)
 
                 def progress_cb(count, elapsed_s):
+                    if job.get("cancelled"):
+                        raise RuntimeError("job cancelled by user")
                     job["pieces"] = count
                     job["time_s"] = round(elapsed_s, 1)
 
@@ -363,20 +633,30 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
 
             # Stacking contact pass: drop every piece onto the pieces below
             # it until exact mesh contact (FCL) — closes the residual voxel
-            # shell gaps so stacked pieces physically touch.
+            # shell gaps so stacked pieces physically touch. Only for SMALL
+            # parts: the sub-millimetre gap is invisible on large pieces
+            # (>25mm), and the FCL pass costs seconds per hundred pieces.
             if method == "stacking" and placed_pieces:
-                from packer_best import descent_stack_contact
-                refined_placed = descent_stack_contact(
-                    placed_pieces, packer._sparrow_voxel_data, verbose=False)
-                oris_here = packer._sparrow_voxel_data
-                rm = []
-                for (x, y, z, oi, name) in refined_placed:
-                    cm = oris_here[oi]['mesh'].copy()
-                    cm.apply_translation([x, y, z])
-                    rm.append(cm)
-                placed_pieces = refined_placed
-                placed_meshes = rm
-                placed = placed_pieces
+                try:
+                    bnd = mesh.bounds
+                    pmin_dim = min(bnd[1, 0] - bnd[0, 0],
+                                   bnd[1, 1] - bnd[0, 1],
+                                   bnd[1, 2] - bnd[0, 2])
+                except Exception:
+                    pmin_dim = 0.0
+                if pmin_dim <= 25.0:
+                    from packer_best import descent_stack_contact
+                    refined_placed = descent_stack_contact(
+                        placed_pieces, packer._sparrow_voxel_data, verbose=False)
+                    oris_here = packer._sparrow_voxel_data
+                    rm = []
+                    for (x, y, z, oi, name) in refined_placed:
+                        cm = oris_here[oi]['mesh'].copy()
+                        cm.apply_translation([x, y, z])
+                        rm.append(cm)
+                    placed_pieces = refined_placed
+                    placed_meshes = rm
+                    placed = placed_pieces
 
             elapsed = time.time() - t0
 
@@ -467,7 +747,10 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
 
     except Exception as e:
         job["status"] = "error"
-        job["error_msg"] = f"{e}\n{traceback.format_exc()}"
+        if job.get("cancelled"):
+            job["error_msg"] = "Cancelled by user"
+        else:
+            job["error_msg"] = f"{e}\n{traceback.format_exc()}"
 
 
 # ——————————————————————————————————————————————————————————————————————
@@ -539,8 +822,16 @@ def run_boxes_job(job: dict, stl_data: bytes, boxes: list, params: dict):
                     if method == "sparrow":
                         packer = BestPacker((box_l, box_w, box_h))
                         packer.load_mesh_from_data(mesh, n_yaw=8)
+                        try:
+                            b = mesh.bounds
+                            pmin = float(min(b[1][0]-b[0][0], b[1][1]-b[0][1], b[1][2]-b[0][2]))
+                        except Exception:
+                            pmin = 20.0
+                        box_cell = max(0.5, min(
+                            float(cell) * max(1.0, pmin / 30.0),
+                            0.05 * pmin))
                         placed_sparrow, placed_meshes = packer.pack_sparrow(
-                            max_pieces=500, n_workers=4, cell_size=cell, verbose=False)
+                            max_pieces=500, n_workers=4, cell_size=box_cell, verbose=False)
                         placed_meshes = placed_meshes or []
                     else:
                         if not HAS_CUDA:
@@ -630,13 +921,88 @@ def simplify():
                     request.args.get("ratio", "0.5")))
     except ValueError:
         ratio = 0.5
+    features = request.args.get("features", "1") not in ("0", "false", "")
+    envelope = request.args.get("envelope", "0") not in ("0", "false", "")
 
     try:
-        result = simplify_stl(data, max(0.01, min(1.0, ratio)))
+        result = simplify_stl(data, max(0.01, min(1.0, ratio)),
+                              preserve_features=features,
+                              create_envelope=envelope)
         return result, 200, {"Content-Type": "application/octet-stream"}
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
+@app.route("/api/orientations", methods=["POST"])
+def orientations():
+    """Server-side stable-orientation analysis (no physics engine, no
+    browser load). Returns every unique stable resting pose: a cone gives
+    base-down + base-up (on its rim), a brick all six faces, etc. Each
+    entry carries a quaternion mapping the ORIGINAL mesh to the resting
+    pose (face exactly horizontal) plus the aligned dims."""
+    if "stl" not in request.files:
+        return jsonify({"error": "Missing 'stl' file"}), 400
+    stl_data = request.files["stl"].read()
+    try:
+        mesh = trimesh.load(io.BytesIO(stl_data), file_type="stl", force="mesh")
+        if isinstance(mesh, trimesh.Scene):
+            mesh = trimesh.util.concatenate(
+                [g for g in mesh.geometry.values() if isinstance(g, trimesh.Trimesh)])
+        from orientation_analysis import analyze_stable_orientations
+        # Complex/scanned meshes (tens of thousands of triangles with noisy
+        # normals) defeat the flat-face clustering on the raw geometry.
+        # Simplify internally FIRST (the decimated mesh has clean flat
+        # faces) and run the analysis on that — the returned quaternions
+        # apply to the original mesh unchanged (decimation preserves the
+        # pose).
+        n_faces = len(mesh.faces) if hasattr(mesh, "faces") else 0
+        if n_faces > 20000:
+            # pymeshlab's load_new_mesh accepts only a FILE PATH (not a
+            # file-like object — a BytesIO raises and leaves the analysis
+            # grinding on the raw 150k-tri mesh for minutes).
+            simple = None
+            if HAS_PYMESHLAB:
+                try:
+                    tmp = tempfile.NamedTemporaryFile(suffix=".stl", delete=False)
+                    tmp.write(stl_data)
+                    tmp.close()
+                    target = max(5000, int(n_faces * 0.1))
+                    ms = pymeshlab.MeshSet()
+                    ms.load_new_mesh(tmp.name)
+                    ms.meshing_decimation_quadric_edge_collapse(
+                        targetfacenum=target, preserveboundary=True)
+                    v = ms.current_mesh().vertex_matrix()
+                    f = ms.current_mesh().face_matrix()
+                    if len(f) > 0 and len(v) > 0:
+                        simple = trimesh.Trimesh(vertices=v, faces=f, process=False)
+                    try:
+                        os.unlink(tmp.name)
+                    except Exception:
+                        pass
+                except Exception:
+                    try:
+                        os.unlink(tmp.name)
+                    except Exception:
+                        pass
+            # Fallback: the meshopt/VTK pipeline (also fast, C++).
+            if simple is None:
+                try:
+                    simple = trimesh.load(io.BytesIO(simplify_stl(
+                        stl_data, max(0.05, 5000 / n_faces))),
+                        file_type="stl", force="mesh")
+                    if isinstance(simple, trimesh.Scene):
+                        simple = trimesh.util.concatenate(
+                            [g for g in simple.geometry.values()
+                             if isinstance(g, trimesh.Trimesh)])
+                except Exception:
+                    simple = None
+            if simple is not None and len(simple.faces) > 0:
+                mesh = simple
+        poses = analyze_stable_orientations(mesh)
+        return jsonify({"orientations": poses})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/api/pack", methods=["POST"])
 def submit_pack():
@@ -659,6 +1025,7 @@ def submit_pack():
         "fixed_orientation": int(request.form.get("fixed_orientation", 0)),
         "horizontal_angle": request.form.get("horizontal_angle"),
         "total_pieces": int(request.form.get("total_pieces", 1000)),
+        "max_pieces": min(20000, int(request.form.get("max_pieces", 5000))),
         "tray_method": request.form.get("tray_method", "stacking"),
         "gap": float(request.form.get("gap", 1.0)),
         "cardboard_mm": float(request.form.get("cardboard_mm", 0)),
@@ -765,13 +1132,14 @@ def submit_pack():
                      args=(job, stl_data, (box_l, box_w, box_h), params),
                      daemon=True).start()
 
-    # Watchdog: mark job as timed out after 10 minutes (frontend stops polling)
+    # Watchdog: safety net only — long calculations (a full night) are a
+    # legitimate use case, so the cap is 12h, not 10 minutes. The frontend
+    # shows live progress and lets the user cancel explicitly.
     def watchdog():
-        time.sleep(600)
+        time.sleep(43200)
         if job["status"] in ("queued", "running"):
             job["status"] = "error"
-            job["error_msg"] = ("Timeout after 10 minutes. Try a larger cell size "
-                                "or the Sparrow method for faster results.")
+            job["error_msg"] = ("Timeout after 12 hours.")
 
     threading.Thread(target=watchdog, daemon=True).start()
 
@@ -783,6 +1151,19 @@ def submit_pack():
         "estimated_time": estimated_time,
         "check_url": f"/api/pack/{job_id}",
     })
+
+
+@app.route("/api/pack/<job_id>/cancel", methods=["POST"])
+def cancel_pack(job_id):
+    with JOBS_LOCK:
+        job = JOBS.get(job_id)
+    if not job:
+        return jsonify({"error": "unknown job"}), 404
+    job["cancelled"] = True
+    if job["status"] in ("queued", "running"):
+        job["status"] = "error"
+        job["error_msg"] = "Cancelled by user"
+    return jsonify({"status": "cancelled"})
 
 
 @app.route("/api/pack/<job_id>")
@@ -964,6 +1345,38 @@ def list_jobs():
 # ——————————————————————————————————————————————————————————————————————
 # CLI
 # ——————————————————————————————————————————————————————————————————————
+
+@app.route("/api/report/export", methods=["POST"])
+def report_export():
+    """DOCX / XLSX export of the packing report — same content as the PDF
+    (mirrors the sections and value formatting of report-generator.js), in
+    an editable format. Word/Excel reflow the layout, so the mm-exact print
+    layout is only available in the PDF, but the data is identical."""
+    try:
+        body = request.get_json(force=True)
+        fmt = (body.get("format") or "docx").lower()
+        data = body.get("data") or {}
+        views = body.get("views") or {}
+        from report_export import build_docx, build_xlsx
+        if fmt == "xlsx":
+            payload = build_xlsx(data, views)
+            mime = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            ext = "xlsx"
+        else:
+            payload = build_docx(data, views)
+            mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            ext = "docx"
+        name = (data.get("stlFileName") or "informe").replace(".stl", "").replace(".STL", "")
+        return send_file(
+            io.BytesIO(payload),
+            mimetype=mime,
+            as_attachment=True,
+            download_name=f"{name}_{fmt}.{ext}",
+        )
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     import argparse

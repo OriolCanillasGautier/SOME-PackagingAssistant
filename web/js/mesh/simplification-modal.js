@@ -636,6 +636,7 @@ export class SimplificationModal {
     async _updateSimplification() {
         const ratio = parseFloat(this.modal.querySelector('#simplify-slider').value) / 100;
         const preserveFeatures = this.modal.querySelector('#preserve-features').checked;
+        const createEnvelope = this.modal.querySelector('#create-envelope').checked;
 
         // Show loading state
         const applyBtn = this.modal.querySelector('#simplify-apply');
@@ -644,26 +645,10 @@ export class SimplificationModal {
         if (resultBox) resultBox.style.opacity = '0.5';
         
         try {
-            // simplify() is now async (may call server)
-            this.simplifiedGeometry = await this.simplifier.simplify(ratio, preserveFeatures);
-            
-            // Crear embolcall convex si cal
-            const createEnvelope = this.modal.querySelector('#create-envelope').checked;
-            if (createEnvelope) {
-                const pos = this.simplifiedGeometry.getAttribute('position');
-                const pointCount = pos?.count ?? 0;
-                if (pointCount >= 4) {
-                    const maxPoints = 5000;
-                    const step = Math.max(1, Math.floor(pointCount / maxPoints));
-                    const points = [];
-                    for (let i = 0; i < pointCount; i += step) {
-                        points.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
-                    }
-                    const hull = new ConvexGeometry(points);
-                    hull.computeVertexNormals();
-                    this.simplifiedGeometry = hull;
-                }
-            }
+            // simplify() is now async (may call server). The envelope and
+            // feature-preservation options are handled SERVER-side (a
+            // browser QuickHull on 200k+ points freezes the page).
+            this.simplifiedGeometry = await this.simplifier.simplify(ratio, preserveFeatures, createEnvelope);
             
             // Actualitzar estadístiques
             this._updateResultStats();
@@ -679,6 +664,10 @@ export class SimplificationModal {
     }
     
     _updateResultStats() {
+        // The stats are only meaningful once a simplification has run —
+        // language refreshes happen before that (simplifiedGeometry is
+        // null) and must not crash the modal.
+        if (!this.simplifiedGeometry) return;
         const stats = this.simplifier.getStats(this.simplifiedGeometry);
         
         this.modal.querySelector('#result-vertices').textContent = stats.newVertices.toLocaleString();

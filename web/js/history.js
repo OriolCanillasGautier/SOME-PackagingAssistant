@@ -241,7 +241,7 @@ function renderTable() {
         
         const modeClass = item.mode === 'bulk' ? 'bulk' : 'optimized';
         const modeIcon = item.mode === 'bulk' ? '' : '';
-        const modeName = item.mode === 'bulk' ? historyText('modeBulk') : historyText('modeOptimized');
+        const modeName = getModeName(item);
         
         const pieceDims = item.pieceDims ? 
             `${item.pieceDims.l?.toFixed(1) || '?'}×${item.pieceDims.w?.toFixed(1) || '?'}×${item.pieceDims.h?.toFixed(1) || '?'}` : 
@@ -462,6 +462,21 @@ async function deleteItem(id) {
 /**
  * Export to CSV
  */
+/**
+ * Human-readable mode name for a history entry: Planar entries carry the
+ * sub-variant (grid/stacking/multitray/compartment) so each real mode shows
+ * its own name instead of a generic label.
+ */
+function getModeName(item) {
+    if (item.mode === 'bulk') return historyText('modeBulk');
+    if (item.mode === 'gpu') return historyText('modeOptimized');
+    if (item.variant === 'grid') return historyText('modeGrid');
+    if (item.variant === 'stacking') return historyText('modeStacking');
+    if (item.variant === 'multitray') return historyText('modeMultitray');
+    if (item.variant === 'compartment') return historyText('modeCompartment');
+    return historyText('modeOptimized');
+}
+
 function exportToCSV() {
     if (state.filteredHistory.length === 0) {
         alert(historyText('exportEmpty'));
@@ -487,7 +502,7 @@ function exportToCSV() {
         const date = new Date(item.timestamp).toISOString();
         return [
             date,
-            item.mode,
+            getModeName(item),
             item.pieceDims?.l || '',
             item.pieceDims?.w || '',
             item.pieceDims?.h || '',

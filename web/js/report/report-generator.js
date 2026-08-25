@@ -294,9 +294,52 @@ export class ReportGenerator {
      * @param {number} height - Image height
      * @returns {string|null} Data URL of the image
      */
-    captureHero(width = 1400, height = 1050, framing = 1.15) {
+    captureHero(width = 1680, height = 640, framing = 0.76) {
         return this._withRenderState(() => {
-            this._frameCamera('isometric', framing);
+            this._frameCamera('isometric', 1.0);
+            // Zoom to the projected box: perspective size scales linearly
+            // with 1/distance, so project the 8 box corners once and pull
+            // the camera in until the box fills `framing` of the frame's
+            // smaller dimension (the isometric projection otherwise shrinks
+            // the box to roughly half the frame).
+            if (this.scene.boxMesh) {
+                const box = new THREE.Box3().setFromObject(this.scene.boxMesh);
+                const center = new THREE.Vector3();
+                box.getCenter(center);
+                const corners = [];
+                for (const sx of [0, 1]) {
+                    for (const sy of [0, 1]) {
+                        for (const sz of [0, 1]) {
+                            corners.push(new THREE.Vector3(
+                                sx ? box.max.x : box.min.x,
+                                sy ? box.max.y : box.min.y,
+                                sz ? box.max.z : box.min.z));
+                        }
+                    }
+                }
+                this.scene.camera.updateMatrixWorld(true);
+                this.scene.camera.updateProjectionMatrix();
+                const proj = corners.map(c => c.clone().project(this.scene.camera));
+                const xs = proj.map(p => p.x);
+                const ys = proj.map(p => p.y);
+                // Fit the box's LARGEST projected extent to `framing` of the
+                // frame's smaller dimension — targeting the smaller span
+                // lets the other dimension overflow the frame (the box then
+                // touches the top and bottom edges, which reads as "too
+                // zoomed in").
+                const cur = Math.max(Math.max(...xs) - Math.min(...xs),
+                                     Math.max(...ys) - Math.min(...ys));
+                const target = framing * 2; // NDC span is 2
+                if (cur > 1e-6 && Math.abs(target - cur) > 1e-4) {
+                    const scale = target / cur;
+                    const camToCenter = center.clone().sub(this.scene.camera.position);
+                    const d = camToCenter.length();
+                    const dir = camToCenter.normalize();
+                    this.scene.camera.position.copy(center).addScaledVector(dir, -d / scale);
+                    this.scene.camera.lookAt(center);
+                    this.scene.camera.updateProjectionMatrix();
+                }
+            }
             this.scene.renderer.render(this.scene.scene, this.scene.camera);
             return this.scene.renderer.domElement.toDataURL('image/png');
         }, {
@@ -468,6 +511,9 @@ export class ReportGenerator {
         const trayCount = Array.isArray(trays) ? trays.length : 0;
         const trayPieces = Array.isArray(trays) ? trays.map(tr => tr.pieces) : [];
         const interlockCount = interlocked ? (this._num(interlocked.count) ?? 0) : 0;
+        // The interlocking warning can be hidden from the report (checkbox
+        // in the report popup) — some users want a clean PDF without it.
+        const showInterlockWarning = data.showInterlockWarning !== false;
 
         // pallet info
         const hasPallet = Object.keys(pallet).some(k => this._num(pallet[k]) != null || pallet[k]);
@@ -565,7 +611,7 @@ export class ReportGenerator {
             </section>
 
             <!-- WARNINGS -->
-            ${interlockCount > 0 ? `<div class="warn-box">${t.interlockedWarning || 'Interlocked pieces'}:
+            ${interlockCount > 0 && showInterlockWarning ? `<div class="warn-box">${t.interlockedWarning || 'Interlocked pieces'}:
                 ${interlockCount} ${t.pieces || 'pieces'}</div>` : ''}
             ${trayCount > 1 ? `<div class="info-box">${t.traySummary || 'Multi-box packing'}:
                 ${trayCount} ${t.boxes || 'boxes'} (${trayPieces.join(' + ')}) = ${fmt(pieceCount)} ${t.pieces || 'pieces'}</div>` : ''}

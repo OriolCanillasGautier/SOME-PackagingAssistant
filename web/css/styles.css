@@ -561,7 +561,14 @@ button {
     font-weight: 600;
     color: var(--text-secondary);
     margin-bottom: 6px;
-    letter-spacing: 0.1px;
+}
+
+.input-group .input-hint {
+    font-size: 0.72rem;
+    font-weight: 400;
+    color: var(--text-muted, #9ca3af);
+    margin-top: 5px;
+    margin-bottom: 0;
 }
 
 .input-group input[type="number"],
@@ -2578,6 +2585,32 @@ button {
     font-size: 0.72rem;
     color: var(--text-muted);
     font-weight: 400;
+}
+
+.orient-fit {
+    font-size: 0.72rem;
+    color: var(--accent);
+    font-weight: 600;
+}
+
+.orient-card.recommended {
+    border-color: var(--accent);
+    background: var(--accent-glow);
+}
+
+.orient-rec {
+    display: inline-block;
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--accent);
+    color: #ffffff;
+    font-size: 0.65rem;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 999px;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+    z-index: 1;
 }
 
 .orient-check {

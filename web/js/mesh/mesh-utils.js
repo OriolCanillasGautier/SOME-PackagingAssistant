@@ -610,11 +610,20 @@ function pointInPolygon2D(point, poly) {
  * @param {number} epsilon - height tolerance in mm
  * @returns {{stable: boolean, supportArea: number, basePointCount: number}}
  */
-export function getSupportStability(geometry, epsilon = 0.5) {
+export function getSupportStability(geometry, epsilon = null) {
     const positions = geometry.getAttribute('position');
     if (!positions || positions.count === 0) {
         return { stable: false, supportArea: 0, basePointCount: 0 };
     }
+
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    const maxDim = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z);
+    // The contact band must be TINY: a real rest touches the floor only
+    // where the piece is actually at the lowest level. CAD flat faces have
+    // exactly coplanar vertices, so 0.3mm catches the whole face; a curved
+    // or edge contact only contributes its sliver.
+    if (epsilon === null) epsilon = 0.3;
 
     let minY = Infinity;
     for (let i = 0; i < positions.count; i++) {
@@ -634,55 +643,106 @@ export function getSupportStability(geometry, epsilon = 0.5) {
         return { stable: false, supportArea: 0, basePointCount: basePoints.length };
     }
 
+    // The CONTACT area is the sum of the projected (onto the floor) areas
+    // of the DOWNWARD-facing triangles whose centroid is inside the contact
+    // band above the lowest point. A piece resting on a flat face gets the
+    // full face area; a piece resting on a curved side (a cone lying on its
+    // side) only touches along a line — the band's side facets have
+    // near-horizontal normals, so their projected area is ~0. A vertex-band
+    // hull cannot tell these apart (the band of a slightly tilted curved
+    // side is a wide strip), which is exactly why the lying cone passed.
+    let contactArea = 0;
+    const bandTop = minY + epsilon;
+    const nTris = positions.count / 3;
+    const cvA = new THREE.Vector3();
+    const cvB = new THREE.Vector3();
+    const cvC = new THREE.Vector3();
+    const ce1 = new THREE.Vector3();
+    const ce2 = new THREE.Vector3();
+    const cnrm = new THREE.Vector3();
+    for (let t = 0; t < nTris; t++) {
+        const ia = t * 3, ib = t * 3 + 1, ic = t * 3 + 2;
+        cvA.set(positions.getX(ia), positions.getY(ia), positions.getZ(ia));
+        cvB.set(positions.getX(ib), positions.getY(ib), positions.getZ(ib));
+        cvC.set(positions.getX(ic), positions.getY(ic), positions.getZ(ic));
+        const triMinY = Math.min(cvA.y, cvB.y, cvC.y);
+        const triMaxY = Math.max(cvA.y, cvB.y, cvC.y);
+        if (triMinY > bandTop) continue;
+        // Only the portion of the triangle inside the band touches the
+        // floor. Long side triangles of a curved rest span far up: counting
+        // their full area would inflate a line contact into a face.
+        const ySpan = triMaxY - triMinY;
+        const frac = ySpan < 1e-6 ? 1 : Math.min(1, Math.max(0, (bandTop - triMinY) / ySpan));
+        ce1.subVectors(cvB, cvA);
+        ce2.subVectors(cvC, cvA);
+        cnrm.crossVectors(ce1, ce2);
+        const area = cnrm.length() * 0.5;
+        if (area < 1e-10) continue;
+        const ny = cnrm.y / (area * 2);
+        if (ny >= -0.05) continue;      // not pointing down (or flat)
+        contactArea += area * (-ny) * frac;    // projected on the floor, band-limited
+    }
+
+    // A real resting base needs meaningful contact. The contact must be a
+    // 2D REGION, not a line or a point: the convex hull of the band
+    // vertices of a flat rest spans the full face in both axes; a curved-
+    // side rest (a cone lying on its side) produces a long thin strip
+    // (min-extent / max-extent → 0). A hollow flat base still passes — the
+    // hull of its rim ring is the outer disc.
     const hull = convexHull2D(basePoints);
-    const supportArea = polygonArea2D(hull);
+    const supportArea = contactArea;
+    const hullMinX = Math.min(...hull.map(p => p.x));
+    const hullMaxX = Math.max(...hull.map(p => p.x));
+    const hullMinZ = Math.min(...hull.map(p => p.z));
+    const hullMaxZ = Math.max(...hull.map(p => p.z));
+    const hx = hullMaxX - hullMinX;
+    const hz = hullMaxZ - hullMinZ;
+    const shapeRatio = Math.min(hx, hz) / Math.max(1e-6, Math.max(hx, hz));
+
+    // The footprint for the area ratio.
+    const extentArea = Math.max(1e-6,
+        (bb.max.x - bb.min.x) * (bb.max.z - bb.min.z));
+    const minSupport = Math.max(1.0, extentArea * 0.3);
 
     // Centre of mass from the AREA-WEIGHTED triangle centroids — the vertex
     // average is biased by mesh tessellation (a dense fillet would pull the
     // COM away from the real mass centre).
     const indexed = geometry.index;
     const triCount = indexed ? indexed.count / 3 : positions.count / 3;
-    const vA = new THREE.Vector3();
-    const vB = new THREE.Vector3();
-    const vC = new THREE.Vector3();
-    const e1 = new THREE.Vector3();
-    const e2 = new THREE.Vector3();
-    const cr = new THREE.Vector3();
-    let com = new THREE.Vector3();
-    let totalArea = 0;
+    const cvA2 = new THREE.Vector3();
+    const cvB2 = new THREE.Vector3();
+    const cvC2 = new THREE.Vector3();
+    const ce12 = new THREE.Vector3();
+    const ce22 = new THREE.Vector3();
+    const cr2 = new THREE.Vector3();
+    const com = new THREE.Vector3();
+    let comArea = 0;
     for (let t = 0; t < triCount; t++) {
         const ia = indexed ? indexed.getX(t * 3) : t * 3;
         const ib = indexed ? indexed.getX(t * 3 + 1) : t * 3 + 1;
         const ic = indexed ? indexed.getX(t * 3 + 2) : t * 3 + 2;
-        vA.set(positions.getX(ia), positions.getY(ia), positions.getZ(ia));
-        vB.set(positions.getX(ib), positions.getY(ib), positions.getZ(ib));
-        vC.set(positions.getX(ic), positions.getY(ic), positions.getZ(ic));
-        e1.subVectors(vB, vA);
-        e2.subVectors(vC, vA);
-        cr.crossVectors(e1, e2);
-        const area = cr.length() * 0.5;
+        cvA2.set(positions.getX(ia), positions.getY(ia), positions.getZ(ia));
+        cvB2.set(positions.getX(ib), positions.getY(ib), positions.getZ(ib));
+        cvC2.set(positions.getX(ic), positions.getY(ic), positions.getZ(ic));
+        ce12.subVectors(cvB2, cvA2);
+        ce22.subVectors(cvC2, cvA2);
+        cr2.crossVectors(ce12, ce22);
+        const area = cr2.length() * 0.5;
         if (area < 1e-10) continue;
-        const centroid = new THREE.Vector3(
-            (vA.x + vB.x + vC.x) / 3,
-            (vA.y + vB.y + vC.y) / 3,
-            (vA.z + vB.z + vC.z) / 3
+        com.addScaledVector(
+            new THREE.Vector3(
+                (cvA2.x + cvB2.x + cvC2.x) / 3,
+                (cvA2.y + cvB2.y + cvC2.y) / 3,
+                (cvA2.z + cvB2.z + cvC2.z) / 3
+            ),
+            area
         );
-        com.addScaledVector(centroid, area);
-        totalArea += area;
+        comArea += area;
     }
-    if (totalArea > 0) com.divideScalar(totalArea);
-
-    // A real resting base needs meaningful contact: the support polygon must
-    // cover a reasonable share of the piece's own XZ footprint, and the COM
-    // must project inside it. A ring standing on its rim fails both checks
-    // (near-zero area / COM right on the edge line).
-    geometry.computeBoundingBox();
-    const bb = geometry.boundingBox;
-    const extentArea = Math.max(1e-6,
-        (bb.max.x - bb.min.x) * (bb.max.z - bb.min.z));
-    const minSupport = Math.max(1.0, extentArea * 0.04);
+    if (comArea > 0) com.divideScalar(comArea);
 
     const stable = supportArea >= minSupport
+        && shapeRatio >= 0.3
         && pointInPolygon2D({ x: com.x, z: com.z }, hull);
     return { stable, supportArea, basePointCount: basePoints.length };
 }
@@ -722,7 +782,7 @@ export function getSupportStability(geometry, epsilon = 0.5) {
  *             clusterCount: number } | null}
  */
 export function detectStableBase(geometry, opts = {}) {
-    const { cosThreshold = 0.4, heightBinMM = 2 } = opts;
+    const { normalTol = 0.985, planeTolMM = 0.8 } = opts;
 
     const pos = geometry.getAttribute('position');
     if (!pos || pos.count < 3) return null;
@@ -730,7 +790,7 @@ export function detectStableBase(geometry, opts = {}) {
     const indexed = geometry.index;
     const triCount = indexed ? indexed.count / 3 : pos.count / 3;
 
-    // 1. Collect triangle info
+    // 1. Collect triangle normals + centroids + COM (area-weighted).
     const vA = new THREE.Vector3();
     const vB = new THREE.Vector3();
     const vC = new THREE.Vector3();
@@ -738,8 +798,10 @@ export function detectStableBase(geometry, opts = {}) {
     const edge2 = new THREE.Vector3();
     const faceNormal = new THREE.Vector3();
 
-    /** @type {{ normal: THREE.Vector3, centroidY: number, area: number }[]} */
+    /** @type {{ normal: THREE.Vector3, centroid: THREE.Vector3, area: number }[]} */
     const faces = [];
+    const com = new THREE.Vector3();
+    let totalArea = 0;
 
     for (let t = 0; t < triCount; t++) {
         let ia, ib, ic;
@@ -764,99 +826,85 @@ export function detectStableBase(geometry, opts = {}) {
         if (area < 1e-8) continue;              // degenerate triangle
         faceNormal.normalize();
 
-        if (Math.abs(faceNormal.y) < cosThreshold) continue;   // not flat enough
-
-        const centroidY = (vA.y + vB.y + vC.y) / 3;
-        faces.push({
-            normal: faceNormal.clone(),
-            centroidY,
-            area
-        });
+        const centroid = new THREE.Vector3(
+            (vA.x + vB.x + vC.x) / 3,
+            (vA.y + vB.y + vC.y) / 3,
+            (vA.z + vB.z + vC.z) / 3
+        );
+        faces.push({ normal: faceNormal.clone(), centroid, area });
+        com.addScaledVector(centroid, area);
+        totalArea += area;
     }
-
     if (faces.length === 0) return null;
+    com.divideScalar(totalArea || 1);
 
-    // 2. Split into down-facing (normal.y < 0) and up-facing (normal.y > 0)
-    const downFaces = faces.filter(f => f.normal.y < 0);
-    const upFaces   = faces.filter(f => f.normal.y > 0);
-
-    // 3. Cluster faces by height (centroidY), pick largest-area cluster
-    function clusterByHeight(faceList) {
-        if (faceList.length === 0) return [];
-        const sorted = faceList.slice().sort((a, b) => a.centroidY - b.centroidY);
-        const clusters = [];
-        let current = { faces: [sorted[0]], minY: sorted[0].centroidY };
-        for (let i = 1; i < sorted.length; i++) {
-            if (sorted[i].centroidY - current.faces[current.faces.length - 1].centroidY <= heightBinMM) {
-                current.faces.push(sorted[i]);
-            } else {
-                clusters.push(current);
-                current = { faces: [sorted[i]], minY: sorted[i].centroidY };
-            }
+    // 2. Cluster by normal direction AND coplanarity (distance to the
+    //    cluster's plane). ORIENTATION-AGNOSTIC: the largest flat region of
+    //    the mesh wins whatever direction it faces in the raw STL — e.g.
+    //    the base disc of a cone whose axis points sideways. The old
+    //    |normal.y| filter + height-bin clustering was frame-biased and
+    //    silently missed exactly that case (producing the lying pose as the
+    //    "flat base").
+    const clusters = [];   // { normal, planePt, area, faces }
+    for (const f of faces) {
+        let best = -1;
+        for (let c = 0; c < clusters.length; c++) {
+            const cn = clusters[c].normal;
+            if (Math.abs(f.normal.dot(cn)) < normalTol) continue;
+            const d = Math.abs(
+                (f.centroid.x - clusters[c].planePt.x) * cn.x +
+                (f.centroid.y - clusters[c].planePt.y) * cn.y +
+                (f.centroid.z - clusters[c].planePt.z) * cn.z);
+            if (d > planeTolMM) continue;
+            best = c;
+            break;
         }
-        clusters.push(current);
-        return clusters;
-    }
-
-    function scoreCluster(cluster) {
-        let totalArea = 0;
-        for (const f of cluster.faces) totalArea += f.area;
-        return totalArea;
-    }
-
-    function bestCluster(faceList) {
-        const clusters = clusterByHeight(faceList);
-        if (clusters.length === 0) return null;
-        // Sort by total area descending, then by lowest centroid ascending (prefer bottom)
-        clusters.sort((a, b) => {
-            const aArea = scoreCluster(a);
-            const bArea = scoreCluster(b);
-            if (Math.abs(bArea - aArea) > 1e-6) return bArea - aArea;  // larger area first
-            return a.minY - b.minY;  // lower first
-        });
-        return clusters[0];
-    }
-
-    // Prefer down-facing (the face that would touch the ground already points down)
-    let chosen = bestCluster(downFaces);
-    let flipSign = 1; // if chosen is down-facing, its normal ≈ -Y already (we want to align it to -Y)
-    if (!chosen || scoreCluster(chosen) < 1) {
-        const upChoice = bestCluster(upFaces);
-        if (upChoice && scoreCluster(upChoice) > (chosen ? scoreCluster(chosen) : 0)) {
-            chosen = upChoice;
-            flipSign = -1; // normal points +Y, but we want the *face* on the ground → rotate 180°
+        if (best < 0) {
+            clusters.push({
+                normal: f.normal.clone(),
+                planePt: f.centroid.clone(),
+                area: 0,
+                faces: [],
+            });
+            best = clusters.length - 1;
         }
+        const c = clusters[best];
+        c.faces.push(f);
+        c.area += f.area;
+        // Weighted refinement of the plane (normal + centroid)
+        const w = f.area;
+        c.normal.addScaledVector(f.normal, w).normalize();
+        c.planePt.x = (c.planePt.x * (c.faces.length - 1) + f.centroid.x) / c.faces.length;
+        c.planePt.y = (c.planePt.y * (c.faces.length - 1) + f.centroid.y) / c.faces.length;
+        c.planePt.z = (c.planePt.z * (c.faces.length - 1) + f.centroid.z) / c.faces.length;
     }
 
-    if (!chosen) return null;
+    // 3. The largest flat region = the resting base candidate.
+    clusters.sort((a, b) => b.area - a.area);
+    const chosen = clusters[0];
+    if (!chosen || chosen.area < 1.0) return null;
 
-    // 4. Weighted average normal of the chosen cluster
-    const avgNormal = new THREE.Vector3();
-    let totalArea = 0;
-    for (const f of chosen.faces) {
-        avgNormal.addScaledVector(f.normal, f.area);
-        totalArea += f.area;
-    }
-    avgNormal.divideScalar(totalArea || 1).normalize();
+    const avgNormal = chosen.normal.clone().normalize();
 
-    // The face's outward normal. We want this direction to point **down** (-Y)
-    // so the face rests on the ground.
-    // For down-facing faces, normal is already ≈ -Y → small rotation.
-    // For up-facing faces, normal is ≈ +Y → we need to flip 180°.
-    const targetDir = new THREE.Vector3(0, -1, 0);
+    // 4. The face's OUTWARD normal: away from the material (the COM is on
+    //    the material side, the ground-contact side faces outward).
     const faceDir = avgNormal.clone();
-    if (flipSign < 0) {
-        // The face's ground-contact side is opposite the normal
+    const outward = new THREE.Vector3(
+        chosen.planePt.x - com.x,
+        chosen.planePt.y - com.y,
+        chosen.planePt.z - com.z);
+    if (outward.dot(faceDir) < 0) {
         faceDir.negate();
     }
 
+    // 5. Align the outward normal to -Y (ground).
     const quat = new THREE.Quaternion();
-    quat.setFromUnitVectors(faceDir, targetDir);
+    quat.setFromUnitVectors(faceDir, new THREE.Vector3(0, -1, 0));
 
     return {
         quaternion: quat,
         normal: avgNormal,
-        area: totalArea,
+        area: chosen.area,
         clusterCount: chosen.faces.length
     };
 }

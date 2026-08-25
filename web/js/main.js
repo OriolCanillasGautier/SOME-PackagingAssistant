@@ -6,14 +6,14 @@
 import * as THREE from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_42';
-import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=force_update_42';
-import { SceneManager } from './visualization/scene.js?v=ui_fix_v2';
-import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-world.js?v=force_update_42';
-import { ReportGenerator } from './report/report-generator.js?v=force_update_42';
-import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_42';
-import { StorageManager } from './storage/storage-manager.js?v=force_update_42';
-import { loadLocale, t as localeText, getStoredLanguage, setStoredLanguage } from './i18n.js?v=force_update_42';
+import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=force_update_54';
+import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=force_update_54';
+import { SceneManager } from './visualization/scene.js?v=ui_fix_v14';
+import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-world.js?v=force_update_54';
+import { ReportGenerator } from './report/report-generator.js?v=force_update_54';
+import { getSimplificationModal } from './mesh/simplification-modal.js?v=force_update_54';
+import { StorageManager } from './storage/storage-manager.js?v=force_update_54';
+import { loadLocale, t as localeText, getStoredLanguage, setStoredLanguage } from './i18n.js?v=force_update_54';
 import { initBoxOptions } from './box-options.js?v=box_compare_v1';
 
 // Helper for dynamic limits
@@ -49,6 +49,7 @@ const state = {
     stlStableOrientations: [], // [{ quat, geometry, stability }] precomputed gravity bases
     selectedOrientations: null, // Set of selected orientation indices
     orientationConfirmed: false, // User confirmed a pose via the modal
+    orientationDeferred: false, // Big mesh: orientation analysis postponed until simplify/continue
     orientationExplicit: false, // User actively clicked a pose (vs default)
     activeOrientationIndex: 0, // Index of the orientation shown in the large viewer
     orientationPrepMs: 0,
@@ -136,6 +137,29 @@ function downloadCurrentSTL(fileNameOverride = null, geometryOverride = null) {
     downloadArrayBuffer(data, fileName, 'model/stl');
 }
 
+/**
+ * Show the current STL mesh in the main 3D viewer so uploads and
+ * simplifications have a visible result before any packing is run. The
+ * preview lives in the scene's pieces array, so it is automatically
+ * cleared when a packing result replaces it.
+ */
+function previewSTLInScene(geometry) {
+    const sm = state.sceneManager;
+    if (!sm || !geometry) return;
+    sm.clearPieces();
+    sm.clearBox();
+    const mesh = sm.addSTLPiece(geometry, new THREE.Vector3(0, 0, 0), null);
+    const box = new THREE.Box3().setFromObject(mesh);
+    const size = new THREE.Vector3();
+    box.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z, 1);
+    mesh.position.y = -box.min.y;
+    const distance = maxDim * 2.5;
+    sm.camera.position.set(distance, distance * 0.7, distance);
+    sm.controls.target.set(0, size.y * 0.4, 0);
+    sm.controls.update();
+}
+
 function bindSTLStatusActions(geometryForSimplify = null) {
     document.getElementById('download-stl-btn')?.addEventListener('click', () => {
         try {
@@ -147,6 +171,28 @@ function bindSTLStatusActions(geometryForSimplify = null) {
         }
     });
 
+    document.getElementById('use-original-btn')?.addEventListener('click', async () => {
+        // User opted to skip simplification: run the deferred stable-
+        // orientation analysis on the original mesh now.
+        if (!state.stlGeometry) return;
+        state.orientationDeferred = false;
+        elements.stlStatus.className = 'stl-status';
+        elements.stlStatus.textContent = 'Preparant orientació estable...';
+        elements.stlStatus.style.display = 'block';
+        await updateStableOrientationCache();
+        updateMeshIntegrityCache(state.stlGeometry);
+        elements.objLength.value = state.stlDimensions.length.toFixed(2);
+        elements.objWidth.value = state.stlDimensions.width.toFixed(2);
+        elements.objHeight.value = state.stlDimensions.height.toFixed(2);
+        elements.stlStatus.className = 'stl-status success';
+        elements.stlStatus.innerHTML = `${mainText('statusDimensions', {
+            length: state.stlDimensions.length.toFixed(2),
+            width: state.stlDimensions.width.toFixed(2),
+            height: state.stlDimensions.height.toFixed(2)
+        })} <button id="simplify-mesh-btn" class="btn-small">${commonText('buttons.simplify')}</button> <button id="download-stl-btn" class="btn-small" style="margin-left:8px;">${mainText('downloadStl')}</button><br>${buildOrientationAndIntegrityLine()}`;
+        bindSTLStatusActions();
+    });
+
     document.getElementById('simplify-mesh-btn')?.addEventListener('click', () => {
         const sourceGeometry = geometryForSimplify || state.stlGeometry;
         if (!sourceGeometry) return;
@@ -156,18 +202,23 @@ function bindSTLStatusActions(geometryForSimplify = null) {
             let geometry = simplifiedGeometry;
             centerToOrigin(geometry);
 
-            state.stlGeometry = geometry;
-            elements.stlStatus.className = 'stl-status';
-            elements.stlStatus.textContent = 'Preparant orientació estable...';
-            elements.stlStatus.style.display = 'block';
-            await updateStableOrientationCache();
-            updateMeshIntegrityCache(state.stlGeometry);
-
+            // Store the simplified STL FIRST — the orientation analysis
+            // must run on the simplified mesh (fast + consistent), not on
+            // the original 458k-vertex STL.
             if (simplifiedSTLData instanceof ArrayBuffer) {
                 state.stlFileData = simplifiedSTLData;
                 state.stlFileName = buildSimplifiedFileName(state.stlFileName, meta.percentKeep);
                 await saveSTLToHistory();
             }
+
+            state.stlGeometry = geometry;
+            state.orientationDeferred = false;
+            previewSTLInScene(geometry);
+            elements.stlStatus.className = 'stl-status';
+            elements.stlStatus.textContent = 'Preparant orientació estable...';
+            elements.stlStatus.style.display = 'block';
+            await updateStableOrientationCache();
+            updateMeshIntegrityCache(state.stlGeometry);
 
             elements.objLength.value = state.stlDimensions.length.toFixed(2);
             elements.objWidth.value = state.stlDimensions.width.toFixed(2);
@@ -382,134 +433,6 @@ function updateMeshIntegrityCache(geometry) {
  * @param {THREE.BufferGeometry} geometry - the STL geometry (will NOT be modified)
  * @returns {Promise<THREE.Quaternion>} The settled rotation quaternion
  */
-async function findStableOrientationByGravity(geometry, initialQuat = null) {
-    await initRapier();
-    const RAPIER = await import('@dimforge/rapier3d-compat');
-    if (RAPIER.init) await RAPIER.init();
-
-    const geo = geometry.clone();
-    geo.computeBoundingBox();
-    const size = new THREE.Vector3();
-    geo.boundingBox.getSize(size);
-    const maxDim = Math.max(size.x, size.y, size.z);
-
-    // Physics world with floor
-    const world = new RAPIER.World({ x: 0.0, y: -9810.0, z: 0.0 });
-    world.numSolverIterations = 16;
-
-    const floorBody = world.createRigidBody(
-        RAPIER.RigidBodyDesc.fixed().setTranslation(0, -50, 0)
-    );
-    world.createCollider(
-        RAPIER.ColliderDesc.cuboid(maxDim * 5, 50, maxDim * 5)
-            .setFriction(0.8).setRestitution(0.0),
-        floorBody
-    );
-
-    // Center geometry at origin for physics
-    const centered = geo.clone();
-    centered.computeBoundingBox();
-    const center = new THREE.Vector3();
-    centered.boundingBox.getCenter(center);
-    centered.translate(-center.x, -center.y, -center.z);
-
-    const positions = centered.getAttribute('position');
-    const vertices = new Float32Array(positions.array);
-
-    // Drop piece from above
-    const dropHeight = maxDim * 2;
-    const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
-        .setTranslation(0, dropHeight, 0)
-        .setLinearDamping(0.5)
-        .setAngularDamping(0.8);
-    const body = world.createRigidBody(bodyDesc);
-    if (initialQuat && typeof body.setRotation === 'function') {
-        body.setRotation({ x: initialQuat.x, y: initialQuat.y, z: initialQuat.z, w: initialQuat.w }, true);
-    }
-
-    let colliderDesc = null;
-    try { colliderDesc = RAPIER.ColliderDesc.convexHull(vertices); } catch (e) { /* fallback */ }
-    if (!colliderDesc) {
-        colliderDesc = RAPIER.ColliderDesc.cuboid(size.x / 2, size.y / 2, size.z / 2);
-    }
-    colliderDesc.setDensity(2.0).setFriction(0.8).setRestitution(0.05);
-    world.createCollider(colliderDesc, body);
-
-    // Run until settled or 5s timeout
-    const dt = 1 / 240;
-    const maxSteps = 240 * 5;
-    let settledFrames = 0;
-    for (let step = 0; step < maxSteps; step++) {
-        world.timestep = dt;
-        world.step();
-        const lv = body.linvel(), av = body.angvel();
-        const speed = Math.sqrt(lv.x ** 2 + lv.y ** 2 + lv.z ** 2);
-        const angSpeed = Math.sqrt(av.x ** 2 + av.y ** 2 + av.z ** 2);
-        if (speed < 3.0 && angSpeed < 0.3) {
-            if (++settledFrames >= 60) break;    // ~0.25s of stability
-        } else {
-            settledFrames = 0;
-        }
-    }
-
-    // A pose that never settles (rocks on an edge/point) is NOT stable —
-    // discard it instead of returning a mid-rock orientation.
-    if (settledFrames < 60) {
-        world.free();
-        return null;
-    }
-
-    const rot = body.rotation();
-    const settledQuat = new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w);
-    world.free();
-
-    console.log(`[Gravity] Settled quat=(${rot.x.toFixed(3)}, ${rot.y.toFixed(3)}, ${rot.z.toFixed(3)}, ${rot.w.toFixed(3)})`);
-    return settledQuat;
-}
-
-function getDeterministicOrientationSeeds() {
-    const eulers = [
-        [0, 0, 0],
-        [Math.PI / 2, 0, 0],
-        [-Math.PI / 2, 0, 0],
-        [0, Math.PI / 2, 0],
-        [0, -Math.PI / 2, 0],
-        [0, 0, Math.PI / 2],
-        [0, 0, -Math.PI / 2],
-        [Math.PI, 0, 0]
-    ];
-
-    return eulers.map(([x, y, z]) => new THREE.Quaternion().setFromEuler(new THREE.Euler(x, y, z, 'XYZ')));
-}
-
-function quatAngularDistanceDeg(a, b) {
-    const dot = Math.min(1, Math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w));
-    return (2 * Math.acos(dot) * 180) / Math.PI;
-}
-
-async function findStableOrientationCandidatesByGravity(geometry, sampleCount = 4) {
-    const uniqueQuats = [];
-    const seeds = [null, ...getDeterministicOrientationSeeds().slice(0, Math.max(0, sampleCount - 1))];
-
-    for (const seed of seeds) {
-        let quat = null;
-        try {
-            quat = await findStableOrientationByGravity(geometry, seed);
-        } catch (error) {
-            console.warn('[Gravity] Candidate drop failed:', error?.message || error);
-            continue;
-        }
-        if (!quat) continue;
-        const isDuplicate = uniqueQuats.some(q => quatAngularDistanceDeg(q, quat) < 10);
-        if (!isDuplicate) uniqueQuats.push(quat);
-    }
-
-    return uniqueQuats;
-}
-
-/**
- * Apply a quaternion to geometry, then recenter (min-Y = 0, XZ centered).
- */
 function applyQuatToGeometry(geometry, quat) {
     geometry.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(quat));
     recenterGeometry(geometry);
@@ -529,25 +452,55 @@ async function updateStableOrientationCache() {
     }
 
     const t0 = performance.now();
-    const pos = state.stlGeometry.getAttribute('position');
-    const vertexCount = pos ? pos.count : 0;
-    const sampleCount = vertexCount > 60000 ? 4 : (vertexCount > 20000 ? 6 : 8);
-    let quats = [];
+    // The stable-orientation analysis runs ON THE SERVER (geometric
+    // stability — no physics, no browser load; a complex 400k-vertex part
+    // used to freeze the page with the in-browser rapier drops). The server
+    // returns EVERY stable resting pose (cone: base-down + base-up on its
+    // rim; a brick: all its faces, etc.).
+    let poses = [];
     try {
-        quats = await findStableOrientationCandidatesByGravity(state.stlGeometry, sampleCount);
+        if (state.stlFileData) {
+            const fd = new FormData();
+            fd.append('stl', new Blob([state.stlFileData], { type: 'application/octet-stream' }),
+                      state.stlFileName || 'piece.stl');
+            const resp = await fetch('/api/orientations', {
+                method: 'POST',
+                body: fd,
+                signal: AbortSignal.timeout(45000),
+            });
+            if (resp.ok) {
+                const js = await resp.json();
+                poses = Array.isArray(js.orientations) ? js.orientations : [];
+            } else {
+                console.warn('[Orientation] server analysis failed:', resp.status);
+            }
+        }
     } catch (error) {
-        console.warn('[Orientation] Gravity precompute failed:', error?.message || error);
-        quats = [];
+        console.warn('[Orientation] server analysis error:', error?.message || error);
     }
+    const quats = poses
+        .filter(p => Array.isArray(p.quaternion) && p.quaternion.length === 4)
+        .map(p => new THREE.Quaternion(p.quaternion[0], p.quaternion[1], p.quaternion[2], p.quaternion[3]));
 
     if (!quats.length) {
         const fallbackGeometry = state.stlGeometry.clone();
+        let fbRes = null;
+        // For very large meshes skip the triangle-loop flat-face detector:
+        // it is slow on hundreds of thousands of triangles and its result
+        // on noisy scanned geometry is exactly the "diagonal, one point
+        // touching" pose — the raw recentered pose is the honest fallback.
+        const fc = state.stlGeometry.getAttribute('position')?.count || 0;
         try {
-            alignToStableBase(fallbackGeometry);
+            if (fc <= 100000) {
+                fbRes = alignToStableBase(fallbackGeometry);
+            }
             recenterGeometry(fallbackGeometry);
         } catch (_) {
             recenterGeometry(fallbackGeometry);
         }
+        // No flat face detected (alignToStableBase returned null — the
+        // geometry stayed unrotated): the raw pose is the only option.
+        console.info(`[Orientation] no gravity-stable poses; using ${fbRes ? 'flat-base' : 'raw'} geometry as the only candidate`);
 
         state.stlStableOrientations = [{ quat: null, geometry: fallbackGeometry, stability: getSupportStability(fallbackGeometry) }];
         state.stlSettledQuat = null;
@@ -563,24 +516,50 @@ async function updateStableOrientationCache() {
     for (const quat of quats) {
         const alignedGeometry = state.stlGeometry.clone();
         applyQuatToGeometry(alignedGeometry, quat);
-        const stability = getSupportStability(alignedGeometry);
+        // The server already validated every pose geometrically — the
+        // client-side support label is only for display (its thresholds
+        // differ from the server's and would wrongly hide e.g. a cone
+        // resting on its open rim).
+        const stability = { ...getSupportStability(alignedGeometry), stable: true };
+        const dims = extractDimensions(alignedGeometry);
+        console.info(`[Orientation] candidate: ${dims.length.toFixed(1)}×${dims.width.toFixed(1)}×${dims.height.toFixed(1)}mm | ` +
+            `support=${stability.supportArea.toFixed(0)}mm² | STABLE (server) | basePoints=${stability.basePointCount}`);
         stableBases.push({ quat, geometry: alignedGeometry, stability });
     }
 
     try {
         const fallbackGeometry = state.stlGeometry.clone();
-        alignToStableBase(fallbackGeometry);
-        recenterGeometry(fallbackGeometry);
-        const fallbackStability = getSupportStability(fallbackGeometry);
-        const fallbackDims = extractDimensions(fallbackGeometry);
-        const alreadyPresent = stableBases.some(base => {
-            const dims = extractDimensions(base.geometry);
-            return Math.abs(dims.length - fallbackDims.length) < 0.5 &&
-                Math.abs(dims.width - fallbackDims.width) < 0.5 &&
-                Math.abs(dims.height - fallbackDims.height) < 0.5;
-        });
-        if (!alreadyPresent) {
-            stableBases.push({ quat: null, geometry: fallbackGeometry, stability: fallbackStability });
+        const fbRes = alignToStableBase(fallbackGeometry);
+        // Only a REAL detected flat face may be used as the canonical
+        // "flat-base" pose. If the detector finds nothing (e.g. the raw
+        // mesh's base faces sideways), alignToStableBase returns null and
+        // the geometry stays UNROTATED — pushing it would claim the raw
+        // pose is the flat reference, which is exactly the lying-cone bug.
+        if (fbRes) {
+            recenterGeometry(fallbackGeometry);
+            const fallbackStability = getSupportStability(fallbackGeometry);
+            const fallbackDims = extractDimensions(fallbackGeometry);
+            const alreadyPresent = stableBases.some(base => {
+                const dims = extractDimensions(base.geometry);
+                return Math.abs(dims.length - fallbackDims.length) < 0.5 &&
+                    Math.abs(dims.width - fallbackDims.width) < 0.5 &&
+                    Math.abs(dims.height - fallbackDims.height) < 0.5;
+            });
+            if (!alreadyPresent) {
+                // Same resting face found by gravity but resting a few
+                // degrees off on a tessellation facet? Prefer the level
+                // flat-face pose (it packs better); it is the canonical
+                // version of that face. The sim poses are already leveled,
+                // so this only matters when the detector's face is cleaner.
+                const near = stableBases.findIndex(base =>
+                    base.quat && restingFaceDistanceDeg(base.quat, new THREE.Quaternion()) < 20);
+                if (near >= 0) {
+                    console.info('[Orientation] replacing facet-tilted sim pose with the level flat-base pose');
+                    stableBases[near] = { quat: null, geometry: fallbackGeometry, stability: fallbackStability };
+                } else {
+                    stableBases.push({ quat: null, geometry: fallbackGeometry, stability: fallbackStability });
+                }
+            }
         }
     } catch (error) {
         console.warn('[Orientation] Stable-base fallback candidate failed:', error?.message || error);
@@ -590,6 +569,11 @@ async function updateStableOrientationCache() {
         const aStable = a.stability?.stable ? 1 : 0;
         const bStable = b.stability?.stable ? 1 : 0;
         if (bStable !== aStable) return bStable - aStable;
+        // Prefer the most LEVEL resting pose (up-axis closest to vertical):
+        // it packs best and matches the user's flat-face reference.
+        const aUp = a.quat ? new THREE.Vector3(0, 1, 0).applyQuaternion(a.quat).y : 1;
+        const bUp = b.quat ? new THREE.Vector3(0, 1, 0).applyQuaternion(b.quat).y : 1;
+        if (Math.abs(bUp - aUp) > 1e-6) return bUp - aUp;
         const aArea = a.stability?.supportArea || 0;
         const bArea = b.stability?.supportArea || 0;
         if (Math.abs(bArea - aArea) > 1e-6) return bArea - aArea;
@@ -599,14 +583,19 @@ async function updateStableOrientationCache() {
     });
 
     const primary = stableBases[0];
+    const primaryDims = primary ? extractDimensions(primary.geometry) : null;
     state.stlStableOrientations = stableBases;
     state.stlSettledQuat = primary?.quat || null;
     state.stlAlignedGeometry = primary?.geometry || null;
-    state.stlDimensions = primary ? extractDimensions(primary.geometry) : extractDimensions(state.stlGeometry);
+    state.stlDimensions = primary ? primaryDims : extractDimensions(state.stlGeometry);
     state.orientationPrepMs = performance.now() - t0;
 
     state.selectedOrientations = new Set([0]);
     state.activeOrientationIndex = 0;
+    console.info(`[Orientation] ${stableBases.length} candidate(s) ready: ` +
+        stableBases.map(b => b.stability?.stable ? 'stable' : 'unstable').join(', ') +
+        ` | prep ${state.orientationPrepMs.toFixed(0)}ms | primary: ` +
+        (primary ? `${primaryDims.length.toFixed(1)}×${primaryDims.width.toFixed(1)}×${primaryDims.height.toFixed(1)}mm` : 'none'));
     maybeShowOrientationModal();
     return primary?.geometry || null;
 }
@@ -630,7 +619,59 @@ function maybeShowOrientationModal() {
     }
 }
 
-const MAX_ORIENTATION_CARDS = 4;
+const MAX_ORIENTATION_CARDS = 8;
+
+/**
+ * Best axis-aligned bbox fit: the most pieces that fit in the box with
+ * this orientation, over all 6 axis permutations (the same math the grid
+ * mode uses). 0 = this orientation does not fit at all.
+ */
+function bestBboxFit(dims, boxL, boxW, boxH) {
+    const perms = [
+        [dims.length, dims.width, dims.height],
+        [dims.length, dims.height, dims.width],
+        [dims.width, dims.length, dims.height],
+        [dims.width, dims.height, dims.length],
+        [dims.height, dims.length, dims.width],
+        [dims.height, dims.width, dims.length],
+    ];
+    let best = 0;
+    for (const [l, w, h] of perms) {
+        if (l > boxL + 0.5 || w > boxW + 0.5 || h > boxH + 0.5) continue;
+        const n = Math.floor(boxL / l) * Math.floor(boxW / w) * Math.floor(boxH / h);
+        if (n > best) best = n;
+    }
+    return best;
+}
+
+/**
+ * Recompute the per-card "fits in the box" badge live when the user edits
+ * the box dimensions while the orientation modal is open.
+ */
+function updateOrientationFitBadges() {
+    if (!state.stlStableOrientations?.length) return;
+    const modal = document.getElementById('orientation-modal');
+    if (!modal || modal.style.display !== 'flex') return;
+    const boxL = parseFloat(elements.boxLength?.value) || 385;
+    const boxW = parseFloat(elements.boxWidth?.value) || 285;
+    const boxH = parseFloat(elements.boxHeight?.value) || 150;
+    let bestFit = 0;
+    const fits = {};
+    state.stlStableOrientations.forEach((o, i) => {
+        const dims = extractDimensions(o.geometry);
+        fits[i] = bestBboxFit(dims, boxL, boxW, boxH);
+        if (fits[i] > bestFit) bestFit = fits[i];
+    });
+    document.querySelectorAll('#orientation-options .orient-card').forEach(card => {
+        const i = parseInt(card.dataset.index, 10);
+        const fitEl = card.querySelector('.orient-fit');
+        if (fitEl) fitEl.textContent = `${fits[i] ?? 0} ${mainText('fitInBox', {}, 'a la caixa')}`;
+        const rec = (fits[i] ?? 0) === bestFit && bestFit > 0;
+        card.classList.toggle('recommended', rec);
+        const recTag = card.querySelector('.orient-rec');
+        if (recTag) recTag.style.display = rec ? 'inline-block' : 'none';
+    });
+}
 
 const orientationViewerState = {
     initialized: false,
@@ -843,7 +884,7 @@ function renderOrientationSelector() {
     if (!modal || !optionsDiv) return;
 
     const orientations = state.stlStableOrientations || [];
-    if (orientations.length <= 1) {
+    if (orientations.length < 1) {
         modal.style.display = 'none';
         state.selectedOrientations = new Set([0]);
         return;
@@ -853,24 +894,48 @@ function renderOrientationSelector() {
     if (typeof state.activeOrientationIndex !== 'number') state.activeOrientationIndex = 0;
 
     const shown = orientations.slice(0, MAX_ORIENTATION_CARDS);
-    if (state.activeOrientationIndex >= shown.length) state.activeOrientationIndex = 0;
+    // Only STABLE resting poses are offered — unstable ones (e.g. the part
+    // standing on a rim/edge) would collapse in real packing, so they are
+    // hidden rather than shown with an "Inestable" badge. Keep the real
+    // array index so the pose export and previews stay aligned.
+    let visible = shown.map((o, i) => ({ o, i })).filter(({ o }) => o.stability?.stable !== false);
+    if (visible.length === 0) {
+        visible = shown.map((o, i) => ({ o, i }));
+    }
+    const visibleIdx = new Set(visible.map(v => v.i));
+    if (![...state.selectedOrientations].some(i => visibleIdx.has(i))) {
+        state.selectedOrientations = new Set([visible[0].i]);
+    }
+    if (!visibleIdx.has(state.activeOrientationIndex)) {
+        state.activeOrientationIndex = visible[0].i;
+    }
 
-    optionsDiv.innerHTML = shown.map((o, i) => {
+    const boxL = parseFloat(elements.boxLength?.value) || 385;
+    const boxW = parseFloat(elements.boxWidth?.value) || 285;
+    const boxH = parseFloat(elements.boxHeight?.value) || 150;
+    const bestFit = Math.max(0, ...visible.map(({ o }) =>
+        bestBboxFit(extractDimensions(o.geometry), boxL, boxW, boxH)));
+
+    optionsDiv.innerHTML = visible.map(({ o, i }) => {
         const dims = extractDimensions(o.geometry);
         const isSelected = state.selectedOrientations.has(i);
         const isActive = state.activeOrientationIndex === i;
         const canvasId = `orient-canvas-${i}`;
-        const stabilityText = o.stability?.stable
-            ? `${mainText('orientationStable', {}, 'Estable')} · ${(o.stability.supportArea || 0).toFixed(0)} mm²`
-            : mainText('orientationUnstable', {}, 'Inestable');
-        return `<div class="orient-card ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''}" data-index="${i}"
+        const stabilityText = `${mainText('orientationStable', {}, 'Estable')} · ${(o.stability.supportArea || 0).toFixed(0)} mm²`;
+        // Recommend the orientation that packs most pieces into the current
+        // box (grid/bbox math, same rule the Graella mode uses).
+        const fit = bestBboxFit(dims, boxL, boxW, boxH);
+        const isRecommended = fit > 0 && fit === bestFit;
+        return `<div class="orient-card ${isSelected ? 'selected' : ''} ${isActive ? 'active' : ''} ${isRecommended ? 'recommended' : ''}" data-index="${i}"
                 tabindex="0" role="button" aria-pressed="${isSelected}"
                 onclick="selectOrientation(${i})">
             <canvas id="${canvasId}" class="orient-preview" width="140" height="140"></canvas>
             <div class="orient-info">
                 <span class="orient-dims">${dims.length.toFixed(0)}×${dims.width.toFixed(0)}×${dims.height.toFixed(0)}mm</span>
                 <span class="orient-stability">${stabilityText}</span>
+                <span class="orient-fit">${fit} ${mainText('fitInBox', {}, 'a la caixa')}</span>
             </div>
+            ${isRecommended ? '<span class="orient-rec">' + mainText('recommendedOrient', {}, 'Recomanada') + '</span>' : ''}
             <span class="orient-check" aria-hidden="true"></span>
         </div>`;
     }).join('');
@@ -882,7 +947,7 @@ function renderOrientationSelector() {
 
     // Render thumbnail previews and the large viewer after DOM update
     requestAnimationFrame(() => {
-        shown.forEach((o, i) => {
+        visible.forEach(({ o, i }) => {
             renderOrientationPreview(`orient-canvas-${i}`, o.geometry);
         });
         setActiveOrientationMesh(shown[state.activeOrientationIndex]?.geometry);
@@ -1114,6 +1179,7 @@ const elements = {
     placementSettleCheck: document.getElementById('placement-settle-check'),
     placementLayerSeparator: document.getElementById('placement-layer-separator'),
     stackingQuality: document.getElementById('stacking-quality'),
+    maxPackPieces: document.getElementById('max-pack-pieces'),
     stlUpload: document.getElementById('stl-upload'),
     stlStatus: document.getElementById('stl-status'),
     optPieceColors: document.getElementById('opt-piece-colors'),
@@ -1175,6 +1241,8 @@ const elements = {
     modalClose: document.getElementById('modal-close'),
     modalCancel: document.getElementById('modal-cancel'),
     modalDownload: document.getElementById('modal-download'),
+    modalDownloadDocx: document.getElementById('modal-download-docx'),
+    modalDownloadXlsx: document.getElementById('modal-download-xlsx'),
     reportPreviewFrame: document.getElementById('report-preview-frame'),
     colorCount: document.getElementById('color-count'),
     colorCountValue: document.getElementById('color-count-value'),
@@ -1381,19 +1449,34 @@ function setupEventListeners() {
     elements.modalClose?.addEventListener('click', closeReportModal);
     elements.modalCancel?.addEventListener('click', closeReportModal);
     elements.modalDownload?.addEventListener('click', downloadReportFromModal);
+    elements.modalDownloadDocx?.addEventListener('click', () => exportReport('docx'));
+    elements.modalDownloadXlsx?.addEventListener('click', () => exportReport('xlsx'));
     
     elements.colorCount?.addEventListener('input', (e) => {
         elements.colorCountValue.textContent = e.target.value;
-        if (elements.optPieceColors) elements.optPieceColors.value = e.target.value;
+        // Keep the ACTIVE mode's color input in sync with the popup slider.
+        if (state.mode !== 'bulk') {
+            if (elements.optPieceColors) elements.optPieceColors.value = e.target.value;
+        } else if (elements.pieceColors) {
+            elements.pieceColors.value = e.target.value;
+        }
         if (elements.reportModal && elements.reportModal.style.display === 'flex') {
             recolorScene(parseInt(e.target.value, 10) || 1);
             updateReportPreview();
         }
     });
 
+    // Live "fits in this box" badge on the orientation cards while the
+    // user edits the box dimensions.
+    ['box-length', 'box-width', 'box-height'].forEach(id => {
+        document.getElementById(id)?.addEventListener('input', updateOrientationFitBadges);
+    });
+
     document.querySelectorAll('input[name="report-lang"]').forEach(radio => {
         radio.addEventListener('change', updateReportPreview);
     });
+
+    document.getElementById('rp-show-interlock')?.addEventListener('change', updateReportPreview);
 
     elements.reportModal?.addEventListener('click', (e) => {
         if (e.target === elements.reportModal) {
@@ -1613,13 +1696,16 @@ async function handleSTLUpload(event) {
     elements.stlStatus.style.display = 'block';
     
     // Store the raw file data for saving to history
+    console.info(`[Upload] file "${file.name}" (${(file.size / 1024).toFixed(1)} KB) — reading...`);
     const fileData = await file.arrayBuffer();
+    console.info(`[Upload] read ${(fileData.byteLength / 1024).toFixed(1)} KB — parsing mesh...`);
     state.stlFileName = file.name;
     state.stlFileData = fileData;
     state.stlFileId = null;
 
     try {
         let geometry = await loadMesh(file);
+        console.info(`[Upload] mesh parsed — ${(geometry.getAttribute('position').count / 3).toFixed(0)} triangles — centering...`);
         centerToOrigin(geometry);
         
         // Comprovar si la malla té molts vèrtexs i oferir simplificació
@@ -1627,46 +1713,57 @@ async function handleSTLUpload(event) {
         const vertexCount = positions.count;
         const VERTEX_THRESHOLD = 50000; // Llindar per oferir simplificació
         
-        if (vertexCount > VERTEX_THRESHOLD) {
-            const triangleCount = Math.floor(vertexCount / 3);
-            // Mostrar opció de simplificació
-            elements.stlStatus.className = 'stl-status warning';
-            elements.stlStatus.innerHTML = `Malla complexa (${triangleCount.toLocaleString()} triangles / ${vertexCount.toLocaleString()} vèrtexs). El rendiment pot ser lent. <button id="simplify-mesh-btn" class="btn-small">Simplificar</button>`;
-        }
-        
         state.stlGeometry = geometry;
         state.orientationConfirmed = false;
         state.orientationExplicit = false;
-        elements.stlStatus.className = 'stl-status';
-        elements.stlStatus.textContent = 'Preparant orientació estable...';
         elements.stlStatus.style.display = 'block';
-        await updateStableOrientationCache();
-        updateMeshIntegrityCache(state.stlGeometry);
-        
-        // Update dimension inputs
-        elements.objLength.value = state.stlDimensions.length.toFixed(2);
-        elements.objWidth.value = state.stlDimensions.width.toFixed(2);
-        elements.objHeight.value = state.stlDimensions.height.toFixed(2);
+
+        // Show the mesh in the main 3D viewer so the upload (and later the
+        // simplification) has an immediate visible result; it is cleared
+        // when a packing result replaces the preview.
+        previewSTLInScene(geometry);
 
         // Recalculate weight from material if a material is selected
         updateWeightFromMaterial();
-        
-        if (vertexCount <= VERTEX_THRESHOLD) {
+
+        if (vertexCount > VERTEX_THRESHOLD) {
+            // Complex mesh: DEFER the stable-orientation analysis. Running it
+            // now would analyze 150k+ triangles that the user is about to
+            // simplify away — wasted server work. It runs after Apply in the
+            // simplification modal, or when the user continues with the
+            // original mesh.
+            const triangleCount = Math.floor(vertexCount / 3);
+            state.orientationDeferred = true;
+            state.stlStableOrientations = null;
+            state.orientationPrepMs = 0;
+            state.stlDimensions = extractDimensions(geometry);
+            elements.objLength.value = state.stlDimensions.length.toFixed(2);
+            elements.objWidth.value = state.stlDimensions.width.toFixed(2);
+            elements.objHeight.value = state.stlDimensions.height.toFixed(2);
+            elements.stlStatus.className = 'stl-status warning';
+            elements.stlStatus.innerHTML = `${mainText('complexMeshWarning', {
+                triangles: triangleCount.toLocaleString(),
+                vertices: vertexCount.toLocaleString()
+            })} <button id="simplify-mesh-btn" class="btn-small">${commonText('buttons.simplify')}</button> <button id="use-original-btn" class="btn-small" style="margin-left:8px;">${mainText('useOriginalMesh', {}, 'Usar la malla original')}</button>`;
+            bindSTLStatusActions(geometry);
+        } else {
+            state.orientationDeferred = false;
+            elements.stlStatus.className = 'stl-status';
+            elements.stlStatus.textContent = 'Preparant orientació estable...';
+            await updateStableOrientationCache();
+            updateMeshIntegrityCache(state.stlGeometry);
+
+            // Update dimension inputs
+            elements.objLength.value = state.stlDimensions.length.toFixed(2);
+            elements.objWidth.value = state.stlDimensions.width.toFixed(2);
+            elements.objHeight.value = state.stlDimensions.height.toFixed(2);
+
             elements.stlStatus.className = 'stl-status success';
             elements.stlStatus.innerHTML = `${mainText('statusDimensions', {
                 length: state.stlDimensions.length.toFixed(2),
                 width: state.stlDimensions.width.toFixed(2),
                 height: state.stlDimensions.height.toFixed(2)
-            })} <button id="download-stl-btn" class="btn-small" style="margin-left:8px;">${mainText('downloadStl')}</button><br>${buildOrientationAndIntegrityLine()}`;
-            bindSTLStatusActions();
-        } else {
-            const triangleCount = Math.floor(vertexCount / 3);
-            const baseCount = state.stlStableOrientations?.length || 1;
-            elements.stlStatus.className = 'stl-status warning';
-            elements.stlStatus.innerHTML = `${mainText('complexMeshWarning', {
-                triangles: triangleCount.toLocaleString(),
-                vertices: vertexCount.toLocaleString()
-            })} <button id="simplify-mesh-btn" class="btn-small">${commonText('buttons.simplify')}</button> <button id="download-stl-btn" class="btn-small" style="margin-left:8px;">${mainText('downloadStl')}</button> <span style="margin-left:8px; opacity:.85;">${mainText('orientationLabel')}: ${state.orientationPrepMs.toFixed(0)} ms (${baseCount} ${mainText('basesLabel')})</span>`;
+            })} <button id="simplify-mesh-btn" class="btn-small">${commonText('buttons.simplify')}</button> <button id="download-stl-btn" class="btn-small" style="margin-left:8px;">${mainText('downloadStl')}</button><br>${buildOrientationAndIntegrityLine()}`;
             bindSTLStatusActions(geometry);
         }
         
@@ -2002,6 +2099,33 @@ function updateWeightFromMaterial() {
 }
 
 /**
+ * Ask the user whether to keep a very long calculation running (a legit
+ * "leave it for the night" use case). Returns true to continue, false to
+ * cancel the job server-side.
+ */
+function confirmLongCalculation(remainMinutes) {
+    return new Promise((resolve) => {
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        overlay.style.cssText = 'display:flex;position:fixed;inset:0;z-index:9999;' +
+            'background:rgba(0,0,0,0.55);align-items:center;justify-content:center;';
+        overlay.innerHTML = `
+            <div class="modal-content" style="max-width:440px;padding:26px;text-align:center;">
+                <h3 style="margin-top:0;">${mainText('longCalcTitle', {}, 'Càlcul llarg detectat')}</h3>
+                <p style="margin:12px 0;line-height:1.5;">${mainText('longCalcBody', { time: String(remainMinutes) },
+                    `Aquest càlcul trigarà aproximadament ${remainMinutes} minuts. Vols continuar?`)}</p>
+                <div style="display:flex;gap:10px;justify-content:center;margin-top:18px;">
+                    <button class="btn-primary" id="long-calc-continue">${mainText('continueBtn', {}, 'Continuar')}</button>
+                    <button class="btn-small" id="long-calc-cancel" style="align-self:center;">${mainText('cancelBtn', {}, 'Cancel·lar')}</button>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        overlay.querySelector('#long-calc-continue').addEventListener('click', () => { overlay.remove(); resolve(true); });
+        overlay.querySelector('#long-calc-cancel').addEventListener('click', () => { overlay.remove(); resolve(false); });
+    });
+}
+
+/**
  * Get current input values
  * @returns {Object}
  */
@@ -2029,6 +2153,7 @@ function getInputValues() {
         placementSettleCheck: elements.placementSettleCheck?.checked ?? true,
         placementLayerSeparator: Math.max(0, parseFloat(elements.placementLayerSeparator?.value) || 0),
         stackingQuality: parseInt(elements.stackingQuality?.value) || 2,
+        maxPackPieces: Math.min(20000, Math.max(100, parseInt(elements.maxPackPieces?.value) || 5000)),
         materialDensity: (() => {
             const val = elements.materialDensity?.value;
             if (!val || val === '0') return 0;
@@ -2112,6 +2237,7 @@ const MAX_GPU_HISTORY = 10;
 async function handleGPUCalculate(calcStartTime, options = null) {
     const calcGen = ++calcGeneration;
     const isCurrent = () => calcGeneration === calcGen;
+    console.info(`[PackAssist] handleGPUCalculate method=${options?.method || 'auto'} trayMethod=${options?.trayMethod || '-'} total=${options?.totalPieces || '-'}`);
 
     if (!state.stlGeometry) {
         elements.results.innerHTML = `<p class="error-text">${mainText('modeGPURequiresSTL')}</p>`;
@@ -2178,6 +2304,7 @@ async function handleGPUCalculate(calcStartTime, options = null) {
         formData.append('cell', cellSize);
         formData.append('method', gpuMethod);
         if (options?.totalPieces) formData.append('total_pieces', String(options.totalPieces));
+        formData.append('max_pieces', String(values.maxPackPieces));
         if (options?.trayMethod) {
             formData.append('tray_method', options.trayMethod);
             // grid → pieces touch (gap 0); compartment → cardboard thickness
@@ -2194,6 +2321,7 @@ async function handleGPUCalculate(calcStartTime, options = null) {
             body: formData,
             signal: AbortSignal.timeout(10000)
         });
+        console.info(`[PackAssist] /api/pack → ${resp.status} method=${gpuMethod}`);
         if (!resp.ok) throw new Error(`Servidor: ${resp.status}`);
         const submitData = await resp.json();
         const job_id = submitData.job_id;
@@ -2201,6 +2329,7 @@ async function handleGPUCalculate(calcStartTime, options = null) {
         // Poll with live progress
         let job, pollCount = 0;
         const staticEta = submitData.estimated_time;
+        state._longCalcAsked = false;
         const gpuColorCount = parseInt(elements.optPieceColors?.value) || 10;
         // Live-preview bookkeeping: the server's placements_partial grows in
         // pack order, so we only ever append the NEW entries to the scene.
@@ -2257,6 +2386,21 @@ async function handleGPUCalculate(calcStartTime, options = null) {
                     etaText = remainS > 60
                         ? ` (≈${Math.round(remainS / 60)} min restants)`
                         : ` (≈${Math.round(remainS)}s restants)`;
+                    // Long calculation? Ask the user whether to keep going
+                    // (night-long runs are legit). Only ask once per run,
+                    // and never on re-optimize/reseed flows.
+                    if (remainS > 300 && !state._longCalcAsked && !options?.longCalcSilent) {
+                        state._longCalcAsked = true;
+                        const proceed = await confirmLongCalculation(Math.round(remainS / 60));
+                        if (!proceed) {
+                            fetch(`/api/pack/${job_id}/cancel`, { method: 'POST' }).catch(() => {});
+                            elements.results.innerHTML = `<p class="placeholder-text">${mainText('calcCancelled', {}, 'Càlcul cancel·lat')}</p>`;
+                            state.sceneManager?.clearPieces();
+                            if (elements.reportButtons) elements.reportButtons.style.display = 'none';
+                            setCalcProgress(false, 0, '', 0);
+                            return;
+                        }
+                    }
                 } else if (staticEta && job.pieces === 0) {
                     etaText = ` (≈${staticEta.label})`;
                 }
@@ -2490,6 +2634,7 @@ async function handleGPUCalculate(calcStartTime, options = null) {
             pieceWeight: values.objWeight,
             maxWeight: values.maxWeight,
             mode: state.mode,
+            variant: state.mode === 'fast' ? state.planarVariant : null,
             stlFileName: state.stlFileName || null,
             meshVolume: meshVolume || 0,
             materialDensity: matDensity,
@@ -2502,6 +2647,14 @@ async function handleGPUCalculate(calcStartTime, options = null) {
         };
         state.displayCount = job.pieces;
         if (elements.reportButtons) elements.reportButtons.style.display = 'block';
+
+        // Save to calculation history (covers Planar stacking/multitray/
+        // compartment AND Optimitzat — the client-side grid saves elsewhere).
+        try {
+            await saveCalculationToHistory(state.lastResults);
+        } catch (e) {
+            console.warn('History save failed:', e);
+        }
 
         // Clear comparison when switching modes
         document.querySelectorAll('.mode-btn').forEach(btn => {
@@ -2890,7 +3043,7 @@ async function handleCalculate() {
                             stlGeometry: orientedGeometry,
                             pieceL, pieceW, pieceH,
                             nx: nx, ny: nz, nz: ny,
-                            maxDraw: 5000,
+                            maxDraw: values.maxPackPieces,
                             packingGap: card,
                             colorCount: values.colorCount,
                             boxL: values.boxL,
@@ -2938,7 +3091,7 @@ async function handleCalculate() {
                                 const sy = bb.max.y - bb.min.y;
                                 const sz = bb.max.z - bb.min.z;
                                 if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
-                                orientationPool.push({ geometry: g, yaw, name: `${yaw} deg` });
+                                orientationPool.push({ geometry: g, yaw, name: `${yaw} deg`, dims: [sx, sy, sz] });
                             }
                         }
 
@@ -2959,14 +3112,17 @@ async function handleCalculate() {
                                 const sy = bb.max.y - bb.min.y;
                                 const sz = bb.max.z - bb.min.z;
                                 if (sx > values.boxL + 0.1 || sz > values.boxW + 0.1 || sy > values.boxH + 0.1) continue;
+                                // Compare against the dims captured at pool-insert
+                                // time — re-running computeBoundingBox (a full
+                                // vertex pass) per pool entry was quadratic in
+                                // the mesh size × pool size.
                                 const isDup = orientationPool.some(p => {
-                                    p.geometry.computeBoundingBox();
-                                    const pb = p.geometry.boundingBox;
-                                    return Math.abs((pb.max.x - pb.min.x) - sx) < 0.5 &&
-                                           Math.abs((pb.max.y - pb.min.y) - sy) < 0.5 &&
-                                           Math.abs((pb.max.z - pb.min.z) - sz) < 0.5;
+                                    const pd = p.dims;
+                                    return Math.abs(pd[0] - sx) < 0.5 &&
+                                           Math.abs(pd[1] - sy) < 0.5 &&
+                                           Math.abs(pd[2] - sz) < 0.5;
                                 });
-                                if (!isDup) orientationPool.push({ geometry: g, yaw, name: `base+${yaw} deg` });
+                                if (!isDup) orientationPool.push({ geometry: g, yaw, name: `base+${yaw} deg`, dims: [sx, sy, sz] });
                             }
                         }
 
@@ -2984,7 +3140,7 @@ async function handleCalculate() {
                             drawn = await state.sceneManager.addPackedSTLOptimalGrid({
                                 stlGeometry: primaryGeom,
                                 orientationPool: altPool.length > 0 ? altPool : null,
-                                maxDraw: 5000,
+                                maxDraw: values.maxPackPieces,
                                 packingGap: values.packingGap,
                                 colorCount: values.colorCount,
                                 boxL: values.boxL,
@@ -3149,7 +3305,7 @@ async function handleCalculate() {
                         stlGeometry: orientedGeometry,
                         pieceL, pieceW, pieceH,
                         nx, ny, nz,
-                        maxDraw: 5000,
+                        maxDraw: values.maxPackPieces,
                         packingGap: values.packingGap,
                         colorCount: values.colorCount,
                         boxL: values.boxL,
@@ -3162,7 +3318,7 @@ async function handleCalculate() {
                     drawn = state.sceneManager.addPackedPieces({
                         pieceL, pieceW, pieceH,
                         nx, ny, nz,
-                        maxDraw: 5000,
+                        maxDraw: values.maxPackPieces,
                         packingGap: values.packingGap,
                         colorCount: values.colorCount,
                         boxL: values.boxL,
@@ -3177,7 +3333,7 @@ async function handleCalculate() {
                 drawn = state.sceneManager.addPackedPieces({
                     pieceL, pieceW, pieceH,
                     nx, ny, nz,
-                    maxDraw: 5000,
+                    maxDraw: values.maxPackPieces,
                     packingGap: values.packingGap,
                     colorCount: values.colorCount,
                     boxL: values.boxL,
@@ -3249,6 +3405,7 @@ async function handleCalculate() {
                 pieceWeight: values.objWeight,
                 maxWeight: values.maxWeight,
                 mode: state.mode,
+                variant: state.mode === 'fast' ? state.planarVariant : null,
                 stlFileName: state.stlFileName || null,
                 meshVolume: meshVolume || 0,
                 materialDensity: matDensity,
@@ -3754,6 +3911,7 @@ async function updateSimulationStatus(status) {
             pieceWeight: values.objWeight,
             maxWeight: values.maxWeight,
             mode: 'bulk',
+            variant: null,
             stlFileName: state.stlFileName || null,
             meshVolume: bulkMeshVolume,
             materialDensity: matDensity,
@@ -4153,6 +4311,7 @@ function collectReportForm() {
             finalDate: val('rp-final-date'),
         },
         comments: val('rp-comments'),
+        showInterlockWarning: document.getElementById('rp-show-interlock')?.checked !== false,
     };
 }
 
@@ -4180,27 +4339,33 @@ function buildReportData() {
  * (e.g. bulk simulation) — the caller can still regenerate the preview.
  */
 function recolorScene(colorCount) {
-    const ctx = state._renderCtx;
-    if (!ctx || !state.sceneManager || !Array.isArray(ctx.placements) || ctx.placements.length === 0) {
-        return false;
-    }
-    state.sceneManager.clearPieces();
-    state.sceneManager.addPackedPlacements({
-        placements: ctx.placements,
-        baseGeometry: ctx.baseGeometry,
-        boxL: ctx.boxL,
-        boxW: ctx.boxW,
-        boxH: ctx.boxH,
-        colorCount,
-        fillPct: ctx.fillPct,
-        interlocked: ctx.interlocked,
-        instant: true,
-        onProgress: (p) => {
-            const el = document.getElementById('gpu-piece-count');
-            if (el) el.textContent = String(p.revealed);
+    if (!state.sceneManager) return false;
+    const colors = state.sceneManager.pieceColors || [];
+    const n = Math.max(1, parseInt(colorCount, 10) || 1);
+    let any = false;
+    let anyIdx = 0;
+    (state.sceneManager.pieces || []).forEach(piece => {
+        if (piece.isInstancedMesh && piece.instanceColor) {
+            // GPU/grid placements: rewrite the per-instance colors in place
+            // (no re-render — geometry, partitions and the box stay intact).
+            const tmp = new THREE.Color();
+            for (let i = 0; i < piece.count; i++) {
+                tmp.setHex(colors.length ? colors[i % n] : 0x3b82f6);
+                piece.setColorAt(i, tmp);
+            }
+            piece.instanceColor.needsUpdate = true;
+            any = true;
+        } else if (!piece.isInstancedMesh) {
+            // Bulk/physics results: individual piece meshes, recolored by
+            // creation order (their creation-time color used the same rule).
+            const mats = Array.isArray(piece.material) ? piece.material : [piece.material];
+            const col = colors.length ? colors[anyIdx % n] : 0x3b82f6;
+            mats.forEach(m => { if (m && m.color) m.color.setHex(col); });
+            any = true;
+            anyIdx++;
         }
     });
-    return true;
+    return any;
 }
 
 async function openReportModal() {
@@ -4208,10 +4373,22 @@ async function openReportModal() {
         alert(mainText('reportNoResults'));
         return;
     }
+
+    // The interlocking warning only applies to the Optimized (GPU) methods
+    // (sparrow/spectral run the analysis) — show the toggle only there, and
+    // keep it OFF by default.
+    const canInterlock = state.lastResults.mode === 'gpu';
+    const interlockSection = document.getElementById('rp-interlock-section');
+    if (interlockSection) interlockSection.style.display = canInterlock ? '' : 'none';
+    const interlockBox = document.getElementById('rp-show-interlock');
+    if (interlockBox && !canInterlock) interlockBox.checked = false;
     
-    // Keep the report color count consistent with the piece color slider
-    // (the report renders the current scene, so it must match the scene colors).
-    const mainColorCount = parseInt(elements.optPieceColors?.value) || 10;
+    // Keep the report color count consistent with the ACTIVE mode's piece
+    // color input (gravity mode has its own #piece-colors, the others use
+    // #opt-piece-colors) so the popup slider never shows a stale default.
+    const mainColorCount = state.mode !== 'bulk'
+        ? parseInt(elements.optPieceColors?.value) || 10
+        : parseInt(elements.pieceColors?.value) || 10;
     if (elements.colorCount && elements.colorCountValue) {
         elements.colorCount.value = String(mainColorCount);
         elements.colorCountValue.textContent = String(mainColorCount);
@@ -4283,6 +4460,61 @@ async function downloadReportFromModal() {
 }
 
 /**
+ * Export the report as DOCX or XLSX (editable, same content as the PDF).
+ * Word/Excel reflow the layout, but every table, value and warning of the
+ * PDF report is present — generated server-side from the same report data.
+ */
+async function exportReport(format) {
+    if (!state.lastResults) {
+        alert(mainText('reportNoResults'));
+        return;
+    }
+    const data = buildReportData();
+    // Capture the same 3D renders the PDF uses (isometric hero + the three
+    // small views) so the DOCX/XLSX carry the pictures too.
+    let views = null;
+    try {
+        if (state.reportGenerator) {
+            views = {
+                hero: state.reportGenerator.captureHero(1680, 640),
+                top: state.reportGenerator.captureView('top', 820, 500),
+                front: state.reportGenerator.captureView('front', 820, 500),
+                side: state.reportGenerator.captureView('side', 820, 500),
+            };
+        }
+    } catch (error) {
+        console.warn('[Report export] view capture failed:', error?.message || error);
+        views = null;
+    }
+    try {
+        const resp = await fetch('/api/report/export', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ format, data, views }),
+            signal: AbortSignal.timeout(60000),
+        });
+        if (!resp.ok) {
+            const js = await resp.json().catch(() => ({}));
+            throw new Error(js.error || `Export failed (${resp.status})`);
+        }
+        const blob = await resp.blob();
+        const ext = format === 'xlsx' ? 'xlsx' : 'docx';
+        const name = `${data.stlFileName?.replace(/\.stl$/i, '') || 'informe'}_${format}.${ext}`;
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = name;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (error) {
+        console.error('Report export error:', error);
+        alert(error.message || mainText('reportGenerateError'));
+    }
+}
+
+/**
  * Generate and download report
  * @param {string} language - 'ca' or 'en'
  */
@@ -4324,6 +4556,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const input = document.getElementById('mt-popup-total');
         const total = parseInt(input?.value, 10) || 1000;
         const trayMethod = document.querySelector('#mt-popup input[name="mt-method"]:checked')?.value || 'stacking';
+        console.info(`[Multitray] confirm total=${total} method=${trayMethod} callback=${!!cb}`);
         hideMtPopup();
         if (cb) cb(Math.max(1, total), trayMethod);
     });

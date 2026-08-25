@@ -72,29 +72,61 @@ function _gridSpacingCollides(od, dx, dz) {
 function _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort = 'balanced') {
     const baseFacs = [1.0, 0.98, 0.96, 0.94, 0.92, 0.90, 0.88, 0.85, 0.82, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55];
     // Dense: try tighter compaction; Fast: skip loosest factors
-    const factors = searchEffort === 'dense'
+    const factors = (searchEffort === 'dense'
         ? [...baseFacs, 0.50, 0.45, 0.40]
         : searchEffort === 'fast'
         ? baseFacs.filter(f => f >= 0.70)
-        : baseFacs;
+        : baseFacs).reverse();
+    // Iterate tightest spacing first: nx(fx), nz(fz) and therefore the count
+    // are all monotone NON-INCREASING in the factor index, which makes the
+    // pruning below exact — the winner is identical to an exhaustive scan
+    // (only same-count + same-leftoverArea ties can resolve to a different
+    // equally-optimal pair).
     let best = null;
 
+    // Precompute the per-axis spacing collision tests (they depend on only one
+    // factor each) so each pair reuses them instead of re-running the BVH.
+    // Also track the maximum nz reachable at any fz.
+    const collidesX = [];
+    const collidesZ = [];
+    let nzMax = 0;
+    for (const fz of factors) {
+        const stepZ = Math.max(packingGap * 0.5 + 1, (od.sizeZ + packingGap) * fz);
+        const collides = _gridSpacingCollides(od, 0, stepZ);
+        collidesZ.push(collides);
+        if (!collides) {
+            const nz = Math.max(1, Math.floor((boxW - od.sizeZ + 0.01) / stepZ) + 1);
+            if (nz > nzMax) nzMax = nz;
+        }
+    }
     for (const fx of factors) {
-        for (const fz of factors) {
-            // Allow step to go well below sizeX — BVH collision is the real arbiter.
-            // Concave/interlocking pieces can nest far tighter than their bounding box.
-            const stepX = Math.max(packingGap * 0.5 + 1, (od.sizeX + packingGap) * fx);
-            const stepZ = Math.max(packingGap * 0.5 + 1, (od.sizeZ + packingGap) * fz);
+        const stepX = Math.max(packingGap * 0.5 + 1, (od.sizeX + packingGap) * fx);
+        collidesX.push(_gridSpacingCollides(od, stepX, 0));
+    }
+
+    for (let xi = 0; xi < factors.length; xi++) {
+        if (collidesX[xi]) continue;
+        const stepX = Math.max(packingGap * 0.5 + 1, (od.sizeX + packingGap) * factors[xi]);
+        const nx = Math.max(1, Math.floor((boxL - od.sizeX + 0.01) / stepX) + 1);
+
+        // nz can never exceed nzMax, so if even that can't beat the best count
+        // this fx (and every looser one after it) is hopeless — stop entirely.
+        if (best && nx * nzMax < best.count) break;
+
+        for (let zi = 0; zi < factors.length; zi++) {
+            if (collidesZ[zi]) continue;
+            const stepZ = Math.max(packingGap * 0.5 + 1, (od.sizeZ + packingGap) * factors[zi]);
+            const nz = Math.max(1, Math.floor((boxW - od.sizeZ + 0.01) / stepZ) + 1);
+            const count = nx * nz;
+
+            // nz (and therefore count) is monotone non-increasing in zi, so
+            // once the count drops below the best, later factors can't win.
+            if (best && count < best.count) break;
 
             // Validate neighbor placements for a repeated grid.
-            if (_gridSpacingCollides(od, stepX, 0)) continue;
-            if (_gridSpacingCollides(od, 0, stepZ)) continue;
             if (_gridSpacingCollides(od, stepX, stepZ)) continue;
             if (_gridSpacingCollides(od, -stepX, stepZ)) continue;
 
-            const nx = Math.max(1, Math.floor((boxL - od.sizeX + 0.01) / stepX) + 1);
-            const nz = Math.max(1, Math.floor((boxW - od.sizeZ + 0.01) / stepZ) + 1);
-            const count = nx * nz;
             const usedL = od.sizeX + Math.max(0, nx - 1) * stepX;
             const usedW = od.sizeZ + Math.max(0, nz - 1) * stepZ;
             const leftoverL = Math.max(0, boxL - usedL);
@@ -102,7 +134,7 @@ function _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap, searchEff
             const leftoverArea = leftoverL * boxW + leftoverW * boxL - leftoverL * leftoverW;
 
             if (!best || count > best.count || (count === best.count && leftoverArea < best.leftoverArea)) {
-                best = { stepX, stepZ, nx, nz, count, leftoverArea, fx, fz };
+                best = { stepX, stepZ, nx, nz, count, leftoverArea, fx: factors[xi], fz: factors[zi] };
             }
         }
     }
@@ -125,33 +157,60 @@ function _findBestGridLayoutForOrientation(od, boxL, boxW, packingGap, searchEff
 
 function _findBestBrickLayoutForOrientation(od, boxL, boxW, packingGap, searchEffort = 'balanced') {
     const baseFacs = [1.0, 0.98, 0.96, 0.94, 0.92, 0.90, 0.88, 0.85, 0.82, 0.80, 0.75, 0.70, 0.65, 0.60, 0.55];
-    const factors = searchEffort === 'dense'
+    const factors = (searchEffort === 'dense'
         ? [...baseFacs, 0.50, 0.45, 0.40]
         : searchEffort === 'fast'
         ? baseFacs.filter(f => f >= 0.70)
-        : baseFacs;
+        : baseFacs).reverse();
+    // Iterate tightest spacing first — count is monotone non-increasing in the
+    // factor index, so the pruning below is exact (see the aligned search).
     let best = null;
 
+    // Same per-axis test caching + count-monotonicity pruning as the aligned
+    // search: identical result, far fewer BVH queries.
+    const collidesX = [];
+    const collidesZ = [];
+    let nzMax = 0;
+    for (const fz of factors) {
+        const stepZ = Math.max(packingGap * 0.5 + 1, (od.sizeZ + packingGap) * fz);
+        const collides = _gridSpacingCollides(od, 0, stepZ);
+        collidesZ.push(collides);
+        if (!collides) {
+            const nz = Math.max(1, Math.floor((boxW - od.sizeZ + 0.01) / stepZ) + 1);
+            if (nz > nzMax) nzMax = nz;
+        }
+    }
     for (const fx of factors) {
-        for (const fz of factors) {
-            const stepX = Math.max(packingGap * 0.5 + 1, (od.sizeX + packingGap) * fx);
-            const stepZ = Math.max(packingGap * 0.5 + 1, (od.sizeZ + packingGap) * fz);
+        const stepX = Math.max(packingGap * 0.5 + 1, (od.sizeX + packingGap) * fx);
+        collidesX.push(_gridSpacingCollides(od, stepX, 0));
+    }
 
-            if (_gridSpacingCollides(od, stepX, 0)) continue;
-            if (_gridSpacingCollides(od, 0, stepZ)) continue;
-            if (_gridSpacingCollides(od, stepX / 2, stepZ)) continue;
-            if (_gridSpacingCollides(od, -stepX / 2, stepZ)) continue;
+    for (let xi = 0; xi < factors.length; xi++) {
+        if (collidesX[xi]) continue;
+        const stepX = Math.max(packingGap * 0.5 + 1, (od.sizeX + packingGap) * factors[xi]);
+        const nxEven = Math.max(1, Math.floor((boxL - od.sizeX + 0.01) / stepX) + 1);
+        const offsetX = stepX / 2;
+        const nxOdd = (od.sizeX + offsetX <= boxL + 0.01)
+            ? Math.max(1, Math.floor((boxL - od.sizeX - offsetX + 0.01) / stepX) + 1)
+            : 0;
 
-            const nxEven = Math.max(1, Math.floor((boxL - od.sizeX + 0.01) / stepX) + 1);
-            const offsetX = stepX / 2;
-            const nxOdd = (od.sizeX + offsetX <= boxL + 0.01)
-                ? Math.max(1, Math.floor((boxL - od.sizeX - offsetX + 0.01) / stepX) + 1)
-                : 0;
+        // count ≤ nz·nxEven, so if even that bound can't beat the best, no
+        // looser fx (smaller nxEven/nxOdd) can either — stop entirely.
+        if (best && nzMax * nxEven < best.count) break;
 
+        for (let zi = 0; zi < factors.length; zi++) {
+            if (collidesZ[zi]) continue;
+            const stepZ = Math.max(packingGap * 0.5 + 1, (od.sizeZ + packingGap) * factors[zi]);
             const nz = Math.max(1, Math.floor((boxW - od.sizeZ + 0.01) / stepZ) + 1);
             const nEvenRows = Math.ceil(nz / 2);
             const nOddRows = Math.floor(nz / 2);
             const count = nEvenRows * nxEven + nOddRows * nxOdd;
+
+            // count is monotone non-increasing in zi — later factors can't win.
+            if (best && count < best.count) break;
+
+            if (_gridSpacingCollides(od, stepX / 2, stepZ)) continue;
+            if (_gridSpacingCollides(od, -stepX / 2, stepZ)) continue;
 
             const usedL = Math.max(
                 od.sizeX + Math.max(0, nxEven - 1) * stepX,
@@ -161,7 +220,7 @@ function _findBestBrickLayoutForOrientation(od, boxL, boxW, packingGap, searchEf
             const leftoverArea = Math.max(0, boxL - usedL) * boxW + Math.max(0, boxW - usedW) * boxL;
 
             if (!best || count > best.count || (count === best.count && leftoverArea < best.leftoverArea)) {
-                best = { stepX, stepZ, nxEven, nxOdd, nz, nEvenRows, nOddRows, count, leftoverArea, fx, fz, offsetX, isBrick: true };
+                best = { stepX, stepZ, nxEven, nxOdd, nz, nEvenRows, nOddRows, count, leftoverArea, fx: factors[xi], fz: factors[zi], offsetX, isBrick: true };
             }
         }
     }
@@ -2326,14 +2385,21 @@ export class SceneManager {
                 if (p.geometry) allSrc.push(p.geometry);
             }
         }
+        // Pool geometries are private per-candidate clones created by the
+        // caller (main.js) for this calculation, so they can be consumed
+        // directly. Only the bare stlGeometry parameter (which may be shared
+        // state) needs a defensive clone.
+        const fromPool = !!(orientationPool && orientationPool.length > 0);
 
         const candidates = [];
 
         for (let si = 0; si < allSrc.length; si++) {
             if (abortSignal?.aborted) throw new DOMException('Aborted', 'AbortError');
 
-            const geometry = allSrc[si].clone();
-            geometry.computeVertexNormals();
+            const geometry = fromPool ? allSrc[si] : allSrc[si].clone();
+            // Normals are only needed for rendering the winning geometry; the
+            // layout search only uses positions + the BVH. Recomputing them
+            // per candidate was pure waste on dense meshes.
             geometry.computeBoundingBox();
             const bbox = geometry.boundingBox;
             const center = new THREE.Vector3();
@@ -2388,6 +2454,10 @@ export class SceneManager {
             + `layers=${nLayers}, total=${best.total}, fx=${grid.fx} fz=${grid.fz}`);
 
         if (dryRun) return { count: best.total, grid: { isBrick, stepX: grid.stepX, stepZ: grid.stepZ, nLayers } };
+
+        // The winner is rendered with the same smooth normals as before
+        // (previously recomputed on every candidate clone).
+        geometry.computeVertexNormals();
 
         const piecesToDraw = Math.min(best.total, maxDraw);
         const material = new THREE.MeshPhongMaterial({
