@@ -27,8 +27,13 @@
 // Tunable: fraction of the mesh AABB per-axis used to scale the surface-shell
 // thickness; -1 uses the wall_thickness heuristic. Set via stack_set_shell_thr.
 static float g_shell_thr_mm = -1.0f;
+// Optional override: the measured nesting depth (mm) between two copies of the
+// piece. If set (>0), the engine uses it for the per-column count instead of
+// the voxel min/max heuristic.
+static float g_nest_mm = -1.0f;
 
 extern "C" void stack_set_shell_thr(float mm){ g_shell_thr_mm = mm; }
+extern "C" void stack_set_nest_mm(float mm){ g_nest_mm = mm; }
 
 struct Vec3 { float x, y, z; };
 struct Cell { int ix, iy, iz; };
@@ -194,9 +199,14 @@ extern "C" int stack_pieces(
     if (pair_v <= 0) pair_v = ph_v*2;
     // Pieces per column: after the first cone, each extra cone only adds
     // (pair - single) height (nesting). So 1 + floor((boxH - single) / (pair - single)).
+    // If a measured nest depth (mm) was supplied via stack_set_nest_mm, use it
+    // (the geometric truth) instead of the voxel min/max heuristic.
     int boxHv = (int)(boxH/cell);
     int step = std::max(1, pair_v - ph_v);
-    int nLayers = std::max(1, 1 + (int)std::floor((double)(boxHv - ph_v) / (double)step));
+    float step_mm = (float)step * cell;
+    if (g_nest_mm > 0) { step_mm = std::max(0.6f, g_nest_mm); step = std::max(1, (int)std::lround(step_mm/cell)); }
+    int nLayers = std::max(1, 1 + (int)std::floor((boxH - std::floor(ph_v*cell) ) / step_mm));
+    if (g_nest_mm > 0) nLayers = std::max(1, 1 + (int)std::floor((boxH - ph_v*cell) / step_mm));
     if (nLayers < 1) nLayers = 1;
 
     // Horizontal packing: place the piece footprint cells in the box XY grid.

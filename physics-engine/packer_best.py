@@ -2186,8 +2186,41 @@ class BestPacker:
                                      _ct.c_float, _ct.c_float,
                                      _ct.POINTER(_ct.c_float), _ct.c_int]
         lib.stack_set_shell_thr.argtypes = [_ct.c_float]
+        lib.stack_set_nest_mm.argtypes = [_ct.c_float]
         cls._CPP_STACK = lib
         return lib
+
+    @staticmethod
+    def _measure_nest_depth(mesh, max_iter=24):
+        """Return the true nesting depth (mm) between two identical copies of
+        `mesh` stacked along +Y: the smallest base-offset where the second copy
+        no longer collides with the first (exact mesh collision). This is the
+        geometric truth — far better than the engine's voxel min/max heuristic,
+        which under-nests watertight pocket parts. Returns 0 if no nesting."""
+        try:
+            import fcl
+        except Exception:
+            return 0.0
+        try:
+            verts = np.ascontiguousarray(mesh.vertices, dtype=np.float32)
+            faces = np.ascontiguousarray(mesh.faces.astype(np.int32), dtype=np.int32)
+            bv = fcl.BVHModel(); bv.beginModel(len(verts), len(faces))
+            bv.addSubModel(verts, faces); bv.endModel()
+            H = float(mesh.bounds[1][1] - mesh.bounds[0][1])
+            if H <= 0: return 0.0
+            def collides(y):
+                oA = fcl.CollisionObject(bv, fcl.Transform(np.array([0.0, 0.0, 0.0], dtype=np.float32)))
+                oB = fcl.CollisionObject(bv, fcl.Transform(np.array([0.0, y, 0.0], dtype=np.float32)))
+                req = fcl.CollisionRequest(num_max_contacts=1); res = fcl.CollisionResult()
+                fcl.collide(oA, oB, req, res); return res.is_collision
+            lo, hi = 0.0, H + 2.0
+            for _ in range(max_iter):
+                mid = (lo + hi) / 2.0
+                if mid >= H or not collides(mid): hi = mid
+                else: lo = mid
+            return float(max(0.0, hi))
+        except Exception:
+            return 0.0
 
     def pack_stacking_cpp(self, max_pieces=500, cell_size=None, verbose=True,
                           progress_callback=None, wall_thickness=None):
@@ -2222,6 +2255,16 @@ class BestPacker:
                 sh = od.get('shape')
                 if sh is None or sh[0] > nx_vox or sh[1] > ny_vox or sh[2] > nz_vox:
                     continue
+                # Use the GEOMETRIC nest depth (exact mesh collision) instead of
+                # the engine's voxel min/max heuristic, which under-nests
+                # watertight pocket parts. Same for in-plane spins of a pose.
+                # Only trust it for WATERTIGHT parts: FCL on an open/non-manifold
+                # shell gives an over-deep nest (open-shell one-sided collision).
+                if getattr(od['mesh'], 'is_watertight', False):
+                    nest = self._measure_nest_depth(od['mesh'])
+                else:
+                    nest = -1.0
+                lib.stack_set_nest_mm(float(nest))
                 verts = np.ascontiguousarray(od['mesh'].vertices, dtype=np.float32)
                 faces = np.ascontiguousarray(od['mesh'].faces.astype(np.int32), dtype=np.int32)
                 out = np.zeros(max_pieces * 7, dtype=np.float32)
@@ -2235,6 +2278,7 @@ class BestPacker:
                     continue
                 if best is None or n > best[0]:
                     best = (n, out, od)
+            lib.stack_set_nest_mm(-1.0)  # reset
             if best is None:
                 return self.pack_stacking(max_pieces, cell_size, verbose, progress_callback)
             count, out, od = best
