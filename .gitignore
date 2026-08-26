@@ -78,5 +78,13 @@ output/
 physics-engine/PhysicsEngine/bin/
 physics-engine/PhysicsEngine/obj/
 
-# Private docs (don't push)
+# Private/docs (don't push). Push ONLY the root README.md.
 HANDOFF.md
+AGENTS.md
+*.md
+!/README.md
+.agents/
+
+# dsh agent files
+CLAUDE.md
+.env

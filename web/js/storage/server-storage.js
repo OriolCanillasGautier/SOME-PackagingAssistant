@@ -6,8 +6,12 @@
 
 export class ServerStorage {
     constructor() {
-        // Server is configured to run on port 80
-        this.apiBase = 'http://localhost:80';
+        // Resolve from the page origin (was hardcoded to http://localhost:80,
+        // which breaks from any other device). Not currently wired into the
+        // app (storage-manager uses IndexedDB) but kept device-independent.
+        this.apiBase = (typeof window !== 'undefined' && window.location && window.location.origin)
+            ? window.location.origin
+            : 'http://localhost:80';
         this.basePath = this.apiBase + '/library/';
     }
 

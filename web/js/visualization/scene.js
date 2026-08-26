@@ -446,6 +446,22 @@ export class SceneManager {
         this._lastReveal = null;
         this._partialState = null; // live (in-progress) packing preview state
 
+        // ── Adaptive render budget (client-side performance) ──
+        // The viewport used to re-render every animation frame no matter what.
+        // On weak/integrated GPUs — the user's PC & laptops — a very detailed
+        // part (150k+ tris) plus soft shadows + 2× pixel ratio froze the page.
+        // These knobs let us render only when something actually changed and
+        // drop the expensive passes (shadow map, supersampling) automatically
+        // for heavy scenes, without any visual change on light ones.
+        this.maxPixelRatio = 2;          // cap for normal quality
+        this.shadowsEnabled = true;      // master shadow switch (offs for heavy)
+        this.heavyMeshTris = 100_000;    // total tris beyond which we drop quality
+        this._heavy = false;             // current quality state
+        this._needsRender = true;        // render-on-demand flag
+        this._camPos = null;             // last rendered camera position
+        this._camQuat = null;            // last rendered camera quaternion
+        this.mainLight = null;           // stored for castShadow toggling
+
         // Protective packaging overlays (Pack Studio): partitions, foam inserts, molded tray
         this.protectivePackaging = null;
         this.protectiveMeshes = []; // [{ type: 'partitions'|'foam'|'tray', mesh }]
@@ -497,8 +513,8 @@ export class SceneManager {
             alpha: true 
         });
         this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
-        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-        this.renderer.shadowMap.enabled = true;
+        this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.maxPixelRatio));
+        this.renderer.shadowMap.enabled = this.shadowsEnabled;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
         this.container.appendChild(this.renderer.domElement);
 
@@ -541,6 +557,7 @@ export class SceneManager {
 
         // Main directional light
         const mainLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        this.mainLight = mainLight;
         mainLight.position.set(200, 400, 300);
         mainLight.castShadow = true;
         mainLight.shadow.mapSize.width = 2048;
@@ -624,6 +641,7 @@ export class SceneManager {
 
         // Center camera on box
         this.focusOnBox(length, width, height);
+        this.requestRender();
     }
 
     /**
@@ -648,6 +666,7 @@ export class SceneManager {
         this.pieces = [];
         this._lastReveal = null;
         this._partialState = null;
+        this.requestRender();
     }
 
     /**
@@ -667,6 +686,7 @@ export class SceneManager {
             this.boxFloor.material.dispose();
             this.boxFloor = null;
         }
+        this.requestRender();
     }
 
     // ═══════════════ PROTECTIVE PACKAGING OVERLAYS (Pack Studio) ═══════════════
@@ -2563,8 +2583,12 @@ export class SceneManager {
             flatShading: true
         });
 
-        geometry.computeVertexNormals();
-        const mesh = new THREE.Mesh(geometry.clone(), material);
+        // Clone first, then normalise the clone — never mutate the caller's
+        // geometry, and (for STLs that already carry flat normals) avoid a
+        // pointless recompute on the shared original.
+        const meshGeom = geometry.clone();
+        if (!meshGeom.getAttribute('normal')) meshGeom.computeVertexNormals();
+        const mesh = new THREE.Mesh(meshGeom, material);
         mesh.position.copy(position);
         if (rotation) mesh.rotation.copy(rotation);
         mesh.castShadow = true;
@@ -2572,6 +2596,9 @@ export class SceneManager {
 
         this.scene.add(mesh);
         this.pieces.push(mesh);
+
+        this._updateQualityBudget(this._triCount(meshGeom));
+        this.requestRender();
 
         return mesh;
     }
@@ -2690,6 +2717,7 @@ export class SceneManager {
             pieces: meshes
         };
 
+        this._updateQualityBudget(this._placementTris(baseGeometry, placements.length));
         this._lastReveal = { meshes, revealOrder, fillPct, onProgress };
         if (instant) {
             for (const { mesh, idx } of revealOrder) {
@@ -2697,6 +2725,7 @@ export class SceneManager {
                 mesh.instanceMatrix.needsUpdate = true;
             }
             if (onProgress) onProgress({ revealed: revealOrder.length, total: revealOrder.length, pct: fillPct || 0 });
+            this.requestRender();
         } else {
             this.revealPlacements(meshes, revealOrder, fillPct, onProgress);
         }
@@ -2820,6 +2849,9 @@ export class SceneManager {
         st.addedCount = placements.length;
         if (onProgress) onProgress({ revealed: placements.length, total: placements.length });
 
+        this._updateQualityBudget(this._placementTris(baseGeometry, placements.length));
+        this.requestRender();
+
         return { count: placements.length, added: placements.length - startIdx };
     }
 
@@ -2880,6 +2912,8 @@ export class SceneManager {
                 mesh.instanceMatrix.needsUpdate = true;
             });
             rd.revealed = target;
+            // Ask the render loop to show the new counts (it may be idle).
+            this.requestRender();
             if (rd.onProgress) {
                 rd.onProgress({ revealed: rd.revealed, total: rd.total, pct: rd.fillPct || 0 });
             }
@@ -2887,6 +2921,7 @@ export class SceneManager {
                 this._revealAnimId = setTimeout(advance, Math.max(16, Math.min(250, rd.duration / 60)));
             } else {
                 rd.perMesh.clear();
+                this._revealData = null; // reveal finished → allow idle pause
             }
         };
         advance();
@@ -2968,6 +3003,7 @@ export class SceneManager {
         );
         this.controls.target.copy(center);
         this.controls.update();
+        this.requestRender();
     }
 
     /**
@@ -2992,12 +3028,86 @@ export class SceneManager {
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
+        this.requestRender();
+    }
+
+    /**
+     * Mark the scene dirty so the next animate() tick renders once. Every
+     * mutating method (add/create/recolor pieces & box, resize, overlay, …)
+     * should call this — it is what lets the render loop sleep while the view
+     * is static instead of paying a full render+shadow pass every frame.
+     */
+    requestRender() {
+        this._needsRender = true;
+    }
+
+    /** True when the camera moved since the last rendered frame (interaction
+     *  or OrbitControls damping decay). Cheap — no render, just comparison. */
+    _cameraMoved() {
+        const c = this.camera;
+        if (!this._camPos || !this._camQuat) {
+            this._camPos = c.position.clone();
+            this._camQuat = c.quaternion.clone();
+            return true;
+        }
+        const moved =
+            c.position.distanceToSquared(this._camPos) > 1e-8 ||
+            Math.abs(this._camQuat.dot(c.quaternion)) < 1 - 1e-8;
+        this._camPos.copy(c.position);
+        this._camQuat.copy(c.quaternion);
+        return moved;
+    }
+
+    /** Triangle count of a geometry, handling indexed & non-indexed buffers. */
+    _triCount(geometry) {
+        if (!geometry) return 0;
+        const idx = geometry.index;
+        if (idx) return idx.count / 3;
+        const pos = geometry.getAttribute('position');
+        return pos ? pos.count / 3 : 0;
+    }
+
+    /** × triangles across all instances in a placement render. */
+    _placementTris(geometry, instanceCount) {
+        return this._triCount(geometry) * (instanceCount || 0);
+    }
+
+    /**
+     * Adaptive quality: when the scene's total triangle count is very high
+     * (a detailed part, or a big packing result) drop the two expensive GPU
+     * passes that laptops can't afford — the soft-shadow map and 2× pixel
+     * supersampling. Light scenes keep the full quality look untouched.
+     */
+    _updateQualityBudget(totalTris) {
+        const heavy = totalTris > this.heavyMeshTris;
+        if (heavy === this._heavy) return;
+        this._heavy = heavy;
+        this.renderer.setPixelRatio(heavy ? 1 : Math.min(window.devicePixelRatio || 1, this.maxPixelRatio));
+        this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
+        this.renderer.shadowMap.enabled = heavy ? false : this.shadowsEnabled;
+        if (this.mainLight) this.mainLight.castShadow = !heavy;
+        // Force materials to recompile against the new shadow state.
+        this.scene.traverse(o => {
+            if (o.material) {
+                (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => { m.needsUpdate = true; });
+            }
+        });
+        this.requestRender();
     }
 
     animate() {
         this.animationId = requestAnimationFrame(() => this.animate());
+        // Advance OrbitControls damping (cheap). Keep the loop alive so the
+        // camera keeps easing after the user lets go — but only PAY for a
+        // render (draw calls + shadow pass) when something actually moved or
+        // a reveal/partial packing animation is in flight.
         this.controls.update();
-        this.renderer.render(this.scene, this.camera);
+        if (this._cameraMoved()) this._needsRender = true;
+        if (!this._needsRender && this._revealData) this._needsRender = true;
+        if (this._needsRender) {
+            this.renderer.render(this.scene, this.camera);
+            this._needsRender = false;
+        }
     }
 
     /**

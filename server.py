@@ -16,6 +16,7 @@ Endpoints:
     GET  /api/jobs               — list recent jobs
 """
 import sys, os, io, time, uuid, json, threading, tempfile, traceback, itertools
+from contextlib import nullcontext
 from pathlib import Path
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file, send_from_directory
@@ -57,6 +58,13 @@ def add_cors(response):
     response.headers["Access-Control-Allow-Origin"] = "*"
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "*"
+    # The versioned JS/CSS query string is only bumped manually — a stale
+    # index.html still points at the OLD main.js, and that's exactly why a
+    # laptop (different browser profile / cache) kept showing the old frontend
+    # while the server machine (already re-fetched) was fine. Force the
+    # browser to revalidate every static asset so it always picks up the
+    # current files; a hard refresh once clears the already-cached copy.
+    response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     return response
 
 # Serve the web frontend at /
@@ -66,7 +74,14 @@ def index():
 
 JOBS: dict[str, dict] = {}
 JOBS_LOCK = threading.Lock()
-GPU_LOCK = threading.Lock()
+# GPU methods (sparrow/voxel/spectral) run on the GPU, so concurrency is capped
+# to avoid exhausting GPU memory/contexts — but a couple can run at once. CPU
+# methods (grid/stacking/compartment/multitray) need NO lock and run in parallel.
+GPU_SEM = threading.Semaphore(2)
+
+# Methods that drive the GPU (packer_gpu_voxel / Sparrow). Everything else is
+# CPU (packer_best) and can run concurrently without touching the GPU.
+GPU_METHODS = frozenset({"sparrow", "voxel", "spectral"})
 
 # ——————————————————————————————————————————————————————————————————————
 # Mesh simplification (ported from mesh_server.py)
@@ -371,7 +386,12 @@ def format_placements(placed, orients):
 
 def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
     try:
-        with GPU_LOCK:
+        method = params.get("method", "sparrow")
+        # CPU methods run in parallel (no lock); GPU methods share a bounded
+        # semaphore. Keeps the night-long GPU job's slot safe while letting
+        # multiple (test) jobs run at once.
+        locker = GPU_SEM if method in GPU_METHODS else nullcontext()
+        with locker:
             job["status"] = "running"
 
             mesh = trimesh.load(io.BytesIO(stl_data), file_type='stl', force='mesh')
@@ -495,9 +515,12 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                         max_pieces=500, cell_size=spectral_cell, verbose=False,
                         progress_callback=progress_cb, seed=seed)
                 elif method == "stacking":
-                    placed_pieces, placed_meshes = packer.pack_stacking(
+                    # C++ column engine (stacking.so): millisecond packing that
+                    # nests hollow parts at the physical depth. Falls back to
+                    # the Python greedy if the engine is unavailable.
+                    placed_pieces, placed_meshes = packer.pack_stacking_cpp(
                         max_pieces=max_pieces, cell_size=vox_cell, verbose=False,
-                        progress_callback=progress_cb)
+                        progress_callback=progress_cb, wall_thickness=1.0)
                 elif method == "multitray":
                     # Multi-tray: pack the same box repeatedly until the
                     # requested piece count is reached (or a tray fits
@@ -613,7 +636,8 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             # and drop it into the valleys left by grid quantization, then
             # scale all moves back until the meshes are collision-free.
             # Voxel methods only (they have sparse voxel data per orientation).
-            if method in ("sparrow", "stacking", "spectral") and placed_pieces:
+            if method in ("sparrow", "stacking", "spectral") and placed_pieces \
+                    and not getattr(packer, '_cpp_engine', False):
                 from packer_best import refine_subvoxel
                 refined_placed = refine_subvoxel(
                     placed_pieces, packer._sparrow_voxel_data,
@@ -636,7 +660,8 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             # shell gaps so stacked pieces physically touch. Only for SMALL
             # parts: the sub-millimetre gap is invisible on large pieces
             # (>25mm), and the FCL pass costs seconds per hundred pieces.
-            if method == "stacking" and placed_pieces:
+            if method == "stacking" and placed_pieces \
+                    and not getattr(packer, '_cpp_engine', False):
                 try:
                     bnd = mesh.bounds
                     pmin_dim = min(bnd[1, 0] - bnd[0, 0],
@@ -780,7 +805,8 @@ def run_boxes_job(job: dict, stl_data: bytes, boxes: list, params: dict):
 
     Uses the SAME packer machinery as /api/pack (BestPacker.pack_sparrow or the
     GPU voxel packer) with coarse settings (cell 2.0) so each box stays well
-    under ~60s. The whole comparison holds GPU_LOCK for the full run.
+    under ~60s. GPU-bound (sparrow/voxel/spectral) runs share the GPU semaphore;
+    the box comparison keeps a GPU slot for its whole run.
     """
     try:
         method = params.get("method", "sparrow")
@@ -791,7 +817,7 @@ def run_boxes_job(job: dict, stl_data: bytes, boxes: list, params: dict):
         freight_per_kg = params.get("freight_per_kg", 0.0)
         freight_per_m3 = params.get("freight_per_m3", 0.0)
 
-        with GPU_LOCK:
+        with GPU_SEM:
             job["status"] = "running"
 
             mesh = trimesh.load(io.BytesIO(stl_data), file_type='stl', force='mesh')
@@ -998,7 +1024,8 @@ def orientations():
                     simple = None
             if simple is not None and len(simple.faces) > 0:
                 mesh = simple
-        poses = analyze_stable_orientations(mesh)
+        relaxed = request.form.get("relaxed", "").lower() in ("1", "true", "yes", "on")
+        poses = analyze_stable_orientations(mesh, relaxed=relaxed)
         return jsonify({"orientations": poses})
     except Exception as e:
         traceback.print_exc()

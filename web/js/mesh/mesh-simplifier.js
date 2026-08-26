@@ -19,7 +19,16 @@ import { SimplifyModifier } from 'three/addons/modifiers/SimplifyModifier.js';
 import * as BufferGeometryUtils from 'three/addons/utils/BufferGeometryUtils.js';
 
 // Where the Python micro-server listens (mesh_server.py).
-const MESH_SERVER = 'http://localhost:8787';
+// The simplify API lives on the SAME Flask app that serves the page
+// (server.py has /api/simplify), so resolve it from the page origin. It was
+// hardcoded to http://localhost:8787, which from any OTHER device points at
+// *that* device — the server simplify call silently failed and the client
+// fell back to slow in-browser decimation (the "only works on the server"
+// symptom). Resolving from window.location.origin makes it work from any device.
+const MESH_SERVER =
+    (typeof window !== 'undefined' && window.location && window.location.origin)
+        ? window.location.origin
+        : 'http://localhost:8787';
 
 export class MeshSimplifier {
     /**

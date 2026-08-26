@@ -1055,12 +1055,12 @@ export class BulkSimulation {
         // Saturation detection - stop if no new pieces enter box after X drops
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
-        this.maxStagnantDrops = 8; // Stop after 8 consecutive checks without increase
-        this.checkInterval = 30; // Check every 30 drops
+        this.maxStagnantDrops = 6; // Stop after 6 consecutive checks without increase
+        this.checkInterval = 15; // Check every 15 drops
         
         // Track pieces above box to detect overflow faster
         this.piecesAboveBox = 0;
-        this.maxPiecesAboveBox = 12; // If 12+ pieces are stuck above, box is full
+        this.maxPiecesAboveBox = 6; // If 6+ pieces are stuck above, box is full
         
         // 20 distinct colors for pieces - configurable
         this.pieceColors = [
@@ -1263,6 +1263,12 @@ export class BulkSimulation {
             return;
         }
         
+        // Keep the 3D view live while the physics runs. The SceneManager
+        // render loop is on-demand (idle pause), so it must be told to redraw
+        // each frame or the dropped pieces stay invisible until the result
+        // renders at the end.
+        if (this.scene && typeof this.scene.requestRender === 'function') this.scene.requestRender();
+        
         // Continue loop
         requestAnimationFrame(() => this.update());
     }
@@ -1390,23 +1396,31 @@ export class BulkSimulation {
 
         this.droppedCount++;
         
-        // Check for saturation in auto mode (every checkInterval drops)
-        if (this.autoMode && this.droppedCount % this.checkInterval === 0) {
+        // Check for saturation / overflow in ALL modes (every checkInterval
+        // drops). A full box stops accepting pieces; keep dropping and they pile
+        // into an unrealistic tower above the walls. Detect "full":
+        //  * pieces are piling up above the box (stuck on top of the pile), or
+        //  * no new piece has entered the box for a while (saturation).
+        // NOTE: we deliberately do NOT stop on a "pile reached the box top"
+        // heuristic — for a large box with big pieces the pile touches the top
+        // after only a couple of layers while the box is still mostly empty,
+        // which stops the fill at ~15%. Saturation is the real signal.
+        if (this.droppedCount % this.checkInterval === 0) {
             const currentInside = this.physics.countPiecesInBox();
             const piecesAbove = this.countPiecesAboveBox();
-            
+
             // Fast detection: if pieces are piling above the box, it's full
             if (piecesAbove >= this.maxPiecesAboveBox) {
                 console.log(`Box full: ${piecesAbove} pieces stuck above box`);
                 this.finishDropping('overflow');
                 return;
             }
-            
+
             if (currentInside <= this.lastInsideCount) {
                 // No new pieces entered the box
                 this.stagnantDrops++;
                 console.log(`Saturation check: ${currentInside} inside, stagnant: ${this.stagnantDrops}/${this.maxStagnantDrops}`);
-                
+
                 if (this.stagnantDrops >= this.maxStagnantDrops) {
                     this.finishDropping('saturated');
                     return;
@@ -1490,6 +1504,21 @@ export class BulkSimulation {
         }
         
         return count;
+    }
+
+    /** Highest settled piece Y (the top of the pile). Used to detect that the
+     *  box is full before pieces start stacking into an unrealistic tower. */
+    maxPieceY() {
+        let maxY = -Infinity;
+        for (const { body } of this.physics.meshBodies) {
+            if (!body.isValid || !body.isValid()) continue;
+            const p = body.translation();
+            const v = body.linvel();
+            const speed = Math.sqrt(v.x ** 2 + v.y ** 2 + v.z ** 2);
+            if (speed > 50) continue; // ignore pieces still falling
+            if (p.y > maxY) maxY = p.y;
+        }
+        return maxY;
     }
     
     /**

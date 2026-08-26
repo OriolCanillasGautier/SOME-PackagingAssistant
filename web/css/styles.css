@@ -2937,3 +2937,17 @@ button {
         font-size: 0.75rem;
     }
 }
+
+/* Orientation modal: "possible orientations" toggle */
+.orient-relaxed-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.9rem;
+    color: #9aa7bd;
+    margin: 8px 0 10px;
+    cursor: pointer;
+    user-select: none;
+}
+.orient-relaxed-toggle input { accent-color: #3b82f6; cursor: pointer; }
+.orient-relaxed-toggle:hover { color: #cbd5e1; }

@@ -113,7 +113,7 @@ def _flat_face_clusters(nrm, centroids, areas, normal_tol=0.97, plane_tol_mm=0.8
     return out
 
 
-def analyze_stable_orientations(mesh, band=0.3, verbose=False, min_face_frac=0.002, min_face_area=50.0):
+def analyze_stable_orientations(mesh, band=0.3, verbose=False, min_face_frac=0.002, min_face_area=50.0, relaxed=False):
     """Return the stable resting orientations of a trimesh.
 
     Two passes:
@@ -248,7 +248,14 @@ def analyze_stable_orientations(mesh, band=0.3, verbose=False, min_face_frac=0.0
                 for i in range(n_hull))
             margin = min_dist / max(1e-6, max(hx, hz))
 
-            if contact_area < 1.0 or shape_ratio < 0.2 or margin < 0.02:
+            # Strict (default): a real rest needs a decent base. Relaxed (opted
+            # in via the "possible orientations" toggle): surface the marginal
+            # candidates too — narrow-but-long bases (a plate on its edge), and
+            # borderline rests — which the client labels "Possible".
+            if relaxed:
+                if contact_area < 0.1 or shape_ratio < 0.03 or margin < 0.001:
+                    continue
+            elif contact_area < 1.0 or shape_ratio < 0.2 or margin < 0.02:
                 continue
 
             dims = vr.max(axis=0) - vr.min(axis=0)

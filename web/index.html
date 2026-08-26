@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PackAssist SOME</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="css/styles.css?v=ui_fix_v14">
+    <link rel="stylesheet" href="css/styles.css?v=perf_idle_v10">
     <!-- Three.js -->
     <script type="importmap">
     {
@@ -78,6 +78,9 @@
                         <div class="modal-content orientation-modal-content">
                             <h3>Selecciona l'orientació estable</h3>
                             <p class="modal-subtitle">Selecciona l'orientació amb què es col·locaran les peces.</p>
+                            <label class="orient-relaxed-toggle" title="Mostra també orientacions possibles (amb marge d'estabilitat baix) que poden ser útils per embalar, encara que siguin menys estables aïlladament.">
+                                <input type="checkbox" id="orientation-relaxed"> Inclou orientacions addicionals (possibles)
+                            </label>
                             <div class="orientation-layout">
                                 <div id="orientation-options" class="orientation-options">
                                     <!-- Populated by JS with 3D previews -->
@@ -451,6 +454,7 @@
                     <label class="mt-method"><input type="radio" name="mt-method" value="stacking" checked> Apilar</label>
                     <label class="mt-method"><input type="radio" name="mt-method" value="grid"> Graella</label>
                     <label class="mt-method"><input type="radio" name="mt-method" value="compartment"> Graella + separadors</label>
+                    <label class="mt-method"><input type="radio" name="mt-method" value="gravity"> Gravetat (física)</label>
                     <label class="mt-method"><input type="radio" name="mt-method" value="sparrow"> Sparrow GPU</label>
                 </div>
                 <div class="popup-actions">
@@ -577,7 +581,7 @@
     </div>
 
     <!-- Main Script -->
-    <script type="module" src="js/main.js?v=ui_fix_v14"></script>
+    <script type="module" src="js/main.js?v=perf_idle_v10"></script>
     <script type="module">
         // ── Protective packaging overlays (Pack Studio) wiring ──
         // Connects the 3 checkboxes to SceneManager.setProtectiveOverlay and

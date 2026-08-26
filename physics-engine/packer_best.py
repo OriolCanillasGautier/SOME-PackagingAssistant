@@ -10,7 +10,7 @@ Strategy: Batched GPU Y-scanning + iterative backtracking.
 Usage:
     python packer_best.py [stl_file] [box_l] [box_w] [box_h] [scan_mm]
 """
-import sys, time, math, argparse, heapq, random
+import sys, time, math, argparse, heapq, random, ctypes
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime
@@ -2159,6 +2159,137 @@ class BestPacker:
         if verbose:
             print(f"  [Stacking] DONE: {len(placed)} pieces, {fill:.1f}% fill, {elapsed:.0f}s", flush=True)
         return placed, meshes
+
+    # ── C++ column packing (stacking.so): the compiled engine. ──
+    # Same output contract as pack_stacking (placed tuples + meshes), but the
+    # voxelization + nesting + footprint packing run in C++ (milliseconds vs
+    # ~90 s for the Python greedy), and the thin-surface shell voxeliser
+    # preserves hollow cavities so the pieces nest at the physical depth.
+
+    _CPP_STACK = None
+
+    @classmethod
+    def _cpp_stack_load(cls):
+        if cls._CPP_STACK is not None:
+            return cls._CPP_STACK
+        import ctypes as _ct
+        import os as _os
+        _so = _os.path.join(_os.path.dirname(__file__), 'stacking', 'stacking.so')
+        if not _os.path.exists(_so):
+            cls._CPP_STACK = None
+            return None
+        lib = _ct.CDLL(_so)
+        lib.stack_pieces.restype = _ct.c_int
+        lib.stack_pieces.argtypes = [_ct.POINTER(_ct.c_float), _ct.c_int,
+                                     _ct.POINTER(_ct.c_int), _ct.c_int,
+                                     _ct.c_float, _ct.c_float, _ct.c_float,
+                                     _ct.c_float, _ct.c_float,
+                                     _ct.POINTER(_ct.c_float), _ct.c_int]
+        lib.stack_set_shell_thr.argtypes = [_ct.c_float]
+        cls._CPP_STACK = lib
+        return lib
+
+    def pack_stacking_cpp(self, max_pieces=500, cell_size=None, verbose=True,
+                          progress_callback=None, wall_thickness=None):
+        """C++-accelerated column packing. Falls back to pack_stacking if the
+        engine is unavailable or returns nothing. Sets self._cpp_engine=True so
+        server.py skips the voxel refine / FCL contact passes (the engine
+        already places at the physical nesting depth)."""
+        if cell_size is None:
+            cell_size = 1.5
+        t0 = time.time()
+        lib = self._cpp_stack_load()
+        if lib is None:
+            return self.pack_stacking(max_pieces, cell_size, verbose, progress_callback)
+        try:
+            oris = self._prepare_voxel_orients(cell_size, verbose)
+            if not oris:
+                return self.pack_stacking(max_pieces, cell_size, verbose, progress_callback)
+            nx_vox = int(math.ceil(self.box_l / cell_size)) + 1
+            ny_vox = int(math.ceil(self.box_h / cell_size)) + 1
+            nz_vox = int(math.ceil(self.box_w / cell_size)) + 1
+            if wall_thickness is None:
+                wall_thickness = getattr(self, '_wall_thickness', None) or 1.0
+
+            # Try EVERY feasible orientation with the engine and keep the one
+            # that actually packs the most pieces. The _pick_stack_ori voxel
+            # heuristic (layers*cols) can pick a lying pose that "scores" well
+            # in voxel terms but packs far fewer really (and nests barely) —
+            # the engine is milliseconds, so measuring each candidate directly
+            # is far more reliable than the heuristic.
+            best = None  # (count, raw 7-float placements array, winning od)
+            for od in oris:
+                sh = od.get('shape')
+                if sh is None or sh[0] > nx_vox or sh[1] > ny_vox or sh[2] > nz_vox:
+                    continue
+                verts = np.ascontiguousarray(od['mesh'].vertices, dtype=np.float32)
+                faces = np.ascontiguousarray(od['mesh'].faces.astype(np.int32), dtype=np.int32)
+                out = np.zeros(max_pieces * 7, dtype=np.float32)
+                n = lib.stack_pieces(
+                    verts.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), int(len(verts)),
+                    faces.ctypes.data_as(ctypes.POINTER(ctypes.c_int)), int(len(faces)),
+                    float(self.box_l), float(self.box_w), float(self.box_h),
+                    float(cell_size), float(wall_thickness),
+                    out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), int(max_pieces))
+                if n <= 0:
+                    continue
+                if best is None or n > best[0]:
+                    best = (n, out, od)
+            if best is None:
+                return self.pack_stacking(max_pieces, cell_size, verbose, progress_callback)
+            count, out, od = best
+
+            # Register the two in-plane spins the engine may use (0°/90° about
+            # the vertical Y axis) as _sparrow_voxel_data, so the downstream
+            # format_placements/refine passes see real orientations.
+            od0 = od
+            Q90 = np.array([[0, 0, 1], [0, 1, 0], [-1, 0, 0]], dtype=np.float64)  # +90° about Y
+            m90 = od['mesh'].copy()
+            m90.apply_transform(np.vstack([np.hstack([Q90, np.zeros((3, 1))]), [0, 0, 0, 1]]))
+            b0 = m90.bounds[0]
+            m90.apply_translation([-b0[0], -b0[1], -b0[2]])
+            sz90 = m90.extents
+            try:
+                sparse90, _o = voxelize_mesh(m90, cell_size, fill=not getattr(self, '_surface_shell', False))
+                if len(sparse90) == 0:
+                    return self.pack_stacking(max_pieces, cell_size, verbose, progress_callback)
+                sh = int(sparse90[:, 0].min()); sy = int(sparse90[:, 1].min()); sz_ = int(sparse90[:, 2].min())
+                sparse90 = sparse90 - np.array([sh, sy, sz_], dtype=np.int32)
+                sx90 = int(sparse90[:, 0].max() + 1); sy90 = int(sparse90[:, 1].max() + 1); sz90v = int(sparse90[:, 2].max() + 1)
+                hm90 = np.zeros((sx90, sz90v), dtype=np.int32)
+                for p in sparse90:
+                    if p[1] + 1 > hm90[p[0], p[2]]:
+                        hm90[p[0], p[2]] = p[1] + 1
+            except Exception:
+                return self.pack_stacking(max_pieces, cell_size, verbose, progress_callback)
+            od90 = {
+                'mesh': m90, 'size': sz90, 'name': f"{od['name']}_S90",
+                'sparse': sparse90, 'n_occ': int(len(sparse90)),
+                'hm': hm90, 'shape': (sx90, sy90, sz90v),
+                'rotation': Q90 @ od['rotation'],
+            }
+            self._sparrow_voxel_data = [od0, od90]
+            self._cpp_engine = True
+
+            placed, meshes = [], []
+            for i in range(min(count, max_pieces)):
+                x, y, z, qx, qy, qz, qw = out[i * 7:i * 7 + 7]
+                spin90 = abs(qy) > 0.5  # engine encodes 90° about Y here
+                oi = 1 if spin90 else 0
+                od_sel = od90 if spin90 else od0
+                cm = od_sel['mesh'].copy()
+                cm.apply_translation([x, y, z])
+                placed.append((float(x), float(y), float(z), oi, od_sel['name']))
+                meshes.append(cm)
+                if progress_callback and len(placed) % 5 == 0:
+                    progress_callback(len(placed), time.time() - t0, list(placed))
+            if verbose:
+                print(f"  [StackingCpp] DONE: {len(placed)} pieces in {time.time()-t0:.2f}s", flush=True)
+            return placed, meshes
+        except Exception:
+            if verbose:
+                import traceback; traceback.print_exc()
+            return self.pack_stacking(max_pieces, cell_size, verbose, progress_callback)
 
     # ── Bounding-box grid (Graella / Compartment) ──
 

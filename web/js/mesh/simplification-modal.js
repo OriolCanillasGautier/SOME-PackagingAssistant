@@ -780,8 +780,53 @@ export class SimplificationModal {
     }
     
     _changeView(view) {
-        // TODO: Implementar vistes comparatives
-        console.log('Vista:', view);
+        // Clean up transient original/compare meshes.
+        const removeNamed = (name) => {
+            const m = this.scene.getObjectByName(name);
+            if (m) { this.scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.material) m.material.dispose(); }
+        };
+        removeNamed('orig-view');
+        removeNamed('orig-wire');
+        const wireExisting = this.scene.getObjectByName('wireframe');
+        if (wireExisting && view !== 'simplified') { this.scene.remove(wireExisting); wireExisting.geometry.dispose(); wireExisting.material.dispose(); }
+
+        if (view === 'original') {
+            this._showGeometry(this.originalGeometry, 'orig-view');
+        } else if (view === 'compare') {
+            this._updateMeshDisplay(); // simplified solid
+            // overlay the ORIGINAL as a wireframe so the difference is visible
+            const wire = new THREE.LineSegments(
+                new THREE.WireframeGeometry(this.originalGeometry.clone()),
+                new THREE.LineBasicMaterial({ color: 0xff8800, linewidth: 1 })
+            );
+            wire.name = 'orig-wire';
+            wire.position.copy(this.currentMesh.position);
+            this.scene.add(wire);
+        } else {
+            this._updateMeshDisplay(); // simplified
+        }
+    }
+
+    _showGeometry(geometry, name) {
+        // Replace the currently-shown (simplified) mesh with `geometry`,
+        // re-centering and reframing the camera.
+        if (this.currentMesh) {
+            this.scene.remove(this.currentMesh);
+            if (this.currentMesh.geometry) this.currentMesh.geometry.dispose();
+            if (this.currentMesh.material) this.currentMesh.material.dispose();
+        }
+        const material = new THREE.MeshPhongMaterial({ color: 0x3b82f6, flatShading: true, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(geometry.clone(), material);
+        mesh.name = name;
+        const bbox = new THREE.Box3().setFromObject(mesh);
+        const center = new THREE.Vector3(), size = new THREE.Vector3();
+        bbox.getCenter(center); bbox.getSize(size);
+        mesh.position.sub(center);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        this.camera.position.set(maxDim * 1.5, maxDim * 1.5, maxDim * 1.5);
+        this.controls.target.set(0, 0, 0);
+        this.scene.add(mesh);
+        this.currentMesh = mesh;
     }
     
     async _applySimplification() {

@@ -26,7 +26,7 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     });
     for (let w = 0; w < 90; w++) { await sleep(1000); if (await page.evaluate(() => !!document.getElementById('report-preview-btn') && document.getElementById('report-preview-btn').offsetParent !== null)) break; }
     const stk = await page.evaluate(() => window.PackAssist.state.lastResults?.pieceCount);
-    ok('2. STACKING HOLLOW CONE 50^3 (~279)', stk >= 230 && stk <= 320, stk + ' pieces');
+    ok('2. STACKING HOLLOW CONE 50^3 (~363, C++ engine)', stk >= 340 && stk <= 400, stk + ' pieces');
     await page.evaluate(() => { [...document.querySelectorAll('.variant-btn')].find(b => b.dataset.variant === 'grid')?.click(); document.getElementById('calculate-btn').click(); });
     for (let w = 0; w < 60; w++) { await sleep(500); if (await page.evaluate(() => !!document.getElementById('report-preview-btn') && document.getElementById('report-preview-btn').offsetParent !== null)) break; }
     const grid = await page.evaluate(() => window.PackAssist.state.lastResults?.pieceCount);
