@@ -6,15 +6,15 @@
 import * as THREE from 'three';
 import { STLExporter } from 'three/addons/exporters/STLExporter.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=perf_idle_v10';
-import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=perf_idle_v10';
-import { SceneManager } from './visualization/scene.js?v=perf_idle_v10';
-import { BulkSimulation, PhysicsWorld, initRapier } from './physics/physics-world.js?v=perf_idle_v10';
-import { ReportGenerator } from './report/report-generator.js?v=perf_idle_v10';
-import { getSimplificationModal } from './mesh/simplification-modal.js?v=perf_idle_v10';
-import { StorageManager } from './storage/storage-manager.js?v=perf_idle_v10';
-import { loadLocale, t as localeText, getStoredLanguage, setStoredLanguage } from './i18n.js?v=perf_idle_v10';
-import { initBoxOptions } from './box-options.js?v=perf_idle_v10';
+import { calcularEmpaquetatge, createSummary, getDistribution, getPieceDimensions } from './packing/calculator.js?v=perf_idle_v16';
+import { loadMesh, loadSTL, extractDimensions, computeMeshVolume, computeSurfaceArea, analyzeMeshIntegrity, centerToOrigin, isSupported, SUPPORTED_EXTENSIONS, guessPermForDims, applyPermutation, getSupportStability, alignToStableBase } from './mesh/mesh-utils.js?v=orient_v47';
+import { SceneManager } from './visualization/scene.js?v=section_v56';
+import { BulkSimulation, PhysicsWorld, initRapier, verifyRestPose } from './physics/physics-world.js?v=gravity_v49';
+import { ReportGenerator } from './report/report-generator.js?v=section_v23';
+import { getSimplificationModal } from './mesh/simplification-modal.js?v=perf_idle_v16';
+import { StorageManager } from './storage/storage-manager.js?v=perf_idle_v16';
+import { loadLocale, t as localeText, getStoredLanguage, setStoredLanguage } from './i18n.js?v=perf_idle_v16';
+import { initBoxOptions } from './box-options.js?v=perf_idle_v16';
 
 // Helper for dynamic limits
 function updateMaxPiecesLimit() {
@@ -490,9 +490,16 @@ async function updateStableOrientationCache(relaxed = false) {
     } catch (error) {
         console.warn('[Orientation] server analysis error:', error?.message || error);
     }
-    const quats = poses
-        .filter(p => Array.isArray(p.quaternion) && p.quaternion.length === 4)
-        .map(p => new THREE.Quaternion(p.quaternion[0], p.quaternion[1], p.quaternion[2], p.quaternion[3]));
+    // Keep the SERVER's own stability verdict with each pose: the server has
+    // the real support-hull margin test (and it is the one that knows about
+    // rim rests — a hollow housing standing on its 2mm rim has only ~4% of its
+    // footprint in contact, yet is perfectly stable). The client's local
+    // contact-area heuristic used to override that and label every pose of a
+    // big housing "Possible".
+    const poseObjs = poses
+        .filter(p => Array.isArray(p.quaternion) && p.quaternion.length === 4);
+    const quats = poseObjs.map(p =>
+        new THREE.Quaternion(p.quaternion[0], p.quaternion[1], p.quaternion[2], p.quaternion[3]));
 
     if (!quats.length) {
         const fallbackGeometry = state.stlGeometry.clone();
@@ -525,19 +532,33 @@ async function updateStableOrientationCache(relaxed = false) {
 
     const stableBases = [];
 
-    for (const quat of quats) {
+    // Verify each candidate pose with ACTUAL gravity: put the piece on the floor
+    // at the pose and check it doesn't tip/roll. The static server analysis
+    // proposes the pose; gravity decides whether it truly rests. Unstable poses
+    // (the "floating" cases) tip → flagged not-stable. Runs in parallel and
+    // capped so huge parts don't hang; very large meshes skip the physics
+    // (fall back to the static label) to avoid freezing.
+    const _posAttr = state.stlGeometry?.getAttribute?.('position');
+    const _nVert = _posAttr ? _posAttr.count : 0;
+    const _doPhysics = _nVert <= 40000; // safety cap: skip physics on huge meshes
+    const vres = await Promise.all(quats.map(async (quat, qi) => {
         const alignedGeometry = state.stlGeometry.clone();
         applyQuatToGeometry(alignedGeometry, quat);
-        // The server already validated every pose geometrically (COM-in-hull),
-        // so it is a genuine resting candidate. We do NOT force `stable:true`
-        // here — the client's own support-area/ratio check decides the honest
-        // label: a big flat support → "Estable", a marginal one → "Possible".
-        const stability = getSupportStability(alignedGeometry);
-        const dims = extractDimensions(alignedGeometry);
-        console.info(`[Orientation] candidate: ${dims.length.toFixed(1)}×${dims.width.toFixed(1)}×${dims.height.toFixed(1)}mm | ` +
-            `support=${stability.supportArea.toFixed(0)}mm² | STABLE (server) | basePoints=${stability.basePointCount}`);
-        stableBases.push({ quat, geometry: alignedGeometry, stability });
-    }
+        let stability = getSupportStability(alignedGeometry);
+        // The server's verdict is the base (it has the support-hull margin
+        // test); the local heuristic is only used when the server did not
+        // send a flag.
+        const serverStable = poseObjs[qi]?.stable;
+        if (typeof serverStable === 'boolean') stability.stable = serverStable;
+        if (_doPhysics) {
+            const physics = await verifyRestPose(state.stlGeometry, quat, { maxSteps: 150 });
+            // Gravity is the authority: if it stays put -> stable; if it tips -> not.
+            stability = { ...stability, physicsStable: physics.stable, tippedDeg: physics.tippedDeg };
+            stability.stable = !!physics.stable;
+        }
+        return { quat, geometry: alignedGeometry, stability };
+    }));
+    stableBases.push(...vres);
 
     try {
         const fallbackGeometry = state.stlGeometry.clone();
@@ -903,10 +924,22 @@ function renderOrientationSelector() {
     if (typeof state.activeOrientationIndex !== 'number') state.activeOrientationIndex = 0;
 
     const shown = orientations.slice(0, MAX_ORIENTATION_CARDS);
-    // Show every server-validated pose, but label it honestly: a strong flat
-    // support is "Estable", a marginal one (e.g. resting on a rim/edge) is
-    // "Possible". We no longer hide borderline poses — the user chooses.
-    const visible = shown.map((o, i) => ({ o, i }));
+    // Without the "more options" toggle, show ONLY the physics-verified stable
+    // ("Estable") poses; with it on, also show the marginal "Possible" ones.
+    const wantPossible = !!state._orientationRelaxed;
+    let visible = shown
+        .map((o, i) => ({ o, i }))
+        .filter(v => wantPossible || v.o.stability?.stable !== false);
+    // FAIL SAFE: if the physics verification rejected every pose (common on
+    // big/off-centre parts, where the drop test tips them over), showing an
+    // empty list used to CRASH here — `visible[0].i` on an empty array threw
+    // a TypeError and the orientation modal never opened at all. Better to
+    // surface every pose with its honest label than to show nothing.
+    if (visible.length === 0) {
+        visible = shown.map((o, i) => ({ o, i }));
+        console.warn('[Orientation] physics rejected every pose — showing all ' +
+                     `${visible.length} candidate(s) as "Possible"`);
+    }
     const visibleIdx = new Set(visible.map(v => v.i));
 
     const boxL = parseFloat(elements.boxLength?.value) || 385;
@@ -1536,13 +1569,44 @@ function setupEventListeners() {
 
     elements.viewButtons.forEach(btn => {
         btn.addEventListener('click', () => {
+            if (btn.id === 'section-btn') return; // handled below
             if (btn.dataset.view === 'fullscreen') {
                 state.sceneManager.toggleFullscreen();
-            } else {
+            } else if (btn.dataset.view) {
                 state.sceneManager.setView(btn.dataset.view);
             }
         });
     });
+
+    // ── Cross-section (tall) controls ──
+    let sectionAxis = 'x';
+    const applySectionNow = () => {
+        const slider = document.getElementById('section-slider');
+        if (!slider || !state.sceneManager) return;
+        state.sceneManager.setSection(sectionAxis, parseInt(slider.value, 10) / 100);
+    };
+    const sectionBtn = document.getElementById('section-btn');
+    const sectionControls = document.getElementById('section-controls');
+    sectionBtn?.addEventListener('click', () => {
+        const on = sectionControls && sectionControls.style.display !== 'none';
+        if (on) {
+            sectionControls.style.display = 'none';
+            sectionBtn.classList.remove('active');
+            state.sceneManager?.clearSection();
+        } else if (sectionControls) {
+            sectionControls.style.display = 'flex';
+            sectionBtn.classList.add('active');
+            applySectionNow();
+        }
+    });
+    document.querySelectorAll('.section-axis-btn').forEach(b => {
+        b.addEventListener('click', () => {
+            sectionAxis = b.dataset.saxis;
+            document.querySelectorAll('.section-axis-btn').forEach(x => x.classList.toggle('active', x === b));
+            applySectionNow();
+        });
+    });
+    document.getElementById('section-slider')?.addEventListener('input', applySectionNow);
 
     // Event delegation for orientation alternatives in results
     elements.results?.addEventListener('click', (e) => {
@@ -2337,13 +2401,12 @@ async function handleGPUCalculate(calcStartTime, options = null) {
         // all orientations itself.
         let stlBlob = null;
         let fixedOrientation = 0;
-        // Only compartment (and multitray's non-sparrow trays) fix the chosen
-        // pose. Single STACKING is left FREE — the server's pack_stacking
-        // explores orientations itself and nests far better than a single
-        // locked pose (a locked pose packs e.g. 64 pieces where the grid's
-        // best orientation packs 180). The modal choice is still a hint for
-        // display, but the stacker is not bound to it.
-        const isPoseMethod = gpuMethod === 'compartment'
+        // Respect the user's chosen orientation for stacking too (not just
+        // compartment/multitray): the piece nests in the pose the user picked.
+        // (The free-orientation version could pack more, but the user explicitly
+        // wants their chosen pose honoured.)
+        const isPoseMethod = gpuMethod === 'stacking'
+            || gpuMethod === 'compartment'
             || (gpuMethod === 'multitray' && (options?.trayMethod || 'stacking') !== 'sparrow');
         const selectedSet = state.selectedOrientations;
         if (isPoseMethod && selectedSet && selectedSet.size === 1 && state.stlStableOrientations?.length) {

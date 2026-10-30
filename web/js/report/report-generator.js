@@ -185,7 +185,13 @@ export class ReportGenerator {
                 this.scene.controls.update();
             }
             this.scene.camera.updateProjectionMatrix();
-            this.scene.renderer.render(this.scene.scene, this.scene.camera);
+            // Route through the scene manager so an active cross-section also
+            // renders its filled caps in the captured image.
+            if (typeof this.scene.renderFrame === 'function') {
+                this.scene.renderFrame(this.scene.camera);
+            } else {
+                this.scene.renderer.render(this.scene.scene, this.scene.camera);
+            }
         }
     }
 
@@ -273,7 +279,11 @@ export class ReportGenerator {
             camera.lookAt(center);
             camera.updateProjectionMatrix();
 
-            this.scene.renderer.render(this.scene.scene, camera);
+            if (typeof this.scene.renderFrame === 'function') {
+                this.scene.renderFrame(camera);
+            } else {
+                this.scene.renderer.render(this.scene.scene, camera);
+            }
             return this.scene.renderer.domElement.toDataURL('image/png');
         }, {
             width,

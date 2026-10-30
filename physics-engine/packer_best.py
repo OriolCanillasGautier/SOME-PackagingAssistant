@@ -36,6 +36,14 @@ from engine.hull import compute_hull
 # GPU kernel: batched Y-scanning + SAT (all candidates in one launch)
 # ═══════════════════════════════════════════════
 
+# Clear Catalan error for GPU-only options when the driver is missing
+# (Secure Boot rejected the nvidia module, driver crashed, etc.).
+_GPU_NA_MSG = ("GPU no disponible (driver NVIDIA no carregat). Les opcions que "
+               "requereixen GPU (Sparrow / Voxel) no es poden executar — "
+               "utilitza Apilat o Graella, o repara el driver NVIDIA "
+               "(reinici + MOK / Secure Boot).")
+
+
 @cuda.jit
 def _packer_kernel(
     candidates,          # [n_cand, 5] float64: x, z, ori_idx, min_y, valid
@@ -807,6 +815,19 @@ class BestPacker:
     def _load_orientations(self, mesh, n_yaw, shrink):
         self._source_mesh = mesh
         self.orientations = generate_orientations(mesh, n_yaw, self.box_dims, shrink=shrink)
+        if not self.orientations:
+            # No orientation fits this box — don't crash; packing paths already
+            # fall back to a greedy grid when there are no orientations.
+            self._max_v = self._max_f = 0
+            self._d_hull_verts = self._d_hull_vcts = self._d_hull_norms = self._d_hull_fcts = None
+            self._d_box_dims = self._d_placed_verts = None
+            self._d_placed_counts = self._d_placed_norms = self._d_placed_face_cts = None
+            try:
+                self._d_box_dims = cuda.to_device(np.array([self.box_l, self.box_h, self.box_w], dtype=np.float64))
+                self._gpu_ok = True
+            except Exception:
+                self._gpu_ok = False
+            return
         self._max_v = max(len(o.get('coll_verts', o['verts'])) for o in self.orientations)
         self._max_f = max(len(o.get('coll_faces', o['faces'])) for o in self.orientations)
         self._init_gpu_buffers()
@@ -822,13 +843,26 @@ class BestPacker:
             nv, nf = len(cv), len(cf)
             hv[i, :nv] = cv; hvc[i] = nv
             hn[i, :nf] = cn; hfc[i] = nf
-        self._d_hull_verts = cuda.to_device(hv); self._d_hull_vcts = cuda.to_device(hvc)
-        self._d_hull_norms = cuda.to_device(hn); self._d_hull_fcts = cuda.to_device(hfc)
-        self._d_box_dims = cuda.to_device(np.array([self.box_l, self.box_h, self.box_w], dtype=np.float64))
-        self._d_placed_verts = cuda.to_device(np.zeros((self._max_placed, mv, 3), dtype=np.float64))
-        self._d_placed_counts = cuda.to_device(np.zeros(self._max_placed, dtype=np.int32))
-        self._d_placed_norms = cuda.to_device(np.zeros((self._max_placed, mf, 3), dtype=np.float64))
-        self._d_placed_face_cts = cuda.to_device(np.zeros(self._max_placed, dtype=np.int32))
+        try:
+            self._d_hull_verts = cuda.to_device(hv); self._d_hull_vcts = cuda.to_device(hvc)
+            self._d_hull_norms = cuda.to_device(hn); self._d_hull_fcts = cuda.to_device(hfc)
+            self._d_box_dims = cuda.to_device(np.array([self.box_l, self.box_h, self.box_w], dtype=np.float64))
+            self._d_placed_verts = cuda.to_device(np.zeros((self._max_placed, mv, 3), dtype=np.float64))
+            self._d_placed_counts = cuda.to_device(np.zeros(self._max_placed, dtype=np.int32))
+            self._d_placed_norms = cuda.to_device(np.zeros((self._max_placed, mf, 3), dtype=np.float64))
+            self._d_placed_face_cts = cuda.to_device(np.zeros(self._max_placed, dtype=np.int32))
+            self._gpu_ok = True
+        except Exception as e:
+            # CPU-only machine (e.g. Secure Boot rejected the nvidia module
+            # after a reboot): the C++ stacking engine, bbox grid and spectral
+            # are CPU paths and keep working; GPU consumers (_gpu_scan,
+            # pack_sparrow) raise the clear message below instead of a raw
+            # numba cuInit traceback.
+            self._gpu_ok = False
+            self._d_hull_verts = self._d_hull_vcts = self._d_hull_norms = self._d_hull_fcts = None
+            self._d_box_dims = self._d_placed_verts = self._d_placed_counts = None
+            self._d_placed_norms = self._d_placed_face_cts = None
+            print(f"[Packer] GPU unavailable — CPU paths only ({e})", flush=True)
 
     def _generate_candidates(self, step=None):
         s = step if step is not None else self.scan_step
@@ -846,6 +880,8 @@ class BestPacker:
         n_cand = len(cand_array)
         if n_cand == 0:
             return np.zeros((0, 5))
+        if not getattr(self, '_gpu_ok', False):
+            raise RuntimeError(_GPU_NA_MSG)
 
         d_cand = cuda.to_device(cand_array)
         threads = 256
@@ -1504,6 +1540,8 @@ class BestPacker:
                      progress_callback=None, beam_width=8, seed=None):
         if cell_size is None:
             cell_size = 1.0
+        if not getattr(self, '_gpu_ok', False):
+            raise RuntimeError(_GPU_NA_MSG)
         if seed is not None:
             random.seed(seed)
         source = getattr(self, '_source_mesh', None)
@@ -1705,11 +1743,20 @@ class BestPacker:
         for i in range(len(oris)):
             all_offsets[i + 1] = all_offsets[i] + len(all_sparse_list[i])
             all_hm_offsets[i + 1] = all_hm_offsets[i] + len(all_hm_list[i])
-        self._d_sparrow_sparse = cuda.to_device(np.concatenate(all_sparse_list).astype(np.int32))
-        self._d_sparrow_offsets = cuda.to_device(all_offsets)
-        self._d_sparrow_hm = cuda.to_device(np.concatenate(all_hm_list).astype(np.int32))
-        self._d_sparrow_hm_offsets = cuda.to_device(all_hm_offsets)
-        self._d_sparrow_shapes = cuda.to_device(all_shapes)
+        # GPU copies of the voxel data are only consumed by the sparrow
+        # kernels (which guard against a missing driver themselves). Without
+        # a GPU the host `oris` alone drives the C++/python stacking paths —
+        # never let this upload crash a CPU-only machine.
+        try:
+            self._d_sparrow_sparse = cuda.to_device(np.concatenate(all_sparse_list).astype(np.int32))
+            self._d_sparrow_offsets = cuda.to_device(all_offsets)
+            self._d_sparrow_hm = cuda.to_device(np.concatenate(all_hm_list).astype(np.int32))
+            self._d_sparrow_hm_offsets = cuda.to_device(all_hm_offsets)
+            self._d_sparrow_shapes = cuda.to_device(all_shapes)
+        except Exception as e:
+            self._d_sparrow_sparse = self._d_sparrow_offsets = None
+            self._d_sparrow_hm = self._d_sparrow_hm_offsets = self._d_sparrow_shapes = None
+            print(f"[Packer] GPU sparse upload skipped — CPU stacking paths only ({e})", flush=True)
         return oris
 
     @staticmethod
@@ -2259,12 +2306,17 @@ class BestPacker:
                 # the engine's voxel min/max heuristic, which under-nests
                 # watertight pocket parts. Same for in-plane spins of a pose.
                 # Only trust it for WATERTIGHT parts: FCL on an open/non-manifold
-                # shell gives an over-deep nest (open-shell one-sided collision).
+                # shell gives an over-deep nest. For watertight parts we ALSO use
+                # a TIGHT shell (smaller footprint -> more columns); open shells
+                # keep the default 0.4*wall shell (their heuristic needs it).
                 if getattr(od['mesh'], 'is_watertight', False):
                     nest = self._measure_nest_depth(od['mesh'])
+                    thr = min(0.4 * wall_thickness, 0.30)
                 else:
                     nest = -1.0
+                    thr = -1.0
                 lib.stack_set_nest_mm(float(nest))
+                lib.stack_set_shell_thr(float(thr))
                 verts = np.ascontiguousarray(od['mesh'].vertices, dtype=np.float32)
                 faces = np.ascontiguousarray(od['mesh'].faces.astype(np.int32), dtype=np.int32)
                 out = np.zeros(max_pieces * 7, dtype=np.float32)
@@ -2279,6 +2331,7 @@ class BestPacker:
                 if best is None or n > best[0]:
                     best = (n, out, od)
             lib.stack_set_nest_mm(-1.0)  # reset
+            lib.stack_set_shell_thr(-1.0)  # reset
             if best is None:
                 return self.pack_stacking(max_pieces, cell_size, verbose, progress_callback)
             count, out, od = best

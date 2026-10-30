@@ -5,6 +5,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { ConvexGeometry } from 'three/addons/geometries/ConvexGeometry.js';
 import {
     acceleratedRaycast,
     computeBoundsTree,
@@ -445,6 +446,12 @@ export class SceneManager {
         this._revealData = null;
         this._lastReveal = null;
         this._partialState = null; // live (in-progress) packing preview state
+        this.sectionPlane = null;  // cross-section clip plane (world space)
+        this._sectionMesh = null;  // translucent visual for the cut plane
+        this._sectionState = null; // { axis, t01 } while the section is on
+        this._capMesh = null;      // stencil-filled cross-section (solid look)
+        this._capScene = null;     // own scene so the cap renders in its own pass
+        this._stencilMat = null;   // invisible material that marks the stencil
 
         // ── Adaptive render budget (client-side performance) ──
         // The viewport used to re-render every animation frame no matter what.
@@ -510,12 +517,19 @@ export class SceneManager {
         // Renderer
         this.renderer = new THREE.WebGLRenderer({ 
             antialias: true,
-            alpha: true 
+            alpha: true,
+            // The cross-section caps need the stencil buffer (three defaults it
+            // to false): the cut faces are filled via a stencil test so pieces
+            // read as solid volumes instead of see-through shells.
+            stencil: true
         });
         this.renderer.setSize(this.container.clientWidth, this.container.clientHeight);
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.maxPixelRatio));
         this.renderer.shadowMap.enabled = this.shadowsEnabled;
         this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        // Cross-section view: renderer-global clip plane cuts every current
+        // and future mesh (pieces, box, bulk display) — no per-material work.
+        this.renderer.localClippingEnabled = true;
         this.container.appendChild(this.renderer.domElement);
 
         // Controls
@@ -642,6 +656,274 @@ export class SceneManager {
         // Center camera on box
         this.focusOnBox(length, width, height);
         this.requestRender();
+    }
+
+    /**
+     * SOLID FILL geometry for a piece: its convex hull — the volume the
+     * packing math assumes the piece occupies. Our parts are hollow shells, so
+     * slicing one open used to show its 1mm wall and the empty cavity (which
+     * read as speckle). Rendered inside the shell with the same instance
+     * matrices, the fill is occluded in the normal view and only becomes
+     * visible where the cross-section cuts the piece — there it fills the cut
+     * face so the sliced piece looks like full material
+     * ("a bit translucent but full inside").
+     *
+     * Cached per geometry; returns null when the hull cannot be built.
+     */
+    _solidFillGeometry(geometry) {
+        if (!this._fillGeoCache) this._fillGeoCache = new WeakMap();
+        const hit = this._fillGeoCache.get(geometry);
+        if (hit !== undefined) return hit;
+        let geo = null;
+        try {
+            const pos = geometry.getAttribute('position');
+            if (pos && pos.count >= 12) {
+                // Sample big meshes: the hull only needs the extreme points and
+                // ConvexGeometry is O(n log n) on the point count.
+                const stride = pos.count > 30000 ? Math.ceil(pos.count / 20000) : 1;
+                const pts = [];
+                for (let i = 0; i < pos.count; i += stride) {
+                    pts.push(new THREE.Vector3(pos.getX(i), pos.getY(i), pos.getZ(i)));
+                }
+                geo = new ConvexGeometry(pts);
+                geo.computeVertexNormals();
+            }
+        } catch (e) {
+            console.warn('[Section] solid fill hull failed:', e?.message || e);
+            geo = null;
+        }
+        this._fillGeoCache.set(geometry, geo);
+        return geo;
+    }
+
+    /**
+     * Cross-section (tall) view: clip the whole scene at a world-space
+     * plane so the interior nesting of the packed pieces is visible.
+     * axis: 'x' | 'y' | 'z'; t01: 0..1 position along that box axis —
+     * the origin side of the plane stays visible. Uses renderer-global
+     * clipping planes, so every mesh (instanced pieces, bulk display,
+     * preview, box) is cut consistently with zero per-material work.
+     */
+    setSection(axis, t01) {
+        if (!this.renderer) return;
+        const t01c = Math.max(0.02, Math.min(0.98, t01));
+        this._sectionState = { axis, t01: t01c };
+        const dims = this._sectionBoxSize();
+        const extent = axis === 'x' ? dims[0] : axis === 'y' ? dims[1] : dims[2];
+        const t = t01c * extent;
+        if (!this.sectionPlane) this.sectionPlane = new THREE.Plane();
+        // Keep the half from the origin up to the plane visible.
+        const n = axis === 'x' ? [-1, 0, 0] : axis === 'y' ? [0, -1, 0] : [0, 0, -1];
+        this.sectionPlane.normal.set(n[0], n[1], n[2]);
+        this.sectionPlane.constant = t;
+        this.renderer.clippingPlanes = [this.sectionPlane];
+        this._updateSectionPlaneMesh(axis, t, dims);
+        this._ensureSectionCap(axis, t, dims);
+        this.requestRender();
+    }
+
+    /**
+     * Build the cross-section CAP: a stencil-filled plane at the cut so the
+     * sliced pieces read as SOLID material ("translucent but full inside")
+     * instead of hollow shells — the STL is only a surface, and a cut plane
+     * would otherwise expose the empty interior.
+     */
+    _ensureSectionCap(axis, t, dims) {
+        if (!this.scene) return;
+        const [L, H, W] = dims;
+        let geo, pos;
+        // Nudge the cap 0.05mm INTO the kept half. Coplanar with the clip plane
+        // (which keeps the origin side), per-fragment rounding decided whether
+        // each cap fragment survived clipping — the cut face came out as a
+        // speckled mask with holes. Invisible at 0.05mm.
+        const EPS = 0.05;
+        if (axis === 'x') { geo = new THREE.PlaneGeometry(W, H); geo.rotateY(Math.PI / 2); pos = [t - EPS, H / 2, W / 2]; }
+        else if (axis === 'y') { geo = new THREE.PlaneGeometry(L, W); geo.rotateX(-Math.PI / 2); pos = [L / 2, t - EPS, W / 2]; }
+        else { geo = new THREE.PlaneGeometry(L, H); pos = [L / 2, H / 2, t - EPS]; }
+
+        if (this._capMesh) {
+            this._capScene.remove(this._capMesh);
+            this._capMesh.geometry.dispose();
+            this._capMesh.material.dispose();
+            this._capMesh = null;
+        }
+        if (!this._stencilMat) {
+            // Invisible: marks the stencil wherever piece geometry survived the
+            // clip plane. REPLACE (ref 1), NOT IncrementWrap: an 8-bit stencil
+            // wraps at 256, so in a densely packed box (363 cones) every pixel
+            // covered by 256+ clipped pieces wrapped back to 0 — the cap then
+            // had holes exactly where the fill was thickest, which is the
+            // speckled "not what it should be" look. A boolean mask cannot
+            // wrap.
+            this._stencilMat = new THREE.MeshBasicMaterial({
+                colorWrite: false,
+                depthWrite: false,
+                depthTest: false,
+                side: THREE.DoubleSide,
+                stencilWrite: true,
+                stencilRef: 1,
+                stencilFunc: THREE.AlwaysStencilFunc,
+                stencilFail: THREE.ReplaceStencilOp,
+                stencilZFail: THREE.ReplaceStencilOp,
+                stencilZPass: THREE.ReplaceStencilOp,
+            });
+        }
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xb9cfe6,          // cool plastic tint — reads as solid material
+            transparent: true,
+            // "A bit translucent but full inside": the pieces are HOLLOW
+            // shells, so a half-transparent cap showed their 1mm walls through
+            // it and the cut face read as milky speckle. Keep it nearly solid
+            // (a hint of what is behind) so the sliced pieces look like full
+            // material.
+            opacity: 0.82,
+            side: THREE.DoubleSide,
+            depthWrite: false,
+            depthTest: true,
+            // The cap sits exactly where the clipped piece edges end, so the
+            // two are coplanar and Z-FIGHT: the cut face came out as a
+            // speckled mask (the pieces winning the depth test in scattered
+            // pixels). A polygon offset pushes the cap forward in depth space
+            // so it wins cleanly, while still being depth-tested (pieces in
+            // front of the cut keep occluding it).
+            polygonOffset: true,
+            polygonOffsetFactor: -2,
+            polygonOffsetUnits: -2,
+            stencilWrite: true,
+            stencilRef: 0,
+            stencilFunc: THREE.NotEqualStencilFunc,
+            stencilFail: THREE.ReplaceStencilOp,
+            stencilZFail: THREE.ReplaceStencilOp,
+            stencilZPass: THREE.ReplaceStencilOp,
+        });
+        this._capMesh = new THREE.Mesh(geo, mat);
+        this._capMesh.position.set(pos[0], pos[1], pos[2]);
+        this._capMesh.renderOrder = 1000;
+        if (!this._capScene) this._capScene = new THREE.Scene();
+        this._capScene.add(this._capMesh);
+    }
+
+    /**
+     * One frame: normal render, or — while the cross-section is on — a
+     * three-pass render (stencil marking → scene → filled cut caps).
+     *
+     * NOTE: three sets an internal `forceClear = true` whenever the scene has
+     * a COLOUR background (ours does), and that clears colour+depth+STENCIL at
+     * the start of EVERY render() call. Left alone it wipes the stencil marks
+     * between passes (the caps then draw nothing) and erases each pass's
+     * pixels. So the auto-clears are disabled for the whole sequence and the
+     * frame is cleared exactly once, by us.
+     */
+    renderFrame(camera = null) {
+        const r = this.renderer;
+        const cam = camera || this.camera;
+        if (!this._sectionState || !this._capMesh || !this._capScene || !this._stencilMat) {
+            r.render(this.scene, cam);
+            return;
+        }
+        const saved = {
+            all: r.autoClear, color: r.autoClearColor,
+            depth: r.autoClearDepth, stencil: r.autoClearStencil,
+        };
+        r.autoClear = false;
+        r.autoClearColor = false;
+        r.autoClearDepth = false;
+        r.autoClearStencil = false;
+        if (this.scene.background && this.scene.background.isColor) {
+            r.setClearColor(this.scene.background, 1);
+        }
+        r.clear(true, true, true); // colour + depth + stencil, once per frame
+
+        // 1) mark the stencil where the (clipped) pieces are
+        const swapped = [];
+        for (const p of this.pieces) {
+            if (p.material) { swapped.push([p, p.material]); p.material = this._stencilMat; }
+        }
+        r.render(this.scene, cam);
+        for (const [p, m] of swapped) p.material = m;
+
+        // 2) the real scene on top
+        r.render(this.scene, cam);
+
+        // 3) the cap, only inside the marked silhouette. Clipping is turned
+        // OFF for this pass: the cap IS the cut surface, so it must not be
+        // clipped by the plane it represents.
+        const savedPlanes = r.clippingPlanes;
+        r.clippingPlanes = [];
+        r.render(this._capScene, cam);
+        r.clippingPlanes = savedPlanes;
+
+        r.autoClear = saved.all;
+        r.autoClearColor = saved.color;
+        r.autoClearDepth = saved.depth;
+        r.autoClearStencil = saved.stencil;
+    }
+
+    /** Remove the cross-section and restore the full scene. */
+    clearSection() {
+        this._sectionState = null;
+        // Must stay an ARRAY — three's WebGLClipping.init reads
+        // renderer.clippingPlanes.length every frame; null crashes it.
+        if (this.renderer) this.renderer.clippingPlanes = [];
+        if (this._capMesh && this._capScene) {
+            this._capScene.remove(this._capMesh);
+            this._capMesh.geometry.dispose();
+            this._capMesh.material.dispose();
+            this._capMesh = null;
+        }
+        if (this._sectionMesh && this.scene) {
+            this.scene.remove(this._sectionMesh);
+            this._sectionMesh.geometry.dispose();
+            this._sectionMesh.material.dispose();
+            this._sectionMesh = null;
+        }
+        this.requestRender();
+    }
+
+    /** Box extents [X, Y(height), Z] in mm for the section math. */
+    _sectionBoxSize() {
+        const bd = this.lastPlacement && this.lastPlacement.boxDims;
+        if (bd && bd.l > 0) return [bd.l, bd.h, bd.w];
+        // No packing yet: fall back to the current pieces' bounding box.
+        if (this.pieces.length) {
+            const box = new THREE.Box3();
+            for (const p of this.pieces) box.expandByObject(p);
+            const s = new THREE.Vector3();
+            box.getSize(s);
+            if (s.x > 0 && s.y > 0 && s.z > 0) return [s.x, s.y, s.z];
+        }
+        return [100, 100, 100];
+    }
+
+    /** Translucent marker so the user can see where the cut is. */
+    _updateSectionPlaneMesh(axis, t, dims) {
+        if (!this.scene) return;
+        if (this._sectionMesh) {
+            this.scene.remove(this._sectionMesh);
+            this._sectionMesh.geometry.dispose();
+            this._sectionMesh.material.dispose();
+            this._sectionMesh = null;
+        }
+        const [L, H, W] = dims;
+        let geo, pos;
+        if (axis === 'x') {
+            geo = new THREE.PlaneGeometry(W, H); geo.rotateY(Math.PI / 2);
+            pos = [t, H / 2, W / 2];
+        } else if (axis === 'y') {
+            geo = new THREE.PlaneGeometry(L, W); geo.rotateX(-Math.PI / 2);
+            pos = [L / 2, t, W / 2];
+        } else {
+            geo = new THREE.PlaneGeometry(L, H);
+            pos = [L / 2, H / 2, t];
+        }
+        const mat = new THREE.MeshBasicMaterial({
+            color: 0xf59e0b, transparent: true, opacity: 0.14,
+            side: THREE.DoubleSide, depthWrite: false,
+        });
+        this._sectionMesh = new THREE.Mesh(geo, mat);
+        this._sectionMesh.position.set(pos[0], pos[1], pos[2]);
+        this._sectionMesh.renderOrder = 999;
+        this.scene.add(this._sectionMesh);
     }
 
     /**
@@ -2708,6 +2990,39 @@ export class SceneManager {
             this.scene.add(mesh);
             this.pieces.push(mesh);
             meshes.push(mesh);
+
+            // ── SOLID FILL (convex hull inside the shell) ──
+            // Same instance matrices + colours as the shell, so it follows the
+            // placements exactly and is revealed in step with them.
+            try {
+                const fillGeo = this._solidFillGeometry(geometry);
+                const fillTris = fillGeo ? (fillGeo.index ? fillGeo.index.count : fillGeo.getAttribute('position').count) / 3 : 0;
+                const budgetLeft = 400000 - (this._fillTris || 0);
+                if (fillGeo && fillTris * group.length <= budgetLeft) {
+                    this._fillTris = (this._fillTris || 0) + fillTris * group.length;
+                    const fillMat = new THREE.MeshPhongMaterial({
+                        color: 0xffffff,
+                        transparent: true,
+                        opacity: 0.85,
+                        shininess: 40,
+                        specular: 0x333333,
+                        side: THREE.FrontSide,
+                    });
+                    const fillMesh = new THREE.InstancedMesh(fillGeo, fillMat, group.length);
+                    fillMesh.instanceMatrix = mesh.instanceMatrix;   // share transforms
+                    if (mesh.instanceColor) fillMesh.instanceColor = mesh.instanceColor; // share colours
+                    fillMesh.castShadow = false;
+                    fillMesh.receiveShadow = false;
+                    fillMesh.frustumCulled = false;
+                    fillMesh.count = 0;
+                    this.scene.add(fillMesh);
+                    this.pieces.push(fillMesh);
+                    meshes.push(fillMesh);
+                    group.forEach((_, localIdx) => revealOrder.push({ mesh: fillMesh, idx: localIdx }));
+                }
+            } catch (e) {
+                console.warn('[Section] solid fill skipped:', e?.message || e);
+            }
         }
 
         this.lastPlacement = {
@@ -3105,7 +3420,7 @@ export class SceneManager {
         if (this._cameraMoved()) this._needsRender = true;
         if (!this._needsRender && this._revealData) this._needsRender = true;
         if (this._needsRender) {
-            this.renderer.render(this.scene, this.camera);
+            this.renderFrame();
             this._needsRender = false;
         }
     }

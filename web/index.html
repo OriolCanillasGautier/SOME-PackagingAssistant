@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PackAssist SOME</title>
     <link rel="icon" href="data:,">
-    <link rel="stylesheet" href="css/styles.css?v=perf_idle_v10">
+    <link rel="stylesheet" href="css/styles.css?v=section_v21">
     <!-- Three.js -->
     <script type="importmap">
     {
@@ -377,6 +377,14 @@
                         <button class="view-btn" data-view="right" title="Vista Dreta">DRE</button>
                         <button class="view-btn" data-view="back" title="Vista Darrere">POS</button>
                         <button class="view-btn" data-view="fullscreen" title="Pantalla Completa">PC</button>
+                        <button class="view-btn" id="section-btn" title="Secció transversal (tallar l'escena per veure l'interior)">TALL</button>
+                    </div>
+                    <div id="section-controls" class="section-controls" style="display:none;">
+                        <span class="section-label">Tall</span>
+                        <button class="section-axis-btn active" data-saxis="x">X</button>
+                        <button class="section-axis-btn" data-saxis="y">Y</button>
+                        <button class="section-axis-btn" data-saxis="z">Z</button>
+                        <input type="range" id="section-slider" min="2" max="98" value="50" title="Posició del tall">
                     </div>
                     <div id="simulation-status" class="simulation-status"></div>
                 </div>
@@ -581,7 +589,7 @@
     </div>
 
     <!-- Main Script -->
-    <script type="module" src="js/main.js?v=perf_idle_v10"></script>
+    <script type="module" src="js/main.js?v=section_v56"></script>
     <script type="module">
         // ── Protective packaging overlays (Pack Studio) wiring ──
         // Connects the 3 checkboxes to SceneManager.setProtectiveOverlay and

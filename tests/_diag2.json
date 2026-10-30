@@ -1,0 +1,40 @@
+{
+ "boxDims": {
+  "length": 50,
+  "width": 50,
+  "height": 50
+ },
+ "msPerStep": 0,
+ "mass_concave": 432.928375,
+ "bodyType": 0,
+ "onePieceAfter60Steps": [
+  11874.4,
+  1420.6,
+  7758.3
+ ],
+ "after4Pieces": [
+  [
+   -65111,
+   -22534,
+   -2764
+  ],
+  [
+   -87655,
+   -23418,
+   60771
+  ],
+  [
+   -63602,
+   -11293,
+   20517
+  ],
+  [
+   -24414,
+   -120591,
+   -20893
+  ]
+ ],
+ "nBodies": 13,
+ "maxAbsCoord": "322877",
+ "countInBox": 0
+}

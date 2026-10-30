@@ -9,6 +9,182 @@ import * as THREE from 'three';
 // Rapier will be loaded dynamically
 let RAPIER = null;
 
+// ── Concave collider budget ──
+// Real nesting (cone into cone, parts sliding inside hollow shells) needs the
+// exact triangle surface as collider. That is far heavier than a convex hull,
+// so it is enabled per piece up to MAX_CONCAVE_TRIS triangles and for a whole
+// simulation up to MAX_CONCAVE_TOTAL_TRIS; anything above falls back to the
+// convex hull (no nesting, but stable and fast).
+export const MAX_CONCAVE_TRIS = 2500;
+// Total budget is deliberately modest: the user's GPU driver is currently
+// dead, so the browser falls back to software GL — a huge trimesh world both
+// slows physics and can crash the tab (observed in headless testing).
+export const MAX_CONCAVE_TOTAL_TRIS = 200000;
+
+// ── Concave colliders: DISABLED ──
+// Rapier's trimesh collider on a DYNAMIC body derives its mass properties from
+// the mesh, and for an open shell (our hollow parts) the inertia/COM come out
+// unreliable: A/B testing in the real app showed a lone cone sometimes resting
+// fine (y=5.1) and sometimes being ejected to y=91 with nothing else in the
+// world. Flaky explosions are worse than no nesting, so the stable convex hull
+// is used until the collider becomes a COMPOUND OF CONVEX PARTS (e.g. a small
+// set of boxes from the server's voxel model, which keeps the cavity and has
+// exact mass properties). See HANDOFF.md §4.12.
+export const USE_CONCAVE_COLLIDERS = false;
+
+// ── Compound of convex boxes: the nesting collider ──
+// A hollow part can only nest if the collider has the cavity. Raw trimesh does
+// (but is flaky + slow on dynamic bodies); a convex hull does not. So the
+// collider is a COMPOUND: the mesh surface is voxelised into a thin shell and
+// the shell cells are merged into a handful of axis-aligned boxes. Boxes are
+// convex (exact mass properties, fast narrow-phase) while the union still has
+// the cavity, so cones slide into cones.
+// DISABLED after measurement: a compound of boxes preserves the cavity, but
+// shell-on-shell contact in Rapier 0.12 blows up — two cones stacked as 50-box
+// compounds swapped positions (lower body launched 5 -> 28.7mm) and a coarse
+// 10-box version sank the upper cone THROUGH the lower (rise -0.77mm). The
+// solver's contact parameters are not exposed in this build (integrationParameters
+// only exposes a wasm `raw` pointer), so there is nothing to soften. Gravity
+// mode therefore uses the stable convex hull; real nesting lives in the
+// stacking engine (Apilat), and a hybrid (seed the physics with the stacking
+// layout, then vibrate) is the planned route. See HANDOFF.md §4.13.
+export const USE_COMPOUND_COLLIDERS = false;
+export const COMPOUND_TARGET_CELLS = 14;  // cells across the largest dimension
+export const COMPOUND_MAX_BOXES = 96;     // above this the build bails to the hull
+
+/**
+ * Voxelise a geometry's SURFACE and merge the cells into convex boxes.
+ * Returns [{ c: [x,y,z], h: [hx,hy,hz] }] in the geometry's local coordinates
+ * (not centred — the caller shifts by the same offset it uses for the mesh),
+ * or null when the mesh is unusable / needs too many boxes.
+ */
+/**
+ * Enclosed volume of a triangle mesh (divergence theorem). For a hollow shell
+ * this is the space the part occupies — exactly what packing cares about.
+ */
+export function meshVolume(geometry) {
+    if (!geometry || !geometry.getAttribute) return 0;
+    const pos = geometry.getAttribute('position');
+    if (!pos || pos.count < 3) return 0;
+    const idx = geometry.index;
+    const tri = Math.floor((idx ? idx.count : pos.count) / 3);
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const cross = new THREE.Vector3();
+    let v = 0;
+    for (let t = 0; t < tri; t++) {
+        a.fromBufferAttribute(pos, idx ? idx.getX(t * 3) : t * 3);
+        b.fromBufferAttribute(pos, idx ? idx.getX(t * 3 + 1) : t * 3 + 1);
+        c.fromBufferAttribute(pos, idx ? idx.getX(t * 3 + 2) : t * 3 + 2);
+        cross.crossVectors(b, c);
+        v += a.dot(cross);
+    }
+    return Math.abs(v) / 6;
+}
+
+if (typeof window !== 'undefined') {
+    // dev/test hook: lets the harness rebuild compounds at other resolutions
+    window.__buildVoxelBoxCompound = (geo, opts) => buildVoxelBoxCompound(geo, opts);
+}
+
+export function buildVoxelBoxCompound(geometry, { targetCells = COMPOUND_TARGET_CELLS, maxBoxes = COMPOUND_MAX_BOXES } = {}) {
+    // A thin shell fragments badly at fine resolution, so try progressively
+    // coarser grids until the box count fits the budget instead of giving up.
+    for (const cells of [targetCells, 10, 7, 5]) {
+        const boxes = buildVoxelBoxCompoundOnce(geometry, cells, maxBoxes);
+        if (boxes) {
+            console.log(`[Bulk] compound: ${boxes.length} boxes at ${cells} cells`);
+            return boxes;
+        }
+    }
+    return null;
+}
+
+function buildVoxelBoxCompoundOnce(geometry, targetCells, maxBoxes) {
+    if (!geometry || !geometry.getAttribute) return null;
+    const pos = geometry.getAttribute('position');
+    if (!pos || pos.count < 3) return null;
+    geometry.computeBoundingBox();
+    const bb = geometry.boundingBox;
+    if (!bb) return null;
+    const size = new THREE.Vector3();
+    bb.getSize(size);
+    const maxDim = Math.max(size.x, size.y, size.z);
+    if (!(maxDim > 0) || !isFinite(maxDim)) return null;
+
+    const N = 256;                                    // grid cap per axis
+    const cell = Math.max(0.4, maxDim / targetCells, maxDim / N);
+    const pack = (i, j, k) => i + N * j + N * N * k;
+    const occupied = new Set();
+    const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+    const idx = geometry.index;
+    const triCount = Math.floor((idx ? idx.count : pos.count) / 3);
+    const step = cell * 0.45;
+
+    for (let t = 0; t < triCount; t++) {
+        const ia = idx ? idx.getX(t * 3) : t * 3;
+        const ib = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+        const ic = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+        va.fromBufferAttribute(pos, ia);
+        vb.fromBufferAttribute(pos, ib);
+        vc.fromBufferAttribute(pos, ic);
+        const e1x = vb.x - va.x, e1y = vb.y - va.y, e1z = vb.z - va.z;
+        const e2x = vc.x - va.x, e2y = vc.y - va.y, e2z = vc.z - va.z;
+        const nS = Math.max(1, Math.min(12, Math.ceil(Math.max(
+            Math.hypot(e1x, e1y, e1z), Math.hypot(e2x, e2y, e2z)) / step)));
+        for (let s1 = 0; s1 <= nS; s1++) {
+            for (let s2 = 0; s2 <= nS - s1; s2++) {
+                const w1 = s1 / nS, w2 = s2 / nS;
+                const px = va.x + w1 * e1x + w2 * e2x;
+                const py = va.y + w1 * e1y + w2 * e2y;
+                const pz = va.z + w1 * e1z + w2 * e2z;
+                const i = Math.floor((px - bb.min.x) / cell);
+                const j = Math.floor((py - bb.min.y) / cell);
+                const k = Math.floor((pz - bb.min.z) / cell);
+                if (i < 0 || j < 0 || k < 0 || i >= N || j >= N || k >= N) continue;
+                occupied.add(pack(i, j, k));
+            }
+        }
+    }
+    if (occupied.size === 0) return null;
+
+    // Greedy merge: take the lowest cell, grow +X, then +Z, then +Y.
+    const cells = Array.from(occupied).sort((a, b) => a - b);
+    const boxes = [];
+    for (const v of cells) {
+        if (!occupied.has(v)) continue;
+        const i0 = v % N, j0 = Math.floor(v / N) % N, k0 = Math.floor(v / (N * N));
+        let ex = i0;
+        while (occupied.has(pack(ex + 1, j0, k0))) ex++;
+        let ez = k0;
+        growZ: while (true) {
+            for (let x = i0; x <= ex; x++) if (!occupied.has(pack(x, j0, ez + 1))) break growZ;
+            ez++;
+        }
+        let ey = j0;
+        growY: while (true) {
+            for (let x = i0; x <= ex; x++) {
+                for (let z = k0; z <= ez; z++) if (!occupied.has(pack(x, ey + 1, z))) break growY;
+            }
+            ey++;
+        }
+        for (let x = i0; x <= ex; x++) {
+            for (let y = j0; y <= ey; y++) {
+                for (let z = k0; z <= ez; z++) occupied.delete(pack(x, y, z));
+            }
+        }
+        boxes.push({
+            c: [
+                bb.min.x + (i0 + ex + 1) / 2 * cell,
+                bb.min.y + (j0 + ey + 1) / 2 * cell,
+                bb.min.z + (k0 + ez + 1) / 2 * cell,
+            ],
+            h: [(ex - i0 + 1) / 2 * cell, (ey - j0 + 1) / 2 * cell, (ez - k0 + 1) / 2 * cell],
+        });
+        if (boxes.length > maxBoxes) return null;     // too fragmented → hull fallback
+    }
+    return boxes;
+}
+
 /**
  * Initialize Rapier physics engine
  * @returns {Promise<boolean>}
@@ -24,6 +200,80 @@ export async function initRapier() {
     } catch (error) {
         console.error('Failed to initialize Rapier:', error);
         return false;
+    }
+}
+
+/**
+ * VERIFY a candidate resting pose with real gravity (no drop / no bounce):
+ * place the piece on the floor at the proposed orientation and check whether it
+ * stays put or tips/rolls away. The COM is handled by physics automatically —
+ * an unstable pose tips over, a stable one does not. This is the honest check
+ * for the "put it on the floor, then apply gravity" workflow.
+ * @param {THREE.BufferGeometry} geometry - the piece (assumed centered at origin)
+ * @param {THREE.Quaternion} quaternion - the proposed resting orientation
+ * @param {{maxSteps?:number, tippedThresholdDeg?:number}} opts
+ * @returns {Promise<{stable:boolean, tippedDeg?:number, error?:string}>}
+ */
+export async function verifyRestPose(geometry, quaternion, opts = {}) {
+    const maxSteps = opts.maxSteps || 150;
+    const tippedThresholdDeg = opts.tippedThresholdDeg || 20.0;
+    try {
+        if (!RAPIER) { const ok = await initRapier(); if (!ok) return { stable: true, error: 'no-rapier' }; }
+        const pos = geometry.getAttribute('position');
+        if (!pos || pos.count < 12) return { stable: true, error: 'few-verts' };
+        const verts = new Float32Array(pos.count * 3);
+        for (let i = 0; i < pos.count; i++) {
+            verts[i * 3] = pos.getX(i); verts[i * 3 + 1] = pos.getY(i); verts[i * 3 + 2] = pos.getZ(i);
+        }
+        // Triangle indices (support indexed + non-indexed geometries).
+        const geoIndex = geometry.getIndex ? geometry.getIndex() : null;
+        const indices = new Uint32Array(geoIndex ? geoIndex.count : pos.count);
+        if (geoIndex) { for (let i = 0; i < geoIndex.count; i++) indices[i] = geoIndex.getX(i); }
+        else { for (let i = 0; i < indices.length; i++) indices[i] = i; }
+        // Rotated lowest point -> place the bottom just on the floor (no drop).
+        const v = new THREE.Vector3(); let minY = Infinity;
+        for (let i = 0; i < verts.length; i += 3) {
+            v.set(verts[i], verts[i + 1], verts[i + 2]).applyQuaternion(quaternion);
+            if (v.y < minY) minY = v.y;
+        }
+        const world = new RAPIER.World({ x: 0, y: -9810, z: 0 });
+        world.timestep = 1 / 240;
+        // Large floor only (no walls) — the piece is free to tip/roll.
+        const floor = world.createRigidBody(
+            RAPIER.RigidBodyDesc.fixed().setTranslation(0, -8, 0));
+        world.createCollider(RAPIER.ColliderDesc.cuboid(4000, 8, 4000), floor);
+        const body = world.createRigidBody(
+            RAPIER.RigidBodyDesc.dynamic()
+                .setTranslation(0, -minY, 0)
+                .setRotation({ x: quaternion.x, y: quaternion.y, z: quaternion.z, w: quaternion.w }));
+        // ACCURATE trimesh collider (exact shape) so tapering/concave parts tip
+        // correctly — the convex hull over-stabilised them (its flat hull base
+        // "rested" where the real piece falls). Fall back to convex hull only if
+        // Rapier can't build the trimesh.
+        let cdesc = null;
+        try {
+            cdesc = RAPIER.ColliderDesc.trimesh(verts, indices)
+                .setDensity(2.0).setFriction(0.9).setRestitution(0.0);
+        } catch (e) { cdesc = null; }
+        if (!cdesc) {
+            try {
+                cdesc = RAPIER.ColliderDesc.convexHull(verts)
+                    .setDensity(2.0).setFriction(0.9).setRestitution(0.0);
+            } catch (e) { cdesc = null; }
+        }
+        if (!cdesc) return { stable: true, error: 'no-collider' };
+        world.createCollider(cdesc, body);
+        for (let i = 0; i < maxSteps; i++) world.step();
+        // Compare the body's actual up-axis to the intended pose's up-axis.
+        const rot = body.rotation();
+        const up = new THREE.Vector3(0, 1, 0).applyQuaternion(
+            new THREE.Quaternion(rot.x, rot.y, rot.z, rot.w));
+        const intendedUp = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion);
+        const tippedDeg = THREE.MathUtils.radToDeg(up.angleTo(intendedUp));
+        return { stable: tippedDeg < tippedThresholdDeg, tippedDeg: +tippedDeg.toFixed(1) };
+    } catch (e) {
+        console.warn('[Orientation] gravity verify failed:', e?.message || e);
+        return { stable: true, error: 'physics-error' }; // don't block; keep static label
     }
 }
 
@@ -61,6 +311,8 @@ export class PhysicsWorld {
         this.vibrationFrequencyJitter = 0.25; // +/- 25%
         this.vibrationAmplitudeJitter = 0.35; // +/- 35%
         this.vibrationNoise = 0.15; // mm random jitter per step
+        this.vibrationLateral = 0.25; // "wind": 1 = shake all axes, 0.25 = mostly vertical
+        this.vibrationFade = 1.0;     // "fade": extra amplitude scale (falls as the box fills)
 
         // Settle detection thresholds (configurable per-mode)
         this.settleVelocityThreshold = 5.0; // mm/s
@@ -207,6 +459,115 @@ export class PhysicsWorld {
     }
 
     /**
+     * Concave (exact triangle-mesh) collider — REQUIRED for real nesting: a
+     * hollow cone only slides into another hollow cone if the collider is the
+     * actual surface. A convex hull is a SOLID copy of the part, so two hulls
+     * can never interpenetrate and the pieces always sit on top of each other
+     * (that is why "cones never fit together" in bulk mode).
+     *
+     * Rapier trimesh colliders on dynamic bodies are heavier and can tunnel
+     * through thin walls, so they are used only for light meshes (see
+     * MAX_CONCAVE_TRIS) with CCD enabled.
+     */
+    addConcaveMesh(vertices, indices, position, rotation = null, mesh = null, meshOffset = null, options = {}) {
+        let colliderDesc = null;
+        try {
+            const flags = RAPIER.TriMeshFlags ? RAPIER.TriMeshFlags.FIX_INTERNAL_EDGES : undefined;
+            colliderDesc = flags !== undefined
+                ? RAPIER.ColliderDesc.trimesh(vertices, indices, flags)
+                : RAPIER.ColliderDesc.trimesh(vertices, indices);
+        } catch (e) {
+            colliderDesc = null;
+        }
+        if (!colliderDesc) {
+            // Rapier rejected the mesh — the hull path is always valid.
+            return this.addConvexHull(vertices, position, rotation, mesh, meshOffset, options);
+        }
+
+        const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+            .setTranslation(position.x, position.y, position.z)
+            .setLinearDamping(0.2)
+            .setAngularDamping(0.5)
+            // NO CCD on triangle-mesh colliders: continuous collision detection
+            // against a trimesh is extremely expensive in Rapier's solver and
+            // was the bulk sim's dominant cost (thousands of steps took
+            // minutes). Pieces spawn just above the pile now, so speeds are
+            // low and tunnelling is unlikely.
+            .setCcdEnabled(false);
+        if (rotation) {
+            const quat = new THREE.Quaternion().setFromEuler(rotation);
+            bodyDesc.setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w });
+        }
+        const body = this.world.createRigidBody(bodyDesc);
+
+        if (mesh) {
+            mesh.position.set(position.x, position.y, position.z);
+            if (rotation) {
+                const quat = new THREE.Quaternion().setFromEuler(rotation);
+                mesh.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+            }
+            this.meshBodies.push({ body, mesh, offset: meshOffset });
+        }
+
+        colliderDesc.setDensity(2.0).setFriction(0.8).setRestitution(0.0);
+        this.world.createCollider(colliderDesc, body);
+
+        // Open shells have no well-defined volume, so the mass derived from
+        // the density can come out 0/NaN (body then ignores gravity). Give it
+        // an explicit mass in that case so it behaves like the hull fallback.
+        try {
+            const m = body.mass();
+            if (!Number.isFinite(m) || m <= 0) {
+                body.setAdditionalMass(Math.max(1e-4, options?.fallbackMass ?? 0.05), true);
+            }
+        } catch (e) { /* older rapier builds have no mass() */ }
+
+        return body;
+    }
+
+    /**
+     * One dynamic body carrying a COMPOUND of convex boxes (the nesting
+     * collider). Unlike a trimesh collider the parts are convex, so Rapier
+     * derives exact mass properties from them — no flaky ejections — while the
+     * union of the boxes still has the part's cavity, so hollow parts nest.
+     */
+    addCompoundBoxes(boxes, position, rotation = null, mesh = null, meshOffset = null, options = {}) {
+        if (!boxes || boxes.length === 0) return null;
+        const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+            .setTranslation(position.x, position.y, position.z)
+            .setLinearDamping(0.2)
+            .setAngularDamping(0.5)
+            // Boxes are convex and pieces spawn just above the pile, so CCD
+            // (expensive) is not needed here.
+            .setCcdEnabled(false);
+        if (rotation) {
+            const quat = new THREE.Quaternion().setFromEuler(rotation);
+            bodyDesc.setRotation({ x: quat.x, y: quat.y, z: quat.z, w: quat.w });
+        }
+        const body = this.world.createRigidBody(bodyDesc);
+
+        if (mesh) {
+            mesh.position.set(position.x, position.y, position.z);
+            if (rotation) {
+                const quat = new THREE.Quaternion().setFromEuler(rotation);
+                mesh.quaternion.set(quat.x, quat.y, quat.z, quat.w);
+            }
+            this.meshBodies.push({ body, mesh, offset: meshOffset });
+        }
+
+        const density = options?.density ?? 2.0;
+        for (const b of boxes) {
+            const cd = RAPIER.ColliderDesc.cuboid(b.h[0], b.h[1], b.h[2])
+                .setTranslation(b.c[0], b.c[1], b.c[2])
+                .setDensity(density)
+                .setFriction(0.8)
+                .setRestitution(0.0);
+            this.world.createCollider(cd, body);
+        }
+        return body;
+    }
+
+    /**
      * Create a kinematic box collider (can be moved for vibration)
      */
     createKinematicBox(px, py, pz, hx, hy, hz) {
@@ -298,7 +659,7 @@ export class PhysicsWorld {
             
             const fLow = baseFreq * phase.freqScale;
             const fHigh = fLow * 3.7; // high-frequency settle component
-            const amp = baseAmp * phase.ampScale * env;
+            const amp = baseAmp * phase.ampScale * env * this.vibrationFade;
             const noise = (Math.random() * 2 - 1) * this.vibrationNoise * env;
 
             // Horizontal (X): full multi-frequency + thump
@@ -315,8 +676,13 @@ export class PhysicsWorld {
                        0.5 * Math.sin(2 * Math.PI * fHigh * t + phase.pz * 0.6) +
                        thump * 0.6 * Math.sin(2 * Math.PI * fLow * 0.5 * t + phase.pz * 1.3 + 1.0);
 
-            const offsetX = amp * jx + noise;
-            const offsetZ = amp * jz + noise;
+            // "Wind" (a trick borrowed from the square-packing lab): real
+            // shaker tables shake mostly VERTICALLY — pieces lift and drop into
+            // the cavities instead of skating sideways out of them. Lateral
+            // components are damped (1 = shake every axis, 0 = vertical only).
+            const lateral = this.vibrationLateral;
+            const offsetX = (amp * jx + noise) * lateral;
+            const offsetZ = (amp * jz + noise) * lateral;
             let offsetY = amp * jy + noise * 0.5;
             if (i === 0) offsetY = amp * 0.35 * jy; // Floor: light vertical only
 
@@ -582,22 +948,45 @@ export class PhysicsWorld {
     }
 
     /**
+     * Pieces still in flight (moving faster than a settled piece). Used to
+     * pace the pour: dropping while several pieces are mid-air both stacks
+     * them into unrealistic towers and makes the "box is full" count lag
+     * behind reality, so the pour overshot (8 wasted pieces for 56 that fit).
+     */
+    piecesInFlight(threshold = 150) {
+        let n = 0;
+        for (const { body } of this.meshBodies) {
+            if (!body || !body.isValid || !body.isValid()) continue;
+            const v = body.linvel();
+            if (Math.hypot(v.x, v.y, v.z) > threshold) n++;
+        }
+        return n;
+    }
+
+    /**
      * Count pieces that are inside the box
      */
     countPiecesInBox() {
         if (!this.boxDims) return 0;
         
-        let count = 0;
         const { length, width, height } = this.boxDims;
-        const margin = 10; // tolerance
+        // A piece counts as INSIDE when its footprint is over the box AND its
+        // centre is below the rim. Older rules were far too generous: the
+        // centre with a +20mm vertical margin (80% of a 25mm box) counted
+        // pieces perched well above the walls, and even "lowest point below
+        // the rim" counted the whole overflow pile — reporting 108 cones in a
+        // 25³ box, which is volumetrically impossible.
+        const tol = 5;                                              // wall tolerance
+        const halfH = this.pieceDims ? Math.max(1, this.pieceDims.h) / 2 : 5;
+        let count = 0;
         
         for (const { body } of this.meshBodies) {
             if (!body.isValid()) continue;
             const pos = body.translation();
-            // Check if mostly inside box
-            if (pos.x > -margin && pos.x < length + margin &&
-                pos.z > -margin && pos.z < width + margin &&
-                pos.y > -margin && pos.y < height + margin * 2) {
+            if (pos.x > -tol && pos.x < length + tol &&
+                pos.z > -tol && pos.z < width + tol &&
+                pos.y < height + 1 &&                               // centre below the rim
+                pos.y - halfH > -halfH) {                           // not below the floor
                 count++;
             }
         }
@@ -683,8 +1072,13 @@ export class PhysicsWorld {
         else if (strictness === 2) {
             const wallTol = 5;
             const horizOutside = maxX < -wallTol || minX > length + wallTol || maxZ < -wallTol || minZ > width + wallTol;
-            const heightTolerance = pieceDims ? Math.min(20, pieceDims.h * 0.3) : 20;
-            shouldRemove = completelyOutside || horizOutside || maxY > height + heightTolerance;
+            // A filled box has its top layer AT (or just over) the rim — those
+            // pieces are legitimately inside. Removing them by maxY (the old
+            // rule, tolerance pieceDims.h*0.3) halved the reported fill: the
+            // count peaked at 119 and the final cleanup left 60. Only pieces
+            // whose LOWEST point is above the rim are actually floating outside.
+            const floatingAbove = minY > height + 2;
+            shouldRemove = completelyOutside || horizOutside || floatingAbove;
         }
         
         if (shouldRemove) {
@@ -1055,12 +1449,13 @@ export class BulkSimulation {
         // Saturation detection - stop if no new pieces enter box after X drops
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
-        this.maxStagnantDrops = 6; // Stop after 6 consecutive checks without increase
-        this.checkInterval = 15; // Check every 15 drops
+        this._recentInside = [];   // rolling inside-count window for the "full" test
+        this.maxStagnantDrops = 1; // kept for the single-check path
+        this.checkInterval = 2; // check every 2 drops: 6 x 15 = 90 wasted pours before
         
         // Track pieces above box to detect overflow faster
         this.piecesAboveBox = 0;
-        this.maxPiecesAboveBox = 6; // If 6+ pieces are stuck above, box is full
+        this.maxPiecesAboveBox = 2; // 2+ pieces settled above the rim = the box is full
         
         // 20 distinct colors for pieces - configurable
         this.pieceColors = [
@@ -1102,7 +1497,15 @@ export class BulkSimulation {
         this.maxRefillCycles = 1; // Single refill, single final lid press
 
         // Enable lid press for compaction between cycles
-        this.enableLidPress = true;
+        // Lid press: DISABLED. It has no UI control (it was removed from the
+        // panel while this flag stayed true) and the implementation is a
+        // kinematic crush: the lid descends unconditionally to the box height,
+        // squeezing pieces INTO each other. Measured in the deterministic
+        // harness: the inside count jumped 61 -> 94 during the press, and 94
+        // hull cones below the rim of a 25^3 box is ~98% volumetric fill —
+        // impossible without nesting. The vibration + settle phases do the
+        // real compaction; a lid can come back later as a force-limited press.
+        this.enableLidPress = false;
     }
 
     /**
@@ -1140,6 +1543,7 @@ export class BulkSimulation {
         this.overflowCount = 0;
         this.lastInsideCount = 0;
         this.stagnantDrops = 0;
+        this._recentInside = [];   // fresh rolling window for this run
         this.allDropped = false;
         this.settlingTimeoutMs = settlingTimeoutMs;
         this.colorCount = Math.min(colorCount, this.pieceColors.length);
@@ -1155,8 +1559,74 @@ export class BulkSimulation {
             this.stlVertices = new Float32Array(positions.array);
         }
 
+        // Concave colliders (real nesting) are per-piece and budgeted.
+        this._concaveTris = 0;
+        const pieceTris = this.stlVertices ? Math.floor(this.stlVertices.length / 9) : 0;
+        this.concaveColliders = USE_CONCAVE_COLLIDERS
+            && pieceTris > 0 && pieceTris <= MAX_CONCAVE_TRIS;
+
+        // Nesting collider: a compound of convex boxes built ONCE from the
+        // mesh surface (the cavity survives, so hollow parts can nest).
+        this._colliderBoxes = null;
+        if (USE_COMPOUND_COLLIDERS && stlGeometry) {
+            try {
+                const t0 = performance.now();
+                this._colliderBoxes = buildVoxelBoxCompound(stlGeometry);
+                if (this._colliderBoxes) {
+                    console.log(`[Bulk] compound built in ${(performance.now() - t0).toFixed(0)}ms`);
+                }
+            } catch (e) {
+                console.warn('[Bulk] compound build failed:', e?.message || e);
+                this._colliderBoxes = null;
+            }
+        }
+        // Random packing of rigid parts fills ~64% of the box volume (measured:
+        // 59 cones x 170mm3 = 10,030mm3 in a 15,625mm3 box). Combined with the
+        // plateau test this gives an honest "the box is full" signal that stops
+        // the pour BEFORE a pile of rejects builds up.
+        console.log(`[Bulk] collider: ${this._colliderBoxes
+            ? `compound of ${this._colliderBoxes.length} convex boxes — nesting enabled`
+            : 'convex hull — stable, no nesting'} (${pieceTris} tris/piece)`);
+
         // Initialize physics world
         await this.physics.init(boxDims);
+
+        // ── Volume capacity (must run AFTER physics.init: the probe needs the
+        // Rapier world) ──
+        // Volume of the piece's CONVEX HULL, read straight from Rapier: a
+        // temporary convex collider's mass at density 2.0 / 2.0 is its volume.
+        // (meshVolume() is unreliable here — our hand-built shells have mixed
+        // winding, so the signed volume cancels to ~0.) This drives the
+        // "the box is full" stop, so it MUST actually run: it used to sit
+        // before physics.init, threw on the missing world, and silently left
+        // volumeCapacity at 0 — the pour then overshot every time (waste
+        // swinging 6-14% run to run).
+        this.pieceVolume = 0;
+        if (stlGeometry) {
+            try {
+                const pos = stlGeometry.getAttribute('position');
+                if (pos && pos.count >= 12) {
+                    const probeDesc = RAPIER.ColliderDesc.convexHull(new Float32Array(pos.array));
+                    if (probeDesc) {
+                        probeDesc.setDensity(2.0);
+                        const probeBody = this.physics.world.createRigidBody(RAPIER.RigidBodyDesc.dynamic());
+                        this.physics.world.createCollider(probeDesc, probeBody);
+                        const m = probeBody.mass();
+                        this.physics.world.removeRigidBody(probeBody);
+                        if (Number.isFinite(m) && m > 0) this.pieceVolume = m / 2.0;
+                    }
+                }
+            } catch (e) {
+                console.warn('[Bulk] hull volume probe failed:', e?.message || e);
+            }
+        }
+        this.volumeCapacity = 0;
+        if (this.pieceVolume > 0 && boxDims) {
+            const boxVol = boxDims.length * boxDims.width * boxDims.height;
+            this.volumeCapacity = (boxVol / this.pieceVolume) * 0.65;
+            console.log(`[Bulk] capacity estimate: ${this.volumeCapacity.toFixed(0)} pieces ` +
+                        `(piece ${this.pieceVolume.toFixed(0)}mm3, box ${boxVol.toFixed(0)}mm3, 65% fill)`);
+        }
 
         // Invisible ceiling above the drop point: pieces fall from well above
         // the box walls and small/light pieces can bounce over them. The
@@ -1213,6 +1683,11 @@ export class BulkSimulation {
         this.hasRefilled = false;
         this.hasPressedLid = false;
         this.currentCycle = 1;
+
+        // Cycle bookkeeping for the "is the box full?" yield test: how many
+        // pieces were already inside / already dropped when this cycle began.
+        this.cycleStartInside = this.physics.countPiecesInBox();
+        this.cycleStartDropped = this.droppedCount;
         
         // Clear any existing timeout
         if (this.settlingTimeout) {
@@ -1221,10 +1696,21 @@ export class BulkSimulation {
         }
         
         // Start dropping pieces at intervals
-        this.dropInterval = setInterval(() => this.dropPiece(), this.dropIntervalMs);
+        // Paced pour: skip a tick while too many pieces are still falling.
+        // This is what an operator does (drop, wait, drop) and it keeps the
+        // inside-count honest at the moment the full-box test runs.
+        this.maxInFlight = 2;
+        this.dropInterval = setInterval(() => {
+            if (this.physics.piecesInFlight() >= this.maxInFlight) return;
+            this.dropPiece();
+        }, this.dropIntervalMs);
         
         // Apply constant vibration during dropping to help pieces settle
         // The vibration should stop when the drop phase ends (managed in stop/reset)
+        // Gentle constant vibration while pouring (helps pieces slide into
+        // place instead of pyramiding), then the staged burst+settle after the
+        // drop phase (see finishDropping).
+        this.physics.vibrationAmplitude = 0.35;
         this.physics.startVibration(3600000); // 1 hour (effectively until stopped)
         
         // Start physics update loop
@@ -1315,7 +1801,29 @@ export class BulkSimulation {
         
         const x = safeMargin + Math.random() * validLength;
         const z = safeMargin + Math.random() * validWidth;
-        const y = height + this.dropHeight + Math.random() * 100;
+
+        // Spawn just above the SETTLED pile (or at the box rim while the box is
+        // still mostly empty) instead of `dropHeight` above the walls. A long
+        // free-fall makes pieces bounce straight back out — a big share of the
+        // rejected pieces came from there — and they land too hard to slide
+        // into the cavities below. A short, pile-following drop is both
+        // realistic and far more efficient.
+        // Spawn floor = the highest piece, settled OR still falling. Using
+        // only SETTLED pieces (maxPieceY) let a new piece materialise inside
+        // one that was still in the air — an immediate deep overlap that the
+        // solver answers with an explosion (pieces flew to y=-967 in testing).
+        let highestPieceY = -Infinity;
+        for (const { body } of this.physics.meshBodies) {
+            if (!body || !body.isValid || !body.isValid()) continue;
+            const p = body.translation();
+            if (p.y > highestPieceY) highestPieceY = p.y;
+        }
+        const pileRef = Number.isFinite(highestPieceY) ? Math.max(highestPieceY, 0) : 0;
+        const spawnGap = Math.max(8, Math.max(l, w, h) * 1.2);
+        const y = Math.min(
+            Math.max(pileRef + spawnGap, height * 0.95),
+            height + this.dropHeight
+        ) + Math.random() * 6;
 
         const position = new THREE.Vector3(x, y, z);
         
@@ -1370,8 +1878,37 @@ export class BulkSimulation {
             this.scene.scene.add(mesh);
             this.scene.pieces.push(mesh);
 
-            // Add to physics as convex hull (centered vertices)
-            this.physics.addConvexHull(centeredVerts, position, rotation, mesh);
+            // Collider choice, best first:
+            //  1. COMPOUND of convex boxes — has the cavity (nesting) and exact
+            //     mass properties (stable). Built once in init().
+            //  2. concave trimesh — same cavity, but flaky on dynamic bodies
+            //     (gated off by default).
+            //  3. convex hull — solid copy: stable and fast, but no nesting.
+            const posAttr = geometry.getAttribute('position');
+            const triCount = Math.floor(posAttr.count / 3);
+            const concaveOk = USE_CONCAVE_COLLIDERS
+                && triCount > 0
+                && triCount <= MAX_CONCAVE_TRIS
+                && ((this._concaveTris || 0) + triCount) <= MAX_CONCAVE_TOTAL_TRIS;
+            if (this._colliderBoxes && this._colliderBoxes.length) {
+                // Shift the boxes into the same centred frame as the visual
+                // mesh (the geometry above was translated by -cx,-cy,-cz).
+                const shifted = this._colliderBoxes.map(b => ({
+                    c: [b.c[0] - cx, b.c[1] - cy, b.c[2] - cz],
+                    h: b.h,
+                }));
+                this.physics.addCompoundBoxes(shifted, position, rotation, mesh);
+            } else if (concaveOk) {
+                const verts = new Float32Array(posAttr.array); // already centered
+                const idx = geometry.index
+                    ? new Uint32Array(geometry.index.array)
+                    : Uint32Array.from({ length: posAttr.count }, (_, i) => i);
+                this._concaveTris = (this._concaveTris || 0) + triCount;
+                this.physics.addConcaveMesh(verts, idx, position, rotation, mesh);
+            } else {
+                // Convex hull (centered vertices) — stable fallback, no nesting.
+                this.physics.addConvexHull(centeredVerts, position, rotation, mesh);
+            }
         } else {
             // Use simple cuboid
             const geometry = new THREE.BoxGeometry(l, h, w);
@@ -1409,6 +1946,13 @@ export class BulkSimulation {
             const currentInside = this.physics.countPiecesInBox();
             const piecesAbove = this.countPiecesAboveBox();
 
+            // "Fade" (square-packing-lab trick): shake less as the box fills.
+            // A nearly full box wants gentle settling, not agitation — strong
+            // shaking at the end just bounces pieces back out.
+            const capEst = Math.max(1, Math.floor(
+                (length * width * height) / Math.max(1, l * w * h)));
+            this.physics.vibrationFade = Math.max(0.35, 1 - (currentInside / capEst) * 0.65);
+
             // Fast detection: if pieces are piling above the box, it's full
             if (piecesAbove >= this.maxPiecesAboveBox) {
                 console.log(`Box full: ${piecesAbove} pieces stuck above box`);
@@ -1416,19 +1960,49 @@ export class BulkSimulation {
                 return;
             }
 
-            if (currentInside <= this.lastInsideCount) {
-                // No new pieces entered the box
-                this.stagnantDrops++;
-                console.log(`Saturation check: ${currentInside} inside, stagnant: ${this.stagnantDrops}/${this.maxStagnantDrops}`);
+            // ── Is the box full? ──
+            // A single "no growth since the last check" test is not enough:
+            // near the top the count creeps up one piece at a time (one lands,
+            // one bounces out), so the counter keeps resetting and the pour
+            // runs long (measured: 75 poured for 59 that fit = 21% waste).
+            // Instead: a rolling window of the last few checks, and the pile
+            // must ALSO have reached the rim — otherwise a transient
+            // bounce-stall would end the fill early (the "pile touched the top
+            // while the box is still empty" trap).
+            this._recentInside.push(currentInside);
+            if (this._recentInside.length > 3) this._recentInside.shift();
+            const pileTop = this.maxPieceY();
+            const pileAtRim = Number.isFinite(pileTop) && pileTop >= height * 0.85;
+            const windowGain = this._recentInside.length >= 3
+                ? this._recentInside[this._recentInside.length - 1] - this._recentInside[0]
+                : Infinity;
+            if (currentInside > this.lastInsideCount) this.lastInsideCount = currentInside;
 
-                if (this.stagnantDrops >= this.maxStagnantDrops) {
-                    this.finishDropping('saturated');
-                    return;
-                }
-            } else {
-                // Progress made, reset counter
-                this.stagnantDrops = 0;
-                this.lastInsideCount = currentInside;
+            // Stop a little BELOW the estimated capacity: pieces already in
+            // flight still land after the stop, so aiming at 90% of the
+            // estimate overshot (measured waste 6.3% one run, 12.1% the next).
+            // 85% keeps the waste under the 10% target run-to-run while giving
+            // up at most a piece or two of fill.
+            const volumeFull = this.volumeCapacity > 4
+                && currentInside >= this.volumeCapacity * 0.85;
+            if (volumeFull) {
+                console.log(`Box full: ${currentInside} inside >= 95% of the volume capacity ` +
+                            `(${this.volumeCapacity.toFixed(0)}) — stopping the pour`);
+                this.finishDropping('saturated');
+                return;
+            }
+            // NOTE: the old "pile reached the rim AND the count stopped
+            // growing" stop is GONE. Cones pyramid: with only 21 pieces in a
+            // 25^3 box the pile already touches the rim while the box is a
+            // third full, so it stopped the pour far too early (measured 21 of
+            // ~58). The honest signals are the volume capacity above and the
+            // pieces-above-the-rim overflow test below.
+            if (pileAtRim && windowGain <= 1 && this.volumeCapacity > 4
+                    && currentInside >= this.volumeCapacity * 0.7) {
+                console.log(`Box full: ${currentInside} inside, gain ${windowGain}, ` +
+                            `pileTop=${pileTop.toFixed(1)} — stopping the pour`);
+                this.finishDropping('saturated');
+                return;
             }
         }
 
@@ -1544,10 +2118,20 @@ export class BulkSimulation {
         // 1. PRE-CLEANUP (Level 0: only completely outside)
         const removed = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 0);
         
-        // 2. START VIBRATION (more aggressive for better compaction)
+        // 2. START VIBRATION — staged like a real shaker table: a strong burst
+        //    breaks bridges and opens gaps, then a GENTLE phase lets the pieces
+        //    settle down into the cavities. Constant strong shaking keeps them
+        //    dancing on top of each other and they never nest.
         this.vibrationPhase = true;
-        this.physics.vibrationAmplitude = 1.0; // Stronger vibration between cycles
-        this.physics.startVibration(8000); // 8 seconds of vibration
+        this.physics.vibrationAmplitude = 1.6;
+        this.physics.vibrationFrequency = 11.0;
+        this.physics.startVibration(3000); // strong burst
+        setTimeout(() => {
+            if (!this.isRunning || !this.vibrationPhase) return;
+            this.physics.vibrationAmplitude = 0.45;
+            this.physics.vibrationFrequency = 7.0;
+            this.physics.startVibration(4000); // gentle settling
+        }, 3000);
         
         if (this.onStatusUpdate) {
             this.onStatusUpdate({
@@ -1643,11 +2227,28 @@ export class BulkSimulation {
         // Final Cleanup for this cycle (Relaxed Level 0)
         const semiRemoved = this.physics.removePiecesOutsideBox(this.scene, this.pieceDims, 0);
         const currentCount = this.physics.countPiecesInBox();
-        
+
+        // ── Is the box actually FULL? ──
+        // A full box stops accepting pieces: whatever is poured on top ends up
+        // outside. The honest signal is the YIELD of the cycle (how many pieces
+        // actually stayed inside while it ran). Refilling a box that accepted
+        // almost nothing only produces rejected pieces ("removed: 176").
+        const insideAtCycleStart = this.cycleStartInside || 0;
+        const droppedThisCycle = this.droppedCount - (this.cycleStartDropped || 0);
+        const yieldThisCycle = currentCount - insideAtCycleStart;
+        const acceptRate = droppedThisCycle > 0 ? yieldThisCycle / droppedThisCycle : 1;
+        const boxFull = droppedThisCycle > 0
+            && (yieldThisCycle < Math.max(3, Math.round(droppedThisCycle * 0.2)) || acceptRate < 0.35);
+        if (boxFull) {
+            console.log(`[Bulk] Box full: +${yieldThisCycle} inside of ${droppedThisCycle} dropped ` +
+                        `(${(acceptRate * 100).toFixed(0)}% accepted) — no refill`);
+        }
+
         // DECIDE IF WE NEED ANOTHER CYCLE
-        // We refill if: we haven't reached max cycles AND (we removed many pieces OR there's a lot of space)
-        const shouldRefill = this.currentCycle <= this.maxRefillCycles;
-        
+        // We refill if: we haven't reached max cycles AND the box still accepts
+        // pieces (see boxFull above).
+        const shouldRefill = this.currentCycle <= this.maxRefillCycles && !boxFull;
+
         if (shouldRefill) {
             this.currentCycle++;
             
@@ -1664,6 +2265,12 @@ export class BulkSimulation {
                 const approxCapacity = Math.max(1, Math.floor(boxVol / pieceVol));
                 refillCount = Math.min(refillCount, Math.max(50, approxCapacity * 2));
             }
+            // …and the bbox estimate still overestimates capacity 3-5x for
+            // hollow/nesting parts. Top up with what the box actually accepted
+            // this cycle (plus a margin): pouring 488 pieces into a box that
+            // fits ~360 is what created the pile of rejected pieces.
+            const topUp = Math.max(15, Math.ceil(yieldThisCycle * 1.35));
+            refillCount = Math.min(refillCount, topUp);
             
             if (this.onStatusUpdate) {
                 this.onStatusUpdate({
@@ -1698,6 +2305,10 @@ export class BulkSimulation {
     startRefill(count) {
         this.refillTarget = count;
         this.refillDropped = 0;
+
+        // Snapshot for the next cycle's yield test (see finishSimulation).
+        this.cycleStartInside = this.physics.countPiecesInBox();
+        this.cycleStartDropped = this.droppedCount;
         
         // Reset flags for the new drop phase
         this.allDropped = false; 
@@ -1720,6 +2331,7 @@ export class BulkSimulation {
                 this.finishDropping('refill');
                 return;
             }
+            if (this.physics.piecesInFlight() >= (this.maxInFlight || 2)) return;  // paced
             this.dropPiece();
             this.refillDropped++;
         }, this.dropIntervalMs);

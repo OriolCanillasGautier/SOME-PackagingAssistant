@@ -1363,6 +1363,61 @@ button {
     box-shadow: var(--shadow-md);
 }
 
+/* ── Cross-section (tall) controls ── */
+.section-controls {
+    position: absolute;
+    top: 54px;
+    right: 12px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 10px;
+    background: rgba(15, 23, 42, 0.78);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 999px;
+    box-shadow: var(--shadow-md);
+}
+
+.section-label {
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    color: #f59e0b;
+}
+
+.section-axis-btn {
+    width: 26px;
+    height: 24px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    background: transparent;
+    color: rgba(255, 255, 255, 0.8);
+    font-size: 0.68rem;
+    font-weight: 700;
+    border-radius: 999px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+}
+
+.section-axis-btn:hover {
+    background: rgba(255, 255, 255, 0.12);
+}
+
+.section-axis-btn.active {
+    background: var(--accent, #3b82f6);
+    border-color: var(--accent, #3b82f6);
+    color: #fff;
+}
+
+#section-slider {
+    width: 130px;
+    accent-color: #f59e0b;
+    cursor: pointer;
+}
+
 .view-btn {
     padding: 6px 10px;
     border: none;

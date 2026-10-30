@@ -34,9 +34,6 @@ except ImportError:
 try:
     from numba import cuda
     HAS_CUDA = cuda.is_available()
-    if HAS_CUDA:
-        sys.path.insert(0, str(Path(__file__).parent / "physics-engine"))
-        from packer_gpu_voxel import generate_orientations, pack, verify
 except Exception as e:
     HAS_CUDA = False
     print(f"[server] WARNING: CUDA/GPU packer not available: {e}")
@@ -44,6 +41,25 @@ except Exception as e:
 # BestPacker doesn't need CUDA — available unconditionally
 sys.path.insert(0, str(Path(__file__).parent / "physics-engine"))
 from packer_best import BestPacker
+
+# packer_gpu_voxel's names are imported UNCONDITIONALLY: verify() and
+# generate_orientations() are CPU paths and run_packing_job calls verify()
+# even on a GPU-less machine. Importing the module never initializes the
+# driver — only launching its voxel kernels does (pack_sparrow / the voxel
+# pack raise the clear "GPU no disponible" message there).
+try:
+    from packer_gpu_voxel import generate_orientations, pack, verify
+except Exception as e:
+    print(f"[server] WARNING: packer_gpu_voxel unavailable: {e}")
+
+    def verify(meshes):
+        return True
+
+    def generate_orientations(*args, **kwargs):
+        return []
+
+    def pack(*args, **kwargs):
+        raise RuntimeError("GPU no disponible (driver NVIDIA no carregat)")
 
 import trimesh
 import numpy as np
@@ -119,6 +135,23 @@ def _fast_volume(verts, faces):
     v1 = verts[faces[:, 1]]
     v2 = verts[faces[:, 2]]
     return float(np.einsum('ij,ij->i', v0, np.cross(v1, v2)).sum() / 6.0)
+
+
+def _mesh_fill_volume(mesh):
+    """Robust per-piece volume for the fill% metric. Uses the convex-hull
+    (outer envelope) volume so hollow / open-shell parts report a meaningful,
+    always-positive fill instead of a near-zero (thin wall) or negative
+    (open shell) mesh.volume."""
+    try:
+        v = float(mesh.volume)
+        if v is not None and v > 0.0:
+            return v
+    except Exception:
+        pass
+    try:
+        return float(mesh.convex_hull.volume)
+    except Exception:
+        return 0.0
 
 
 def _fast_watertight(faces):
@@ -553,9 +586,9 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                                 gap=tray_gap, verbose=False,
                                 progress_callback=progress_cb)
                         else:
-                            tray_placed, tray_meshes = packer.pack_stacking(
+                            tray_placed, tray_meshes = packer.pack_stacking_cpp(
                                 max_pieces=min(remaining, max_pieces), cell_size=vox_cell,
-                                verbose=False, progress_callback=progress_cb)
+                                verbose=False, progress_callback=progress_cb, wall_thickness=1.0)
                         if not tray_placed:
                             break
                         # Sparrow may return slightly more than requested
@@ -564,7 +597,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                         if len(tray_placed) > remaining:
                             tray_placed = tray_placed[:remaining]
                             tray_meshes = tray_meshes[:remaining]
-                        if tray_method == "stacking":
+                        if tray_method == "stacking" and not getattr(packer, '_cpp_engine', False):
                             from packer_best import refine_subvoxel, descent_stack_contact
                             tray_refined = refine_subvoxel(
                                 tray_placed, packer._sparrow_voxel_data,
@@ -593,7 +626,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
                         tray_info = {
                             "tray": tray_no,
                             "pieces": len(tray_placed),
-                            "fill_pct": round(sum(m.volume for m in tray_meshes) /
+                            "fill_pct": round(sum(_mesh_fill_volume(m) for m in tray_meshes) /
                                               (box_l * box_w * box_h) * 100, 1),
                             "placements": format_placements(
                                 tray_placed, packer._sparrow_voxel_data),
@@ -726,7 +759,14 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             ok = verify(placed_meshes) if placed_meshes else True
 
             # Build placement data with orientation transforms
-            orients_for_placements = packer._sparrow_voxel_data if method in ("sparrow", "stacking", "compartment", "spectral", "multitray") else orients
+            if method in ("sparrow", "stacking", "compartment", "spectral", "multitray"):
+                # Fall back to the greedy orientation set when the voxel data was
+                # never built (e.g. a part that generated no orientations).
+                orients_for_placements = getattr(packer, '_sparrow_voxel_data', None)
+                if orients_for_placements is None or not orients_for_placements:
+                    orients_for_placements = getattr(packer, 'orientations', None) or []
+            else:
+                orients_for_placements = orients
             placements = format_placements(placed, orients_for_placements)
 
             # Populate every result field BEFORE flipping status to "done" so
@@ -735,7 +775,7 @@ def run_packing_job(job: dict, stl_data: bytes, box_dims: tuple, params: dict):
             if job.get("trays"):
                 job["fill_pct"] = round(sum(t["fill_pct"] for t in job["trays"]) / len(job["trays"]), 1) if job["trays"] else 0
             else:
-                job["fill_pct"] = round(sum(m.volume for m in placed_meshes) /
+                job["fill_pct"] = round(sum(_mesh_fill_volume(m) for m in placed_meshes) /
                                         (box_l * box_w * box_h) * 100, 1) if placed_meshes else 0
             job["time_s"] = round(elapsed, 1)
             job["stl_path"] = str(stl_out) if placed_meshes else ""
@@ -876,7 +916,7 @@ def run_boxes_job(job: dict, stl_data: bytes, boxes: list, params: dict):
                     continue
 
                 box_vol = box_l * box_w * box_h
-                fill_pct = round(sum(m.volume for m in placed_meshes) / box_vol * 100, 1) if box_vol else 0
+                fill_pct = round(sum(_mesh_fill_volume(m) for m in placed_meshes) / box_vol * 100, 1) if box_vol else 0
                 weight_kg = round(pieces * piece_weight, 3)
 
                 freight_total = 0.0
@@ -982,7 +1022,12 @@ def orientations():
         # apply to the original mesh unchanged (decimation preserves the
         # pose).
         n_faces = len(mesh.faces) if hasattr(mesh, "faces") else 0
-        if n_faces > 20000:
+        # The vectorised clustering handles a full-resolution part in seconds,
+        # and the RAW mesh carries the small flat faces that decimation erases
+        # (the user's 103k-triangle housing: 6 resting poses raw vs 4 after a
+        # 10% decimation). Only genuinely huge meshes are still simplified
+        # first, to stay well inside the client's 45s request timeout.
+        if n_faces > 150000:
             # pymeshlab's load_new_mesh accepts only a FILE PATH (not a
             # file-like object — a BytesIO raises and leaves the analysis
             # grinding on the raw 150k-tri mesh for minutes).

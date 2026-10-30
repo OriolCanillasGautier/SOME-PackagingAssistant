@@ -204,7 +204,12 @@ extern "C" int stack_pieces(
     int boxHv = (int)(boxH/cell);
     int step = std::max(1, pair_v - ph_v);
     float step_mm = (float)step * cell;
-    if (g_nest_mm > 0) { step_mm = std::max(0.6f, g_nest_mm); step = std::max(1, (int)std::lround(step_mm/cell)); }
+    if (g_nest_mm > 0) {
+        step_mm = std::max(0.6f, g_nest_mm);
+        // Round UP to whole cells so spacing is NEVER less than the true nest
+        // depth (rounding down made nested pieces interpenetrate ~0.24mm).
+        step = std::max(1, (int)std::ceil(step_mm / cell));
+    }
     int nLayers = std::max(1, 1 + (int)std::floor((boxH - std::floor(ph_v*cell) ) / step_mm));
     if (g_nest_mm > 0) nLayers = std::max(1, 1 + (int)std::floor((boxH - ph_v*cell) / step_mm));
     if (nLayers < 1) nLayers = 1;

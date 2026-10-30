@@ -699,10 +699,17 @@ export function getSupportStability(geometry, epsilon = null) {
     const hz = hullMaxZ - hullMinZ;
     const shapeRatio = Math.min(hx, hz) / Math.max(1e-6, Math.max(hx, hz));
 
-    // The footprint for the area ratio.
-    const extentArea = Math.max(1e-6,
-        (bb.max.x - bb.min.x) * (bb.max.z - bb.min.z));
-    const minSupport = Math.max(1.0, extentArea * 0.3);
+    // The footprint for the area ratio. NOTE: the old rule compared the
+    // contact area against the FULL bbox footprint (`extentArea * 0.08`),
+    // which is scale-dependent — on a 384x284mm housing 8% is 8,700mm², so a
+    // genuine 4,400mm² flat face was labelled "Possible" (every pose of that
+    // part came back non-stable). Compare against the CONTACT HULL's own
+    // footprint instead: a real resting face fills its band hull (ratio ~1,
+    // ~0.79 for a circular face), while an edge or curved-side rest has
+    // almost no downward-projected area (ratio ~0).
+    const hullFootprint = Math.max(1e-6, hx * hz);
+    const contactRatio = supportArea / hullFootprint;
+    const minSupport = Math.max(1.0, hullFootprint * 0.35);
 
     // Centre of mass from the AREA-WEIGHTED triangle centroids — the vertex
     // average is biased by mesh tessellation (a dense fillet would pull the
@@ -742,7 +749,8 @@ export function getSupportStability(geometry, epsilon = null) {
     if (comArea > 0) com.divideScalar(comArea);
 
     const stable = supportArea >= minSupport
-        && shapeRatio >= 0.3
+        && shapeRatio >= 0.15
+        && contactRatio >= 0.35
         && pointInPolygon2D({ x: com.x, z: com.z }, hull);
     return { stable, supportArea, basePointCount: basePoints.length };
 }
